@@ -29,6 +29,7 @@
   .badge { display: inline-block; border-radius: 12px; padding: 2px 8px; font-size: 12px; font-weight: 500; }
   .badge-alive { background: #3fb95022; color: #3fb950; }
   .badge-stale { background: #d2992222; color: #d29922; }
+  .badge-ws { display: inline-block; background: #3fb95033; color: #3fb950; border: 1px solid #3fb95044; border-radius: 4px; padding: 1px 5px; font-size: 10px; font-weight: 600; margin-left: 4px; vertical-align: middle; letter-spacing: 0.3px; }
   .skill-row { border-bottom: 1px solid #161b22; }
   .agent-row { cursor: default; }
   .agent-row:hover { background: #161b22; }
@@ -99,7 +100,7 @@ function renderAgents(data) {
     const id = agent.id;
     const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "_");
     html += `<tr class="agent-row" onclick="toggleDetails('${safeId}')">`;
-    html += `<td><span class="badge ${statusClass}">${agent.status}</span></td>`;
+    html += `<td><span class="badge ${statusClass}">${agent.status}</span>${agent.connection === 'websocket' ? '<span class="badge-ws">WS</span>' : ''}</td>`;
     html += `<td><strong>${agent.name}</strong><br><small style="color:#8b949e">${id}</small></td>`;
     html += `<td>${skillNames}</td>`;
     html += `<td>${tags}</td>`;

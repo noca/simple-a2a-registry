@@ -5,12 +5,11 @@ import asyncio
 import json
 import logging
 import time
-from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from simple_a2a_registry.models import AgentCard, Provider
+from simple_a2a_registry.models import AgentCard
 
 logger = logging.getLogger("a2a_registry.store")
 
@@ -34,7 +33,6 @@ class A2ARegistryStore:
         # In-memory state
         self._agents: Dict[str, AgentCard] = {}
         self._heartbeats: Dict[str, float] = {}
-        self._discovered: Dict[str, AgentCard] = {}
 
         self._load()
 
@@ -58,14 +56,9 @@ class A2ARegistryStore:
                 for aid, ts in data.get("heartbeats", {}).items()
                 if isinstance(ts, (int, float))
             }
-            raw_discovered: Dict[str, Dict] = data.get("discovered", {})
-            self._discovered = {
-                aid: AgentCard.from_dict(card)
-                for aid, card in raw_discovered.items()
-            }
             logger.info(
-                "Loaded %d external + %d discovered agent registrations",
-                len(self._agents), len(self._discovered),
+                "Loaded %d external agent registrations",
+                len(self._agents),
             )
         except Exception as e:
             logger.warning("Failed to load registry data: %s", e)
@@ -76,16 +69,12 @@ class A2ARegistryStore:
             aid: card.to_dict()
             for aid, card in self._agents.items()
         }
-        discovered = {
-            aid: card.to_dict()
-            for aid, card in self._discovered.items()
-        }
         hb = {aid: ts for aid, ts in self._heartbeats.items()}
         try:
             tmp = self._file.with_suffix(".json.tmp")
             tmp.write_text(
                 json.dumps(
-                    {"agents": external, "heartbeats": hb, "discovered": discovered},
+                    {"agents": external, "heartbeats": hb},
                     indent=2,
                     ensure_ascii=False,
                 ),
@@ -94,18 +83,6 @@ class A2ARegistryStore:
             tmp.replace(self._file)
         except Exception as e:
             logger.error("Failed to save registry: %s", e)
-
-    # ------------------------------------------------------------------
-    # Discovered agents (e.g. from filesystem scan)
-    # ------------------------------------------------------------------
-
-    def set_discovered_agents(self, cards: List[Dict[str, Any]]) -> None:
-        """Replace all discovered (filesystem-scanned) agents."""
-        self._discovered = {}
-        for c in cards:
-            card = AgentCard.from_dict(c)
-            self._discovered[card.id] = card
-        self._save()
 
     # ------------------------------------------------------------------
     # Queries
@@ -130,7 +107,6 @@ class A2ARegistryStore:
         now = time.time()
         results: List[Dict[str, Any]] = []
 
-        by_id: Dict[str, Dict] = {}
         for agent_id, card in self._agents.items():
             last_hb = self._heartbeats.get(agent_id)
             elapsed = now - last_hb if last_hb else HEARTBEAT_TIMEOUT + 1
@@ -138,16 +114,7 @@ class A2ARegistryStore:
             card_dict = card.to_dict()
             card_dict["status"] = "alive" if is_alive else "stale"
             card_dict["lastHeartbeat"] = last_hb
-            by_id[agent_id] = card_dict
 
-        for agent_id, card in self._discovered.items():
-            if agent_id not in by_id:
-                card_dict = card.to_dict()
-                card_dict["status"] = "alive"
-                card_dict["lastHeartbeat"] = None
-                by_id[agent_id] = card_dict
-
-        for agent_id, card_dict in by_id.items():
             if skill:
                 skills = card_dict.get("capabilities", {}).get("skills", [])
                 if not any(
@@ -174,7 +141,7 @@ class A2ARegistryStore:
             Agent Card dict with ``status`` and ``lastHeartbeat``,
             or ``None`` if the agent doesn't exist.
         """
-        card = self._agents.get(agent_id) or self._discovered.get(agent_id)
+        card = self._agents.get(agent_id)
         if card is None:
             return None
         last_hb = self._heartbeats.get(agent_id)
@@ -229,16 +196,13 @@ class A2ARegistryStore:
 
     def unregister(self, agent_id: str) -> bool:
         """Remove an agent registration.
-        Discovered agents cannot be unregistered via the API.
 
         Args:
             agent_id: The agent's unique identifier.
 
         Returns:
-            ``True`` if removed, ``False`` if not found or protected.
+            ``True`` if removed, ``False`` if not found.
         """
-        if agent_id in self._discovered:
-            return False
         if agent_id not in self._agents:
             return False
         del self._agents[agent_id]
@@ -275,8 +239,7 @@ class A2ARegistryStore:
         """Return registry statistics.
 
         Returns:
-            Dict with keys: ``totalAgents``, ``aliveAgents``, ``staleAgents``,
-            ``discoveredAgents``, ``externalAgents``.
+            Dict with keys: ``totalAgents``, ``aliveAgents``, ``staleAgents``.
         """
         now = time.time()
         alive = sum(
@@ -286,9 +249,7 @@ class A2ARegistryStore:
             or now - self._heartbeats.get(aid, 0) <= HEARTBEAT_TIMEOUT
         )
         return {
-            "totalAgents": len(self._agents) + len(self._discovered),
-            "aliveAgents": alive + len(self._discovered),
+            "totalAgents": len(self._agents),
+            "aliveAgents": alive,
             "staleAgents": len(self._agents) - alive,
-            "discoveredAgents": len(self._discovered),
-            "externalAgents": len(self._agents),
         }

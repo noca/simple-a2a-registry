@@ -1,8 +1,7 @@
-"""Simple A2A Registry — Agent-to-Agent Discovery Server.
+"""Simple A2A Registry — Agent-to-Agent Registry Server.
 
-A spec-compliant A2A Registry that discovers agent profiles and skills
-as Agent Cards, and accepts external agent registrations with heartbeat-based
-liveness monitoring.
+A spec-compliant A2A Registry that accepts external agent registrations
+with heartbeat-based liveness monitoring and task proxying.
 """
 
 from simple_a2a_registry.models import (
@@ -16,8 +15,6 @@ from simple_a2a_registry.models import (
     make_agent_skill,
 )
 
-from simple_a2a_registry.discovery import discover_profiles
-
 __all__ = [
     "AgentCard",
     "AgentCapabilities",
@@ -27,5 +24,4 @@ __all__ = [
     "Provider",
     "make_agent_card",
     "make_agent_skill",
-    "discover_profiles",
 ]

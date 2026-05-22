@@ -5,6 +5,15 @@ Implements the Google A2A (Agent-to-Agent) protocol:
   POST /tasks/send                   — submit a task (processed by Hermes CLI)
   GET  /tasks/{id}                   — get task status/result
 
+WebSocket integration with the A2A Registry:
+  - Connects to ws://<registry>/v1/agents/{agent_id}/ws on startup
+  - Receives tasks from Registry via WebSocket (type: "task")
+  - Reports progress and results via WebSocket (task_progress / task_result)
+  - Sends "ping" every 30s for keepalive
+  - Auto-reconnects with exponential backoff on disconnect
+
+Also uses HTTP heartbeat as a fallback liveness mechanism.
+
 Registers with the A2A Registry on startup and heartbeats continuously.
 Each task is forwarded to the local Hermes Agent (coder profile) for
 real execution — code writing, debugging, PR management, devops, etc.
@@ -22,9 +31,10 @@ import time
 import subprocess
 from datetime import datetime, timezone
 from enum import Enum
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from aiohttp import web
+from aiohttp import web, ClientSession, WSMsgType, ClientWebSocketResponse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,6 +51,9 @@ AGENT_URL = f"http://localhost:{AGENT_PORT}"
 HEARTBEAT_INTERVAL = 30  # seconds
 HERMES_PROFILE = "coder"
 HERMES_TIMEOUT = 300  # max seconds for a task
+
+# ── WebSocket Registry client config ─────────────────────────────────────
+REGISTRY_WS_URL = f"{REGISTRY_URL.replace('http', 'ws')}/v1/agents"
 
 # ── A2A Agent Card — skills taken from the Hermes Coder profile ───────────
 
@@ -171,6 +184,12 @@ _tasks: Dict[str, A2ATask] = {}
 
 # Active subprocesses for cancellation tracking
 _active_procs: Dict[str, subprocess.Popen] = {}
+
+# ── WebSocket connection state ────────────────────────────────────────────
+_ws_session: Optional[ClientSession] = None
+_ws_connection: Optional[ClientWebSocketResponse] = None
+_ws_agent_id: str = ""
+_ws_close_event = asyncio.Event()
 
 
 # ── Real Hermes CLI task processing ─────────────────────────────────────────
@@ -309,6 +328,114 @@ async def process_task(task: A2ATask) -> None:
         task.error = str(e)[:2000]
         task.updated_at = time.time()
         _active_procs.pop(task.id, None)
+
+
+# ── WebSocket task processing ────────────────────────────────────────────
+
+async def _send_ws_json(msg: Dict[str, Any]) -> bool:
+    """Send a JSON message via the active WebSocket connection. Returns True on success."""
+    global _ws_connection
+    ws = _ws_connection
+    if ws is None or ws.closed:
+        logger.debug("WS not connected, dropping message: %s", msg.get("type"))
+        return False
+    try:
+        await ws.send_json(msg)
+        return True
+    except Exception as e:
+        logger.warning("WS send failed: %s", e)
+        return False
+
+
+async def process_ws_task(task_msg: Dict[str, Any]) -> None:
+    """Process a task received via WebSocket and report results via WS.
+
+    Task message format:
+      {"type":"task","id":"uuid","query":"...","sessionId":"...."}
+    """
+    task_id = task_msg.get("id", "")
+    query = (task_msg.get("query") or "").strip()
+    session_id = task_msg.get("sessionId", "")
+
+    if not task_id or not query:
+        logger.warning("Invalid WS task message: missing id or query: %s", task_msg)
+        return
+
+    # Send progress
+    await _send_ws_json({
+        "type": "task_progress",
+        "id": task_id,
+        "status": "working",
+    })
+
+    # Build and run the task via Hermes CLI
+    cmd = [
+        "hermes", "chat",
+        "-q", query,
+        "--profile", HERMES_PROFILE,
+        "--max-turns", "30",
+        "-Q",
+    ]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _active_procs[task_id] = proc
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=HERMES_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            _active_procs.pop(task_id, None)
+            await _send_ws_json({
+                "type": "task_result",
+                "id": task_id,
+                "status": "failed",
+                "error": f"Task timed out after {HERMES_TIMEOUT}s",
+            })
+            logger.warning("WS task %s timed out", task_id)
+            return
+
+        _active_procs.pop(task_id, None)
+
+        if proc.returncode != 0:
+            stderr_text = stderr.decode("utf-8", errors="replace")[:2000]
+            logger.warning("Hermes exited with code %d for WS task %s", proc.returncode, task_id)
+            await _send_ws_json({
+                "type": "task_result",
+                "id": task_id,
+                "status": "failed",
+                "error": f"Hermes process exited with code {proc.returncode}: {stderr_text}",
+            })
+            return
+
+        # Clean and send result
+        full_output = stdout.decode("utf-8", errors="replace")
+        cleaned = _clean_hermes_output(full_output)
+
+        await _send_ws_json({
+            "type": "task_result",
+            "id": task_id,
+            "status": "completed",
+            "result": {"text": cleaned or "(Hermes returned no output)"},
+        })
+        logger.info("WS task %s completed (output=%d chars)", task_id, len(cleaned))
+
+    except Exception as e:
+        logger.exception("WS task %s failed with exception", task_id)
+        _active_procs.pop(task_id, None)
+        await _send_ws_json({
+            "type": "task_result",
+            "id": task_id,
+            "status": "failed",
+            "error": str(e)[:2000],
+        })
 
 
 # ── HTTP Handlers ───────────────────────────────────────────────────────────
@@ -484,6 +611,125 @@ def heartbeat_loop(agent_id: str) -> None:
             time.sleep(HEARTBEAT_INTERVAL)
 
 
+# ── WebSocket client loop ────────────────────────────────────────────────
+
+async def ws_connect_loop() -> None:
+    """Maintain a persistent WebSocket connection to the Registry.
+
+    - Connects to ws://<registry>/v1/agents/{agent_id}/ws
+    - Listens for 'task' messages and dispatches them to process_ws_task
+    - Sends a 'ping' every 30 seconds
+    - Auto-reconnects with exponential backoff on disconnect
+    """
+    global _ws_session, _ws_connection
+
+    retry_delay = 1.0  # start at 1s, max 60s
+    _ws_session = ClientSession()
+
+    while not _ws_close_event.is_set():
+        agent_id = _ws_agent_id
+        if not agent_id:
+            logger.info("WS: waiting for agent_id to be set...")
+            await asyncio.sleep(2)
+            continue
+
+        ws_url = f"{REGISTRY_WS_URL}/{agent_id}/ws"
+        logger.info("WS: connecting to %s", ws_url)
+
+        try:
+            ws = await _ws_session.ws_connect(
+                ws_url,
+                heartbeat=30.0,  # aiohttp keepalive
+            )
+        except Exception as e:
+            logger.warning("WS: connection failed: %s (retry in %.1fs)", e, retry_delay)
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60.0)
+            continue
+
+        # Connected — reset backoff
+        _ws_connection = ws
+        retry_delay = 1.0
+        logger.info("WS: connected to Registry")
+
+        # Last ping timestamp for our own 30s ping
+        last_ping_time = time.time()
+
+        try:
+            async for msg in ws:
+                if msg.type == WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                    except json.JSONDecodeError:
+                        logger.warning("WS: invalid JSON: %s", msg.data[:200])
+                        continue
+
+                    msg_type = data.get("type", "")
+                    logger.debug("WS: received type=%s id=%s", msg_type, data.get("id", ""))
+
+                    if msg_type == "task":
+                        # Spawn task processing as a fire-and-forget task
+                        asyncio.create_task(process_ws_task(data))
+                    elif msg_type == "ping":
+                        # Respond to server ping (some WS frameworks expect this)
+                        pass
+                    elif msg_type == "close":
+                        logger.info("WS: server requested close")
+                        break
+
+                elif msg.type == WSMsgType.PING:
+                    await ws.pong()
+                elif msg.type == WSMsgType.CLOSED:
+                    logger.info("WS: connection closed by server")
+                    break
+                elif msg.type == WSMsgType.ERROR:
+                    logger.warning("WS: connection error")
+                    break
+
+                # Send our own ping every 30 seconds to keep the connection alive
+                now = time.time()
+                if now - last_ping_time >= 30.0:
+                    try:
+                        await ws.send_json({"type": "ping"})
+                        logger.debug("WS: sent ping")
+                    except Exception:
+                        pass
+                    last_ping_time = now
+
+        except asyncio.CancelledError:
+            logger.info("WS: loop cancelled")
+            break
+        except Exception as e:
+            logger.warning("WS: connection lost: %s (reconnecting in %.1fs)", e, retry_delay)
+        finally:
+            _ws_connection = None
+            if not ws.closed:
+                await ws.close()
+
+        # Reconnect with exponential backoff
+        await asyncio.sleep(retry_delay)
+        retry_delay = min(retry_delay * 2, 60.0)
+
+    # Clean up session on exit
+    await _ws_session.close()
+    _ws_session = None
+
+
+async def ws_shutdown() -> None:
+    """Signal the WS loop to shut down gracefully."""
+    _ws_close_event.set()
+    # Force-close the active connection to unblock the loop
+    global _ws_connection
+    ws = _ws_connection
+    if ws and not ws.closed:
+        try:
+            await ws.send_json({"type": "close"})
+        except Exception:
+            pass
+        await ws.close()
+    _ws_connection = None
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def create_app() -> web.Application:
@@ -502,18 +748,46 @@ def create_app() -> web.Application:
 
 
 def main() -> None:
-    """Entry point: register, start heartbeat, run HTTP server."""
+    """Entry point: register, start heartbeat, run HTTP + WS concurrently."""
     logger.info("Registering with A2A Registry at %s...", REGISTRY_URL)
-    agent_id = register_with_registry()
+    global _ws_agent_id
+    _ws_agent_id = register_with_registry()
 
     import threading
-    hb_thread = threading.Thread(target=heartbeat_loop, args=(agent_id,), daemon=True)
+    hb_thread = threading.Thread(target=heartbeat_loop, args=(_ws_agent_id,), daemon=True)
     hb_thread.start()
     logger.info("Heartbeat thread started (interval=%ss)", HEARTBEAT_INTERVAL)
 
-    app = create_app()
-    logger.info("A2A Coder Agent starting on %s:%s", AGENT_HOST, AGENT_PORT)
-    web.run_app(app, host=AGENT_HOST, port=AGENT_PORT)
+    async def _run() -> None:
+        app = create_app()
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, AGENT_HOST, AGENT_PORT)
+        await site.start()
+        logger.info("A2A Coder Agent HTTP on %s:%s", AGENT_HOST, AGENT_PORT)
+
+        # Start WS loop in background
+        ws_task = asyncio.create_task(ws_connect_loop())
+
+        try:
+            # Sleep forever — Ctrl+C / SIGINT cancels this
+            await asyncio.Event().wait()
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            logger.info("Shutting down...")
+        finally:
+            await ws_shutdown()
+            if ws_task and not ws_task.done():
+                ws_task.cancel()
+                try:
+                    await ws_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            await runner.cleanup()
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        logger.info("A2A Coder Agent stopped")
 
 
 if __name__ == "__main__":

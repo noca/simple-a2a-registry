@@ -1,9 +1,8 @@
-"""
-CLI entry point for the Simple A2A Registry.
+"""CLI entry point for the Simple A2A Registry.
 
 Usage:
-    a2a-registry [--host HOST] [--port PORT] [--data-dir DIR] [--profiles-dir DIR]
-    python -m simple_a2a_registry [--host HOST] [--port PORT] [--data-dir DIR] [--profiles-dir DIR]
+    a2a-registry [--host HOST] [--port PORT] [--data-dir DIR]
+    python -m simple_a2a_registry [--host HOST] [--port PORT] [--data-dir DIR]
 """
 from __future__ import annotations
 
@@ -37,11 +36,6 @@ def main(argv: list[str] | None = None) -> None:
         help="Persistent data directory (default: ~/.simple-a2a-registry)",
     )
     parser.add_argument(
-        "--profiles-dir",
-        default=None,
-        help="Profiles directory for local agent discovery (optional)",
-    )
-    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -65,16 +59,10 @@ def main(argv: list[str] | None = None) -> None:
         datefmt="%H:%M:%S",
     )
 
-    app = create_app(
-        data_dir=args.data_dir,
-        profiles_home=args.profiles_dir,
-    )
     logger.info(
         "Simple A2A Registry starting on %s:%s (data: %s)",
         args.host, args.port, args.data_dir,
     )
-    if args.profiles_dir:
-        logger.info("Profiles directory for discovery: %s", args.profiles_dir)
 
     run_server(args.host, args.port, args.data_dir)
 

@@ -13,9 +13,8 @@ def test_empty_stats() -> None:
         store = A2ARegistryStore(tmpdir)
         s = store.stats()
         assert s["totalAgents"] == 0
-        assert s["discoveredAgents"] == 0
-        assert s["externalAgents"] == 0
         assert s["aliveAgents"] == 0
+        assert s["staleAgents"] == 0
 
 
 def test_register_and_get() -> None:
@@ -94,20 +93,6 @@ def test_heartbeat() -> None:
         assert store.heartbeat("nonexistent") is False
 
 
-def test_discovered_agents() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        store = A2ARegistryStore(tmpdir)
-        store.set_discovered_agents([
-            {"id": "a2a:test", "name": "Test Profile"},
-        ])
-        s = store.stats()
-        assert s["discoveredAgents"] == 1
-        assert s["totalAgents"] == 1
-
-        # Discovered agents cannot be unregistered via the API
-        assert store.unregister("a2a:test") is False
-
-
 def test_unregister() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         store = A2ARegistryStore(tmpdir)
@@ -115,15 +100,6 @@ def test_unregister() -> None:
         assert store.unregister(aid) is True
         assert store.get_agent(aid) is None
         assert store.unregister("nonexistent") is False
-
-
-def test_unregister_protected() -> None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        store = A2ARegistryStore(tmpdir)
-        store.set_discovered_agents([
-            {"id": "a2a:protected", "name": "Protected"},
-        ])
-        assert store.unregister("a2a:protected") is False
 
 
 def test_purge_stale() -> None:
@@ -141,15 +117,10 @@ def test_stats_counts() -> None:
         store = A2ARegistryStore(tmpdir)
         store.register_agent({"name": "E1"})
         store.register_agent({"name": "E2"})
-        store.set_discovered_agents([
-            {"id": "a2a:h1", "name": "H1"},
-            {"id": "a2a:h2", "name": "H2"},
-            {"id": "a2a:h3", "name": "H3"},
-        ])
         s = store.stats()
-        assert s["totalAgents"] == 5
-        assert s["discoveredAgents"] == 3
-        assert s["externalAgents"] == 2
+        assert s["totalAgents"] == 2
+        assert s["aliveAgents"] == 2
+        assert s["staleAgents"] == 0
 
 
 def test_registered_at_metadata() -> None:
@@ -175,7 +146,7 @@ def test_persistence() -> None:
             await asyncio.sleep(0.05)
 
             store2 = A2ARegistryStore(tmpdir)
-            assert store2.stats()["externalAgents"] == 1
+            assert store2.stats()["totalAgents"] == 1
             card = store2.get_agent(aid)
             assert card is not None
             assert card["name"] == "Persistent"
