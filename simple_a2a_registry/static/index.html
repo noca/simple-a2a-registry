@@ -248,7 +248,7 @@ function renderTasks(data) {
     html += `<div class="detail-section"><h3>Task ID</h3><code>${escHtml(tid)}</code></div>`;
     html += `<div class="detail-section"><h3>Agent ID</h3><code>${escHtml(task.agent_id || "")}</code></div>`;
     if (task.result && Object.keys(task.result).length > 0) {
-      html += `<div class="detail-section"><h3>Result</h3><pre>${escHtml(JSON.stringify(task.result, null, 2))}</pre></div>`;
+      html += `<div class="detail-section"><h3>Result</h3>${renderTaskResult(task.result)}</div>`;
     }
     if (task.error) {
       html += `<div class="detail-section"><h3>Error</h3><pre style="color:#f85149">${escHtml(task.error)}</pre></div>`;
@@ -268,6 +268,25 @@ function renderTasks(data) {
 function escHtml(s) {
   if (typeof s !== 'string') return String(s);
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderTaskResult(result) {
+  // If result has a simple 'text' field, show it prominently
+  if (result.text && typeof result.text === 'string' && Object.keys(result).length === 1) {
+    return `<pre style="white-space: pre-wrap; word-break: break-word; background:#161b22; border:1px solid #21262d; border-radius:6px; padding:12px; font-size:13px; line-height:1.5; max-height:300px; overflow-y:auto;">${escHtml(result.text)}</pre>`;
+  }
+  // If result has 'text' plus other keys, show text first then the rest as JSON
+  if (result.text && typeof result.text === 'string') {
+    let html = `<div style="margin-bottom:8px; background:#161b22; border:1px solid #21262d; border-radius:6px; padding:12px; max-height:300px; overflow-y:auto;"><pre style="white-space: pre-wrap; word-break: break-word; font-size:13px; line-height:1.5; margin:0;">${escHtml(result.text)}</pre></div>`;
+    const rest = {...result};
+    delete rest.text;
+    if (Object.keys(rest).length > 0) {
+      html += `<details style="margin-top:4px;"><summary style="color:#8b949e; cursor:pointer; font-size:12px; user-select:none;">Raw metadata</summary><pre style="margin-top:8px; background:#0d1117; border:1px solid #21262d; border-radius:6px; padding:8px; font-size:12px; overflow-x:auto;">${escHtml(JSON.stringify(rest, null, 2))}</pre></details>`;
+    }
+    return html;
+  }
+  // Generic: show as formatted JSON
+  return `<pre style="background:#161b22; border:1px solid #21262d; border-radius:6px; padding:12px; font-size:13px; overflow-x:auto; max-height:300px; overflow-y:auto;">${escHtml(JSON.stringify(result, null, 2))}</pre>`;
 }
 
 // ======================== STATS ========================
