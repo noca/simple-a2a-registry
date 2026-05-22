@@ -20,8 +20,6 @@ import urllib.parse
 from urllib.error import HTTPError
 import time
 import subprocess
-import shlex
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -43,9 +41,6 @@ AGENT_URL = f"http://localhost:{AGENT_PORT}"
 HEARTBEAT_INTERVAL = 30  # seconds
 HERMES_PROFILE = "coder"
 HERMES_TIMEOUT = 300  # max seconds for a task
-
-# Where hermes lives
-_HERMES_BIN = shlex.quote("/home/xiaoyunpeng/.local/bin/hermes")
 
 # ── A2A Agent Card — skills taken from the Hermes Coder profile ───────────
 
@@ -245,7 +240,6 @@ async def process_task(task: A2ATask) -> None:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd="/home/xiaoyunpeng",
         )
         _active_procs[task.id] = proc
 
