@@ -14,12 +14,21 @@
   .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
   .stat-label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
   .value { font-size: 32px; font-weight: 700; line-height: 1.2; }
-  .stat-card.total   .value { color: #f0f6fc; }
-  .stat-card.alive   .value { color: #3fb950; }
-  .stat-card.stale   .value { color: #d29922; }
+  .stat-card.total     .value { color: #f0f6fc; }
+  .stat-card.alive     .value { color: #3fb950; }
+  .stat-card.stale     .value { color: #d29922; }
+  .stat-card.tasks     .value { color: #58a6ff; }
+  .tabs { display: flex; gap: 0; margin-bottom: 0; border-bottom: 1px solid #30363d; }
+  .tabs button { background: transparent; border: none; color: #8b949e; padding: 10px 20px; cursor: pointer; font-size: 14px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tabs button:hover { color: #c9d1d9; }
+  .tabs button.active { color: #f0f6fc; border-bottom-color: #f0f6fc; }
+  .tab-content { display: none; margin-top: 16px; }
+  .tab-content.active { display: block; }
   .filter-bar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-  .filter-bar input { flex: 1; min-width: 200px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; color: #c9d1d9; font-size: 14px; }
+  .filter-bar input, .filter-bar select { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; color: #c9d1d9; font-size: 14px; }
+  .filter-bar input { flex: 1; min-width: 200px; }
   .filter-bar input::placeholder { color: #484f58; }
+  .filter-bar select { min-width: 120px; }
   .filter-bar button { background: #21262d; border: 1px solid #30363d; border-radius: 6px; padding: 8px 16px; color: #c9d1d9; cursor: pointer; }
   .filter-bar button:hover { background: #30363d; }
   table { width: 100%; border-collapse: collapse; }
@@ -29,6 +38,11 @@
   .badge { display: inline-block; border-radius: 12px; padding: 2px 8px; font-size: 12px; font-weight: 500; }
   .badge-alive { background: #3fb95022; color: #3fb950; }
   .badge-stale { background: #d2992222; color: #d29922; }
+  .badge-dispatched  { background: #58a6ff22; color: #58a6ff; }
+  .badge-forwarded   { background: #d2992222; color: #d29922; }
+  .badge-working     { background: #3fb95022; color: #3fb950; }
+  .badge-completed   { background: #3fb95033; color: #3fb950; }
+  .badge-failed      { background: #f8514922; color: #f85149; }
   .badge-ws { display: inline-block; background: #3fb95033; color: #3fb950; border: 1px solid #3fb95044; border-radius: 4px; padding: 1px 5px; font-size: 10px; font-weight: 600; margin-left: 4px; vertical-align: middle; letter-spacing: 0.3px; }
   .skill-row { border-bottom: 1px solid #161b22; }
   .agent-row { cursor: default; }
@@ -41,32 +55,85 @@
   .skill-card { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; margin-bottom: 6px; }
   .skill-card .name { font-weight: 500; }
   .skill-card .desc { font-size: 12px; color: #8b949e; }
+  .task-row { cursor: default; }
+  .task-row:hover { background: #161b22; }
+  .task-details { display: none; }
+  .task-details.open { display: table-row; }
+  .task-details td { background: #0d1117; padding: 16px 24px; }
+  .task-query { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; font-family: monospace; font-size: 13px; margin-bottom: 8px; }
+  .task-result pre { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; font-size: 13px; overflow-x: auto; max-height: 200px; }
   .loading { text-align: center; padding: 48px; color: #8b949e; }
   .error { text-align: center; padding: 48px; color: #f85149; }
+  code { font-size: 12px; color: #8b949e; word-break: break-all; }
 </style>
 </head>
 <body>
 <div class="container">
   <h1>A2A Registry <small>Agent-to-Agent Dashboard</small></h1>
   <div class="stats" id="stats"></div>
-  <div class="filter-bar">
-    <input type="text" id="search" placeholder="Search agents..." oninput="debouncedSearch()">
-    <button onclick="fetchAgents()">Refresh</button>
+  <div class="tabs">
+    <button id="tab-agents" class="active" onclick="switchTab('agents')">Agents</button>
+    <button id="tab-tasks" onclick="switchTab('tasks')">Tasks</button>
   </div>
-  <div id="agent-list"><div class="loading">Loading agents...</div></div>
+
+  <!-- Agents tab -->
+  <div id="content-agents" class="tab-content active">
+    <div class="filter-bar">
+      <input type="text" id="search" placeholder="Search agents..." oninput="debouncedSearch()">
+      <button onclick="fetchAgents()">Refresh</button>
+    </div>
+    <div id="agent-list"><div class="loading">Loading agents...</div></div>
+  </div>
+
+  <!-- Tasks tab -->
+  <div id="content-tasks" class="tab-content">
+    <div class="filter-bar">
+      <input type="text" id="task-search" placeholder="Filter by agent ID..." oninput="debouncedTaskSearch()">
+      <select id="task-state-filter" onchange="fetchTasks()">
+        <option value="">All States</option>
+        <option value="dispatched">dispatched</option>
+        <option value="forwarded">forwarded</option>
+        <option value="working">working</option>
+        <option value="completed">completed</option>
+        <option value="failed">failed</option>
+      </select>
+      <button onclick="fetchTasks()">Refresh</button>
+    </div>
+    <div id="task-list"><div class="loading">No tasks yet.</div></div>
+  </div>
 </div>
 <script>
 const API = "";
 let searchTimeout = null;
+let taskSearchTimeout = null;
+
 function debouncedSearch() {
   clearTimeout(searchTimeout);
   searchTimeout = setTimeout(fetchAgents, 300);
 }
+function debouncedTaskSearch() {
+  clearTimeout(taskSearchTimeout);
+  taskSearchTimeout = setTimeout(fetchTasks, 300);
+}
+
 async function fetchData(url) {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(resp.statusText);
   return resp.json();
 }
+
+function switchTab(name) {
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById(`tab-${name}`).classList.add('active');
+  document.getElementById(`content-${name}`).classList.add('active');
+  if (name === 'tasks' && !document.getElementById('task-list').querySelector('table')) {
+    fetchTasks();
+  }
+}
+
+// ======================== AGENTS ========================
+
 async function fetchAgents() {
   const container = document.getElementById("agent-list");
   container.innerHTML = '<div class="loading">Loading agents...</div>';
@@ -80,10 +147,12 @@ async function fetchAgents() {
     container.innerHTML = `<div class="error">Failed to load agents: ${e.message}</div>`;
   }
 }
-function toggleDetails(id) {
-  const row = document.getElementById(`details-${id}`);
+
+function toggleAgentDetails(id) {
+  const row = document.getElementById(`agent-details-${id}`);
   if (row) row.classList.toggle("open");
 }
+
 function renderAgents(data) {
   const container = document.getElementById("agent-list");
   if (!data.agents || data.agents.length === 0) {
@@ -99,13 +168,13 @@ function renderAgents(data) {
     const hb = agent.lastHeartbeat ? new Date(agent.lastHeartbeat * 1000).toLocaleString() : "-";
     const id = agent.id;
     const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "_");
-    html += `<tr class="agent-row" onclick="toggleDetails('${safeId}')">`;
+    html += `<tr class="agent-row" onclick="toggleAgentDetails('${safeId}')">`;
     html += `<td><span class="badge ${statusClass}">${agent.status}</span>${agent.connection === 'websocket' ? '<span class="badge-ws">WS</span>' : ''}</td>`;
     html += `<td><strong>${agent.name}</strong><br><small style="color:#8b949e">${id}</small></td>`;
     html += `<td>${skillNames}</td>`;
     html += `<td>${tags}</td>`;
     html += `<td>${hb}</td></tr>`;
-    html += `<tr id="details-${safeId}" class="agent-details"><td colspan="5">`;
+    html += `<tr id="agent-details-${safeId}" class="agent-details"><td colspan="5">`;
     html += `<div class="detail-section"><h3>Description</h3><p>${agent.description || "-"}</p></div>`;
     if (agent.url) html += `<div class="detail-section"><h3>URL</h3><p>${agent.url}</p></div>`;
     if (skills.length > 0) {
@@ -124,19 +193,104 @@ function renderAgents(data) {
   }
   container.innerHTML = html;
 }
+
+// ======================== TASKS ========================
+
+async function fetchTasks() {
+  const container = document.getElementById("task-list");
+  container.innerHTML = '<div class="loading">Loading tasks...</div>';
+  try {
+    const q = document.getElementById("task-search").value.trim();
+    const state = document.getElementById("task-state-filter").value;
+    let url = `${API}/v1/tasks`;
+    const params = [];
+    if (q) params.push(`agent_id=${encodeURIComponent(q)}`);
+    if (state) params.push(`state=${encodeURIComponent(state)}`);
+    if (params.length) url += '?' + params.join('&');
+    const data = await fetchData(url);
+    renderTasks(data);
+    updateStats();
+  } catch (e) {
+    container.innerHTML = `<div class="error">Failed to load tasks: ${e.message}</div>`;
+  }
+}
+
+function toggleTaskDetails(id) {
+  const row = document.getElementById(`task-details-${id}`);
+  if (row) row.classList.toggle("open");
+}
+
+function renderTasks(data) {
+  const container = document.getElementById("task-list");
+  if (!data.tasks || data.tasks.length === 0) {
+    container.innerHTML = '<div class="loading">No tasks yet.</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>State</th><th>Query</th><th>Agent</th><th>Created</th><th>Updated</th></tr></thead><tbody>';
+  for (const task of data.tasks) {
+    const state = task.state || "unknown";
+    const stateClass = `badge-${state}`;
+    const created = task.created_at ? new Date(task.created_at * 1000).toLocaleString() : "-";
+    const updated = task.updated_at ? new Date(task.updated_at * 1000).toLocaleString() : "-";
+    const tid = task.id || "";
+    const safeTid = tid.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const queryPreview = (task.query || "").length > 60 ? (task.query || "").substring(0, 57) + "..." : (task.query || "-");
+    html += `<tr class="task-row" onclick="toggleTaskDetails('${safeTid}')">`;
+    html += `<td><span class="badge ${stateClass}">${state}</span></td>`;
+    html += `<td>${escHtml(queryPreview)}</td>`;
+    html += `<td><code>${(task.agent_id || "").substring(0, 12)}...</code></td>`;
+    html += `<td>${created}</td>`;
+    html += `<td>${updated}</td></tr>`;
+    html += `<tr id="task-details-${safeTid}" class="task-details"><td colspan="5">`;
+    if (task.query) {
+      html += `<div class="detail-section"><h3>Query</h3><div class="task-query">${escHtml(task.query)}</div></div>`;
+    }
+    html += `<div class="detail-section"><h3>Task ID</h3><code>${escHtml(tid)}</code></div>`;
+    html += `<div class="detail-section"><h3>Agent ID</h3><code>${escHtml(task.agent_id || "")}</code></div>`;
+    if (task.result && Object.keys(task.result).length > 0) {
+      html += `<div class="detail-section"><h3>Result</h3><pre>${escHtml(JSON.stringify(task.result, null, 2))}</pre></div>`;
+    }
+    if (task.error) {
+      html += `<div class="detail-section"><h3>Error</h3><pre style="color:#f85149">${escHtml(task.error)}</pre></div>`;
+    }
+    if (task.session_id) {
+      html += `<div class="detail-section"><h3>Session ID</h3><code>${escHtml(task.session_id)}</code></div>`;
+    }
+    html += `</td></tr>`;
+  }
+  html += '</tbody></table>';
+  if (data.total > data.tasks.length) {
+    html += `<p style="color:#8b949e; margin-top: 8px;">Showing ${data.tasks.length} of ${data.total} tasks</p>`;
+  }
+  container.innerHTML = html;
+}
+
+function escHtml(s) {
+  if (typeof s !== 'string') return String(s);
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ======================== STATS ========================
+
 async function updateStats() {
   try {
-    const health = await fetchData(`${API}/health`);
+    const [health, tasks] = await Promise.all([
+      fetchData(`${API}/health`),
+      fetchData(`${API}/v1/tasks?limit=0`),
+    ]);
     const s = health.stats;
     document.getElementById("stats").innerHTML = `
       <div class="stat-card total"><div class="stat-label">Total Agents</div><div class="value">${s.total_agents}</div></div>
       <div class="stat-card alive"><div class="stat-label">Alive</div><div class="value">${s.alive_agents}</div></div>
       <div class="stat-card stale"><div class="stat-label">Stale</div><div class="value">${s.stale_agents}</div></div>
+      <div class="stat-card tasks"><div class="stat-label">Tasks</div><div class="value">${tasks.total}</div></div>
     `;
   } catch (e) {
     document.getElementById("stats").innerHTML = `<div class="stat-card total"><div class="stat-label">Total Agents</div><div class="value">?</div></div>`;
   }
 }
+
+// Init
 fetchAgents();
 setInterval(fetchAgents, 15000);
 </script>

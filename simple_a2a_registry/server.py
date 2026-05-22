@@ -453,6 +453,49 @@ class RegistryHandler:
                                f"Task '{task_id}' not found")
         return web.json_response(task)
 
+    async def handle_list_tasks(self, request: web.Request) -> web.Response:
+        """GET /v1/tasks — list all tasks with optional filters.
+
+        Query params:
+            agent_id: filter by agent ID (partial match)
+            state: filter by state (dispatched, forwarded, working, completed, failed)
+            limit: max results (default 50, max 200)
+            offset: pagination offset (default 0)
+        """
+        try:
+            limit = min(int(request.query.get("limit", 50)), 200)
+        except (ValueError, TypeError):
+            limit = 50
+        try:
+            offset = max(int(request.query.get("offset", 0)), 0)
+        except (ValueError, TypeError):
+            offset = 0
+
+        agent_filter = request.query.get("agent_id", "").strip()
+        state_filter = request.query.get("state", "").strip()
+
+        all_tasks = list(self._tasks.values())
+        # Sort newest first
+        all_tasks.sort(key=lambda t: t.get("created_at", 0), reverse=True)
+
+        # Apply filters
+        if agent_filter:
+            af = agent_filter.lower()
+            all_tasks = [t for t in all_tasks if af in t.get("agent_id", "").lower()]
+        if state_filter:
+            sf = state_filter.lower()
+            all_tasks = [t for t in all_tasks if t.get("state", "").lower() == sf]
+
+        total = len(all_tasks)
+        page = all_tasks[offset:offset + limit]
+
+        return web.json_response({
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "tasks": page,
+        })
+
     # ------------------------------------------------------------------
     # Task proxy — forward tasks to agent by its URL
     # ------------------------------------------------------------------
@@ -555,6 +598,9 @@ def create_app(
     # Task dispatch (via WS)
     app.router.add_post(
         "/v1/agents/{agent_id}/dispatch", handler.handle_dispatch
+    )
+    app.router.add_get(
+        "/v1/tasks", handler.handle_list_tasks
     )
     app.router.add_get(
         "/v1/tasks/{task_id}", handler.handle_get_task
