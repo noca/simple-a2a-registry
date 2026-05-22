@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A2A Registry Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0d1117; color: #c9d1d9; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 24px; font-weight: 600; margin-bottom: 24px; }
+  h1 small { font-size: 14px; font-weight: 400; color: #8b949e; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+  .stat-label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .value { font-size: 32px; font-weight: 700; line-height: 1.2; }
+  .stat-card.total   .value { color: #f0f6fc; }
+  .stat-card.alive   .value { color: #3fb950; }
+  .stat-card.stale   .value { color: #d29922; }
+  .filter-bar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .filter-bar input { flex: 1; min-width: 200px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; color: #c9d1d9; font-size: 14px; }
+  .filter-bar input::placeholder { color: #484f58; }
+  .filter-bar button { background: #21262d; border: 1px solid #30363d; border-radius: 6px; padding: 8px 16px; color: #c9d1d9; cursor: pointer; }
+  .filter-bar button:hover { background: #30363d; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; padding: 8px 12px; font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #21262d; }
+  td { padding: 12px; border-bottom: 1px solid #21262d; font-size: 14px; }
+  .tag { display: inline-block; background: #1f6feb33; color: #58a6ff; border-radius: 12px; padding: 2px 8px; font-size: 12px; margin: 1px; }
+  .badge { display: inline-block; border-radius: 12px; padding: 2px 8px; font-size: 12px; font-weight: 500; }
+  .badge-alive { background: #3fb95022; color: #3fb950; }
+  .badge-stale { background: #d2992222; color: #d29922; }
+  .skill-row { border-bottom: 1px solid #161b22; }
+  .agent-row { cursor: default; }
+  .agent-row:hover { background: #161b22; }
+  .agent-details { display: none; }
+  .agent-details.open { display: table-row; }
+  .agent-details td { background: #0d1117; padding: 16px 24px; }
+  .detail-section { margin-bottom: 12px; }
+  .detail-section h3 { font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 6px; }
+  .skill-card { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; margin-bottom: 6px; }
+  .skill-card .name { font-weight: 500; }
+  .skill-card .desc { font-size: 12px; color: #8b949e; }
+  .loading { text-align: center; padding: 48px; color: #8b949e; }
+  .error { text-align: center; padding: 48px; color: #f85149; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>A2A Registry <small>Agent-to-Agent Dashboard</small></h1>
+  <div class="stats" id="stats"></div>
+  <div class="filter-bar">
+    <input type="text" id="search" placeholder="Search agents..." oninput="debouncedSearch()">
+    <button onclick="fetchAgents()">Refresh</button>
+  </div>
+  <div id="agent-list"><div class="loading">Loading agents...</div></div>
+</div>
+<script>
+const API = "";
+let searchTimeout = null;
+function debouncedSearch() {
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(fetchAgents, 300);
+}
+async function fetchData(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(resp.statusText);
+  return resp.json();
+}
+async function fetchAgents() {
+  const container = document.getElementById("agent-list");
+  container.innerHTML = '<div class="loading">Loading agents...</div>';
+  try {
+    const q = document.getElementById("search").value.trim();
+    const url = q ? `${API}/v1/agents?q=${encodeURIComponent(q)}` : `${API}/v1/agents`;
+    const data = await fetchData(url);
+    renderAgents(data);
+    updateStats();
+  } catch (e) {
+    container.innerHTML = `<div class="error">Failed to load agents: ${e.message}</div>`;
+  }
+}
+function toggleDetails(id) {
+  const row = document.getElementById(`details-${id}`);
+  if (row) row.classList.toggle("open");
+}
+function renderAgents(data) {
+  const container = document.getElementById("agent-list");
+  if (!data.agents || data.agents.length === 0) {
+    container.innerHTML = '<div class="loading">No agents registered yet.</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Status</th><th>Name</th><th>Skills</th><th>Tags</th><th>Last Heartbeat</th></tr></thead><tbody>';
+  for (const agent of data.agents) {
+    const statusClass = agent.status === "alive" ? "badge-alive" : "badge-stale";
+    const skills = (agent.capabilities?.skills || []).slice(0, 3);
+    const skillNames = skills.map(s => s.name).join(", ") || "-";
+    const tags = (agent.tags || []).map(t => `<span class="tag">${t}</span>`).join("") || "-";
+    const hb = agent.lastHeartbeat ? new Date(agent.lastHeartbeat * 1000).toLocaleString() : "-";
+    const id = agent.id;
+    const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "_");
+    html += `<tr class="agent-row" onclick="toggleDetails('${safeId}')">`;
+    html += `<td><span class="badge ${statusClass}">${agent.status}</span></td>`;
+    html += `<td><strong>${agent.name}</strong><br><small style="color:#8b949e">${id}</small></td>`;
+    html += `<td>${skillNames}</td>`;
+    html += `<td>${tags}</td>`;
+    html += `<td>${hb}</td></tr>`;
+    html += `<tr id="details-${safeId}" class="agent-details"><td colspan="5">`;
+    html += `<div class="detail-section"><h3>Description</h3><p>${agent.description || "-"}</p></div>`;
+    if (agent.url) html += `<div class="detail-section"><h3>URL</h3><p>${agent.url}</p></div>`;
+    if (skills.length > 0) {
+      html += `<div class="detail-section"><h3>Skills</h3>`;
+      for (const sk of agent.capabilities.skills) {
+        html += `<div class="skill-card"><span class="name">${sk.name}</span> <span class="desc">${sk.description || ""}</span></div>`;
+      }
+      html += `</div>`;
+    }
+    html += `<div class="detail-section"><h3>ID</h3><code>${agent.id}</code></div>`;
+    html += `</td></tr>`;
+  }
+  html += '</tbody></table>';
+  if (data.total > data.agents.length) {
+    html += `<p style="color:#8b949e; margin-top: 8px;">Showing ${data.agents.length} of ${data.total} agents</p>`;
+  }
+  container.innerHTML = html;
+}
+async function updateStats() {
+  try {
+    const health = await fetchData(`${API}/health`);
+    const s = health.stats;
+    document.getElementById("stats").innerHTML = `
+      <div class="stat-card total"><div class="stat-label">Total Agents</div><div class="value">${s.total_agents}</div></div>
+      <div class="stat-card alive"><div class="stat-label">Alive</div><div class="value">${s.alive_agents}</div></div>
+      <div class="stat-card stale"><div class="stat-label">Stale</div><div class="value">${s.stale_agents}</div></div>
+    `;
+  } catch (e) {
+    document.getElementById("stats").innerHTML = `<div class="stat-card total"><div class="stat-label">Total Agents</div><div class="value">?</div></div>`;
+  }
+}
+fetchAgents();
+setInterval(fetchAgents, 15000);
+</script>
+</body>
+</html>

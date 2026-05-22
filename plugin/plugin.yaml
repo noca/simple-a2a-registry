@@ -1,0 +1,8 @@
+name: a2a-registry
+version: 1.0.0
+description: "Simple A2A Registry — Agent-to-Agent 注册中心服务。启动 REST API 服务器，支持 Agent 注册、心跳保活、本地发现和搜索。子命令：`a2a-registry [--host HOST] [--port PORT] [--data-dir DIR]`"
+author: NousResearch
+kind: standalone
+provides_tools:
+  - a2a-registry
+hooks: []
