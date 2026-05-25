@@ -10,3 +10,9 @@ venv/
 .DS_Store
 *.swp
 *.swo
+.hermes/
+:memory:
+*.db
+*.db-wal
+*.db-shm
+data/

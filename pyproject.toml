@@ -27,6 +27,9 @@ include = ["simple_a2a_registry*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (long-running soak tests, >1 min)",
+]
 
 [tool.coverage.run]
 source = ["simple_a2a_registry"]

@@ -20,6 +20,7 @@ real execution — code writing, debugging, PR management, devops, etc.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
@@ -27,19 +28,17 @@ import uuid
 import urllib.request
 import urllib.parse
 from urllib.error import HTTPError
+import os
 import time
 import subprocess
 from datetime import datetime, timezone
 from enum import Enum
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from aiohttp import web, ClientSession, WSMsgType, ClientWebSocketResponse
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(message)s",
-)
 logger = logging.getLogger("a2a.coder-agent")
 
 # ── Configuration ──────────────────────────────────────────────────────────
@@ -189,8 +188,6 @@ _active_procs: Dict[str, subprocess.Popen] = {}
 _ws_session: Optional[ClientSession] = None
 _ws_connection: Optional[ClientWebSocketResponse] = None
 _ws_agent_id: str = ""
-_ws_close_event = asyncio.Event()
-
 
 # ── Real Hermes CLI task processing ─────────────────────────────────────────
 
@@ -350,12 +347,22 @@ async def _send_ws_json(msg: Dict[str, Any]) -> bool:
 async def process_ws_task(task_msg: Dict[str, Any]) -> None:
     """Process a task received via WebSocket and report results via WS.
 
-    Task message format:
-      {"type":"task","id":"uuid","query":"...","sessionId":"...."}
+    Supports two message formats:
+
+    **A2A-style (direct query)** — ``tasks/send`` endpoint:
+      {"type":"task","id":"uuid","query":"...","sessionId":"..."}
+
+    **Kanban-style (dispatcher)** — Kaban V2 orchestration dispatch:
+      {"type":"task","id":"uuid","title":"say hello","body":"...",
+       "assignee":"...","workspace_path":"","kanban":true}
     """
     task_id = task_msg.get("id", "")
-    query = (task_msg.get("query") or "").strip()
+    # Kanban tasks → body; A2A tasks → query
+    query = (
+        task_msg.get("body") or task_msg.get("query") or task_msg.get("title") or ""
+    ).strip()
     session_id = task_msg.get("sessionId", "")
+    workspace_path = task_msg.get("workspace_path", "")
 
     if not task_id or not query:
         logger.warning("Invalid WS task message: missing id or query: %s", task_msg)
@@ -611,29 +618,163 @@ def heartbeat_loop(agent_id: str) -> None:
             time.sleep(HEARTBEAT_INTERVAL)
 
 
+async def _ensure_registered() -> str:
+    """(Re-)register with the registry. Returns the agent_id.
+
+    Safe to call repeatedly — handles 409 (already registered) gracefully.
+    Also handles the case where the registry has restarted and our previous
+    registration was lost.
+
+    Uses _ws_session (aiohttp) for async HTTP — avoids blocking the event loop.
+    Falls back to urllib if _ws_session is None (e.g. startup).
+    """
+    global _ws_agent_id, _ws_session
+
+    card = build_agent_card()
+    payload = {
+        "name": card["name"],
+        "description": card["description"],
+        "url": card["url"],
+        "tags": card["tags"],
+        "capabilities": card["capabilities"],
+    }
+
+    logger.debug("_ensure_registered: ws_session=%s, agent_id=%s", _ws_session, _ws_agent_id)
+
+    # First try a lightweight check: does our agent_id still exist?
+    if _ws_agent_id and _ws_session is not None:
+        try:
+            logger.debug("_ensure_registered: checking if agent '%s' still exists...", _ws_agent_id)
+            async with _ws_session.get(
+                f"{REGISTRY_URL}/v1/agents/{_ws_agent_id}"
+            ) as resp:
+                logger.debug("_ensure_registered: GET /v1/agents/%s -> status=%s", _ws_agent_id, resp.status)
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("id"):
+                        logger.debug("Agent '%s' still registered, skipping re-register", _ws_agent_id)
+                        return _ws_agent_id  # still registered
+                elif resp.status != 404:
+                    logger.debug("Agent check returned %s — will re-register", resp.status)
+        except Exception as e:
+            logger.warning("_ensure_registered: agent check failed: %s: %s", type(e).__name__, e)
+
+    # Register fresh
+    logger.debug("_ensure_registered: registering fresh...")
+    try:
+        if _ws_session is not None:
+            async with _ws_session.post(
+                f"{REGISTRY_URL}/v1/agents",
+                json=payload,
+            ) as resp:
+                if resp.status == 200 or resp.status == 201:
+                    data = await resp.json()
+                    logger.info("(Re-)registered with A2A Registry as '%s'", data["id"])
+                    return data["id"]
+                elif resp.status == 409:
+                    # Already registered — search by name
+                    async with _ws_session.get(
+                        f"{REGISTRY_URL}/v1/agents?q={urllib.parse.quote(card['name'])}"
+                    ) as search_resp:
+                        agents = (await search_resp.json())["agents"]
+                        if agents:
+                            aid = agents[0]["id"]
+                            logger.info("Agent already registered as '%s'", aid)
+                            return aid
+                        return "a2a:coder-agent"
+                else:
+                    body = await resp.text()
+                    raise RuntimeError(f"Registry registration failed ({resp.status}): {body}")
+        else:
+            # Fallback: synchronous urllib if session not ready
+            return _ensure_registered_sync(card, payload)
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"Registry registration failed: {e}") from e
+
+
+def _ensure_registered_sync(card: Dict[str, Any], payload: Dict[str, Any]) -> str:
+    """Synchronous fallback for _ensure_registered (used at startup before session is ready)."""
+    global _ws_agent_id
+
+    if _ws_agent_id:
+        try:
+            req = urllib.request.Request(
+                f"{REGISTRY_URL}/v1/agents/{_ws_agent_id}",
+                method="GET",
+            )
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+                if data.get("id"):
+                    return _ws_agent_id
+        except HTTPError:
+            pass
+        except Exception:
+            pass
+
+    try:
+        req = urllib.request.Request(
+            f"{REGISTRY_URL}/v1/agents",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read())
+            logger.info("(Re-)registered with A2A Registry as '%s'", data["id"])
+            return data["id"]
+    except HTTPError as e:
+        body = e.read().decode()
+        if e.code == 409:
+            search_url = f"{REGISTRY_URL}/v1/agents?q={urllib.parse.quote(card['name'])}"
+            with urllib.request.urlopen(search_url) as resp:
+                agents = json.loads(resp.read())["agents"]
+                if agents:
+                    aid = agents[0]["id"]
+                    logger.info("Agent already registered as '%s'", aid)
+                    return aid
+            return "a2a:coder-agent"
+        raise RuntimeError(f"Registry registration failed ({e.code}): {body}")
+
+
 # ── WebSocket client loop ────────────────────────────────────────────────
 
-async def ws_connect_loop() -> None:
+async def ws_connect_loop(close_event: asyncio.Event) -> None:
     """Maintain a persistent WebSocket connection to the Registry.
 
     - Connects to ws://<registry>/v1/agents/{agent_id}/ws
     - Listens for 'task' messages and dispatches them to process_ws_task
     - Sends a 'ping' every 30 seconds
     - Auto-reconnects with exponential backoff on disconnect
+    - Re-registers on each reconnect attempt in case registry restarted
     """
-    global _ws_session, _ws_connection
-
-    retry_delay = 1.0  # start at 1s, max 60s
+    global _ws_session, _ws_connection, _ws_agent_id
+    logger.debug("ws_connect_loop: starting")
+    retry_delay = 1.0
     _ws_session = ClientSession()
+    logger.debug("ws_connect_loop: ClientSession created (session=%s)", _ws_session)
 
-    while not _ws_close_event.is_set():
-        agent_id = _ws_agent_id
-        if not agent_id:
+    while not close_event.is_set():
+        if not _ws_agent_id:
             logger.info("WS: waiting for agent_id to be set...")
             await asyncio.sleep(2)
             continue
 
-        ws_url = f"{REGISTRY_WS_URL}/{agent_id}/ws"
+        # Re-register before each WS reconnect attempt — registry may have restarted
+        logger.debug("ws_connect_loop: calling _ensure_registered...")
+        try:
+            new_agent_id = await _ensure_registered()
+            logger.debug("ws_connect_loop: _ensure_registered returned '%s'", new_agent_id)
+            if new_agent_id != _ws_agent_id:
+                _ws_agent_id = new_agent_id
+        except Exception as e:
+            logger.warning("WS: re-registration failed: %s (will retry)", e)
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60.0)
+            continue
+
+        ws_url = f"{REGISTRY_WS_URL}/{_ws_agent_id}/ws"
         logger.info("WS: connecting to %s", ws_url)
 
         try:
@@ -715,9 +856,9 @@ async def ws_connect_loop() -> None:
     _ws_session = None
 
 
-async def ws_shutdown() -> None:
+async def ws_shutdown(close_event: asyncio.Event) -> None:
     """Signal the WS loop to shut down gracefully."""
-    _ws_close_event.set()
+    close_event.set()
     # Force-close the active connection to unblock the loop
     global _ws_connection
     ws = _ws_connection
@@ -749,6 +890,24 @@ def create_app() -> web.Application:
 
 def main() -> None:
     """Entry point: register, start heartbeat, run HTTP + WS concurrently."""
+    parser = argparse.ArgumentParser(description="A2A Coder Agent")
+    parser.add_argument("--debug", action="store_true", help="Enable DEBUG-level logging")
+    parser.add_argument("--log-file", default=None, help="Log to file instead of stderr")
+    args = parser.parse_args()
+
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    log_kwargs = {
+        "level": log_level,
+        "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        "datefmt": "%H:%M:%S",
+    }
+    if args.log_file:
+        log_kwargs["filename"] = str(Path(args.log_file).expanduser())
+    logging.basicConfig(**log_kwargs)
+    # Re-apply level to our logger in case basicConfig was already called
+    logger.setLevel(log_level)
+    logging.getLogger("a2a_registry").setLevel(log_level)
+
     logger.info("Registering with A2A Registry at %s...", REGISTRY_URL)
     global _ws_agent_id
     _ws_agent_id = register_with_registry()
@@ -767,15 +926,18 @@ def main() -> None:
         logger.info("A2A Coder Agent HTTP on %s:%s", AGENT_HOST, AGENT_PORT)
 
         # Start WS loop in background
-        ws_task = asyncio.create_task(ws_connect_loop())
+        ws_close_event = asyncio.Event()
+        ws_task = asyncio.create_task(ws_connect_loop(ws_close_event))
+        logger.debug("ws_connect_loop task created (id=%s)", id(ws_task))
 
         try:
             # Sleep forever — Ctrl+C / SIGINT cancels this
+            logger.debug("_run: entering main event loop (waiting forever)")
             await asyncio.Event().wait()
         except (asyncio.CancelledError, KeyboardInterrupt):
             logger.info("Shutting down...")
         finally:
-            await ws_shutdown()
+            await ws_shutdown(ws_close_event)
             if ws_task and not ws_task.done():
                 ws_task.cancel()
                 try:

@@ -7,17 +7,23 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0d1117; color: #c9d1d9; }
-  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+  .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
   h1 { font-size: 24px; font-weight: 600; margin-bottom: 24px; }
   h1 small { font-size: 14px; font-weight: 400; color: #8b949e; }
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
-  .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
-  .stat-label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
-  .value { font-size: 32px; font-weight: 700; line-height: 1.2; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
+  .stat-label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .value { font-size: 28px; font-weight: 700; line-height: 1.2; }
   .stat-card.total     .value { color: #f0f6fc; }
   .stat-card.alive     .value { color: #3fb950; }
   .stat-card.stale     .value { color: #d29922; }
   .stat-card.tasks     .value { color: #58a6ff; }
+  .stat-card.v2-todo   .value { color: #8b949e; }
+  .stat-card.v2-ready  .value { color: #58a6ff; }
+  .stat-card.v2-run    .value { color: #d2a8ff; }
+  .stat-card.v2-block  .value { color: #f0883e; }
+  .stat-card.v2-done   .value { color: #3fb950; }
+  .stat-card.v2-fail   .value { color: #f85149; }
   .tabs { display: flex; gap: 0; margin-bottom: 0; border-bottom: 1px solid #30363d; }
   .tabs button { background: transparent; border: none; color: #8b949e; padding: 10px 20px; cursor: pointer; font-size: 14px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
   .tabs button:hover { color: #c9d1d9; }
@@ -45,38 +51,85 @@
   .badge-failed      { background: #f8514922; color: #f85149; }
   .badge-ws { display: inline-block; background: #3fb95033; color: #3fb950; border: 1px solid #3fb95044; border-radius: 4px; padding: 1px 5px; font-size: 10px; font-weight: 600; margin-left: 4px; vertical-align: middle; letter-spacing: 0.3px; }
   .skill-row { border-bottom: 1px solid #161b22; }
-  .agent-row { cursor: default; }
-  .agent-row:hover { background: #161b22; }
-  .agent-details { display: none; }
-  .agent-details.open { display: table-row; }
-  .agent-details td { background: #0d1117; padding: 16px 24px; }
+  .agent-row, .task-row, .kb-row { cursor: default; }
+  .agent-row:hover, .task-row:hover, .kb-row:hover { background: #161b22; }
+  .agent-details, .task-details, .kb-details { display: none; }
+  .agent-details.open, .task-details.open, .kb-details.open { display: table-row; }
+  .agent-details td, .task-details td, .kb-details td { background: #0d1117; padding: 16px 24px; }
   .detail-section { margin-bottom: 12px; }
   .detail-section h3 { font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 6px; }
   .skill-card { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; margin-bottom: 6px; }
   .skill-card .name { font-weight: 500; }
   .skill-card .desc { font-size: 12px; color: #8b949e; }
-  .task-row { cursor: default; }
-  .task-row:hover { background: #161b22; }
-  .task-details { display: none; }
-  .task-details.open { display: table-row; }
-  .task-details td { background: #0d1117; padding: 16px 24px; }
   .task-query { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; font-family: monospace; font-size: 13px; margin-bottom: 8px; }
   .task-result pre { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; font-size: 13px; overflow-x: auto; max-height: 200px; }
   .loading { text-align: center; padding: 48px; color: #8b949e; }
   .error { text-align: center; padding: 48px; color: #f85149; }
   code { font-size: 12px; color: #8b949e; word-break: break-all; }
+
+  /* --- Kanban-specific styles --- */
+  .badge-todo      { background: #8b949e22; color: #8b949e; }
+  .badge-ready     { background: #58a6ff22; color: #58a6ff; }
+  .badge-running   { background: #d2a8ff22; color: #d2a8ff; }
+  .badge-blocked   { background: #f0883e22; color: #f0883e; }
+  .badge-archived  { background: #30363d55; color: #484f58; }
+  .badge-cancelled { background: #f8514922; color: #f85149; }
+
+  .kb-board { display: flex; gap: 12px; overflow-x: auto; min-height: 400px; padding-bottom: 16px; }
+  .kb-column { background: #161b22; border: 1px solid #30363d; border-radius: 8px; min-width: 220px; flex: 1; max-width: 300px; }
+  .kb-col-header { padding: 10px 14px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid #30363d; color: #8b949e; }
+  .kb-col-header .count { float: right; color: #484f58; font-size: 12px; }
+  .kb-col-body { padding: 8px; min-height: 60px; }
+  .kb-card { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 10px 12px; margin-bottom: 6px; cursor: pointer; transition: border-color 0.15s; }
+  .kb-card:hover { border-color: #30363d; }
+  .kb-card-title { font-size: 13px; font-weight: 500; line-height: 1.4; margin-bottom: 6px; }
+  .kb-card-meta { font-size: 11px; color: #484f58; display: flex; gap: 8px; flex-wrap: wrap; }
+  .kb-card-meta span { display: inline-flex; align-items: center; gap: 3px; }
+  .kb-card .badge { font-size: 10px; margin-right: 4px; }
+  .kb-col-todo    .kb-col-header { border-bottom-color: #8b949e; }
+  .kb-col-ready   .kb-col-header { border-bottom-color: #58a6ff; }
+  .kb-col-running .kb-col-header { border-bottom-color: #d2a8ff; }
+  .kb-col-blocked .kb-col-header { border-bottom-color: #f0883e; }
+  .kb-col-completed .kb-col-header { border-bottom-color: #3fb950; }
+  .kb-col-failed  .kb-col-header { border-bottom-color: #f85149; }
+  .kb-col-archived .kb-col-header { border-bottom-color: #30363d; }
+  .kb-col-cancelled .kb-col-header { border-bottom-color: #f85149; }
+
+  .detail-tabs { display: flex; gap: 0; border-bottom: 1px solid #21262d; margin-bottom: 8px; }
+  .detail-tabs button { background: transparent; border: none; color: #8b949e; padding: 6px 14px; cursor: pointer; font-size: 12px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .detail-tabs button:hover { color: #c9d1d9; }
+  .detail-tabs button.active { color: #f0f6fc; border-bottom-color: #58a6ff; }
+  .detail-pane { display: none; }
+  .detail-pane.active { display: block; }
+
+  .dep-graph { margin: 8px 0; padding: 8px; background: #161b22; border-radius: 6px; font-size: 12px; }
+  .dep-node { display: inline-block; padding: 2px 8px; margin: 2px; border-radius: 4px; background: #21262d; }
+  .dep-arrow { color: #484f58; margin: 0 4px; }
+
+  .comment-bubble { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; margin-bottom: 6px; }
+  .comment-bubble .author { font-weight: 500; font-size: 12px; color: #58a6ff; }
+  .comment-bubble .time { font-size: 11px; color: #484f58; margin-left: 8px; }
+  .comment-bubble .body { font-size: 13px; margin-top: 4px; }
+
+  .event-item { padding: 4px 8px; font-size: 12px; border-left: 2px solid #21262d; margin: 2px 0; }
+  .event-item .kind { font-weight: 500; color: #58a6ff; }
+
+  .run-item { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; margin-bottom: 6px; font-size: 12px; }
+  .run-item .run-status { font-weight: 500; }
+  .run-item .run-outcome { color: #8b949e; }
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>A2A Registry <small>Agent-to-Agent Dashboard</small></h1>
+  <h1>A2A Registry <small>Agent-to-Agent + Orchestration Dashboard</small></h1>
   <div class="stats" id="stats"></div>
   <div class="tabs">
     <button id="tab-agents" class="active" onclick="switchTab('agents')">Agents</button>
     <button id="tab-tasks" onclick="switchTab('tasks')">Tasks</button>
+    <button id="tab-kanban" onclick="switchTab('kanban')">Kanban</button>
   </div>
 
-  <!-- Agents tab -->
+  <!-- Agents tab (V1) -->
   <div id="content-agents" class="tab-content active">
     <div class="filter-bar">
       <input type="text" id="search" placeholder="Search agents..." oninput="debouncedSearch()">
@@ -85,7 +138,7 @@
     <div id="agent-list"><div class="loading">Loading agents...</div></div>
   </div>
 
-  <!-- Tasks tab -->
+  <!-- Tasks tab (V1 tasks — WS dispatch) -->
   <div id="content-tasks" class="tab-content">
     <div class="filter-bar">
       <input type="text" id="task-search" placeholder="Filter by agent ID..." oninput="debouncedTaskSearch()">
@@ -101,11 +154,41 @@
     </div>
     <div id="task-list"><div class="loading">No tasks yet.</div></div>
   </div>
+
+  <!-- Kanban tab (V2 orchestration tasks) -->
+  <div id="content-kanban" class="tab-content">
+    <div class="filter-bar">
+      <input type="text" id="kb-search" placeholder="Search title / body..." oninput="debouncedKanbanSearch()">
+      <select id="kb-status-filter" onchange="fetchKanban()">
+        <option value="">All Statuses</option>
+        <option value="todo">todo</option>
+        <option value="ready">ready</option>
+        <option value="running">running</option>
+        <option value="blocked">blocked</option>
+        <option value="completed">completed</option>
+        <option value="failed">failed</option>
+        <option value="cancelled">cancelled</option>
+        <option value="archived">archived</option>
+      </select>
+      <select id="kb-assignee-filter" onchange="fetchKanban()">
+        <option value="">All Assignees</option>
+      </select>
+      <button onclick="fetchKanban()">Refresh</button>
+      <button onclick="switchKanbanView('board')" id="view-board" style="background:#1f6feb33;border-color:#1f6feb55;">Board</button>
+      <button onclick="switchKanbanView('list')" id="view-list">List</button>
+      <button onclick="showCreateTaskModal()" style="background:#238636;border-color:#238636;color:#fff;">+ 创建任务</button>
+    </div>
+    <div id="kanban-board"><div class="loading">Loading orchestration tasks...</div></div>
+  </div>
 </div>
 <script>
 const API = "";
 let searchTimeout = null;
 let taskSearchTimeout = null;
+let kbSearchTimeout = null;
+let kanbanView = "board";
+const STATUS_COLUMNS = ["todo","ready","running","blocked","completed","failed","cancelled","archived"];
+const STATUS_LABELS = {todo:"Todo",ready:"Ready",running:"Running",blocked:"Blocked",completed:"Completed",failed:"Failed",cancelled:"Cancelled",archived:"Archived"};
 
 function debouncedSearch() {
   clearTimeout(searchTimeout);
@@ -114,6 +197,10 @@ function debouncedSearch() {
 function debouncedTaskSearch() {
   clearTimeout(taskSearchTimeout);
   taskSearchTimeout = setTimeout(fetchTasks, 300);
+}
+function debouncedKanbanSearch() {
+  clearTimeout(kbSearchTimeout);
+  kbSearchTimeout = setTimeout(fetchKanban, 300);
 }
 
 async function fetchData(url) {
@@ -127,12 +214,11 @@ function switchTab(name) {
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   document.getElementById(`tab-${name}`).classList.add('active');
   document.getElementById(`content-${name}`).classList.add('active');
-  if (name === 'tasks' && !document.getElementById('task-list').querySelector('table')) {
-    fetchTasks();
-  }
+  if (name === 'tasks' && !document.getElementById('task-list').querySelector('table')) fetchTasks();
+  if (name === 'kanban' && !document.getElementById('kanban-board').dataset.loaded) fetchKanban();
 }
 
-// ======================== AGENTS ========================
+// ======================== AGENTS (V1) ========================
 
 async function fetchAgents() {
   const container = document.getElementById("agent-list");
@@ -170,21 +256,21 @@ function renderAgents(data) {
     const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "_");
     html += `<tr class="agent-row" onclick="toggleAgentDetails('${safeId}')">`;
     html += `<td><span class="badge ${statusClass}">${agent.status}</span>${agent.connection === 'websocket' ? '<span class="badge-ws">WS</span>' : ''}</td>`;
-    html += `<td><strong>${agent.name}</strong><br><small style="color:#8b949e">${id}</small></td>`;
+    html += `<td><strong>${escHtml(agent.name)}</strong><br><small style="color:#8b949e">${escHtml(id)}</small></td>`;
     html += `<td>${skillNames}</td>`;
     html += `<td>${tags}</td>`;
     html += `<td>${hb}</td></tr>`;
     html += `<tr id="agent-details-${safeId}" class="agent-details"><td colspan="5">`;
-    html += `<div class="detail-section"><h3>Description</h3><p>${agent.description || "-"}</p></div>`;
+    html += `<div class="detail-section"><h3>Description</h3><p>${escHtml(agent.description || "-")}</p></div>`;
     if (agent.url) html += `<div class="detail-section"><h3>URL</h3><p>${agent.url}</p></div>`;
     if (skills.length > 0) {
       html += `<div class="detail-section"><h3>Skills</h3>`;
       for (const sk of agent.capabilities.skills) {
-        html += `<div class="skill-card"><span class="name">${sk.name}</span> <span class="desc">${sk.description || ""}</span></div>`;
+        html += `<div class="skill-card"><span class="name">${escHtml(sk.name)}</span> <span class="desc">${escHtml(sk.description || "")}</span></div>`;
       }
       html += `</div>`;
     }
-    html += `<div class="detail-section"><h3>ID</h3><code>${agent.id}</code></div>`;
+    html += `<div class="detail-section"><h3>ID</h3><code>${escHtml(agent.id)}</code></div>`;
     html += `</td></tr>`;
   }
   html += '</tbody></table>';
@@ -194,7 +280,7 @@ function renderAgents(data) {
   container.innerHTML = html;
 }
 
-// ======================== TASKS ========================
+// ======================== TASKS (V1) ========================
 
 async function fetchTasks() {
   const container = document.getElementById("task-list");
@@ -265,17 +351,642 @@ function renderTasks(data) {
   container.innerHTML = html;
 }
 
+// ======================== KANBAN (V2) ========================
+
+async function fetchKanban() {
+  const container = document.getElementById("kanban-board");
+  container.dataset.loaded = true;
+  container.innerHTML = '<div class="loading">Loading orchestration tasks...</div>';
+  try {
+    const q = document.getElementById("kb-search").value.trim();
+    const status = document.getElementById("kb-status-filter").value;
+    let url = `${API}/v2/tasks?limit=200`;
+    const params = [];
+    if (q) params.push(`q=${encodeURIComponent(q)}`);
+    if (status) params.push(`status=${encodeURIComponent(status)}`);
+    if (params.length) url += '&' + params.join('&');
+
+    const data = await fetchData(url);
+    renderKanban(data);
+    updateStats();
+
+    // Build assignee filter dropdown
+    const assigneeSet = new Set();
+    for (const t of data.tasks) { if (t.assignee) assigneeSet.add(t.assignee); }
+    const sel = document.getElementById("kb-assignee-filter");
+    const currentVal = sel.value;
+    let opts = '<option value="">All Assignees</option>';
+    for (const a of [...assigneeSet].sort()) { opts += `<option value="${escHtml(a)}">${escHtml(a)}</option>`; }
+    if (sel.innerHTML !== opts) sel.innerHTML = opts;
+    sel.value = currentVal;
+  } catch (e) {
+    container.innerHTML = `<div class="error">Failed to load orchestration tasks: ${e.message}</div>`;
+  }
+}
+
+function switchKanbanView(view) {
+  kanbanView = view;
+  document.getElementById("view-board").style.background = view === "board" ? "#1f6feb33" : "";
+  document.getElementById("view-board").style.borderColor = view === "board" ? "#1f6feb55" : "";
+  document.getElementById("view-list").style.background = view === "list" ? "#1f6feb33" : "";
+  document.getElementById("view-list").style.borderColor = view === "list" ? "#1f6feb55" : "";
+  // Re-render with current data (last fetch results)
+  const lastData = window._lastKanbanData;
+  if (lastData) renderKanban(lastData);
+}
+
+function renderKanban(data) {
+  window._lastKanbanData = data;
+  const container = document.getElementById("kanban-board");
+  if (!data.tasks || data.tasks.length === 0) {
+    container.innerHTML = '<div class="loading">No orchestration tasks yet.<br><small style="color:#484f58">Create tasks via POST /v2/tasks to see them here.</small></div>';
+    return;
+  }
+
+  // Filter by assignee
+  const assigneeFilter = document.getElementById("kb-assignee-filter").value;
+  let tasks = data.tasks;
+  if (assigneeFilter) {
+    tasks = tasks.filter(t => t.assignee === assigneeFilter);
+  }
+
+  if (kanbanView === "list") {
+    renderKanbanList(container, tasks);
+  } else {
+    renderKanbanBoard(container, tasks);
+  }
+}
+
+function renderKanbanBoard(container, tasks) {
+  // Group by status
+  const groups = {};
+  for (const s of STATUS_COLUMNS) groups[s] = [];
+  for (const t of tasks) {
+    const s = t.status || "todo";
+    if (groups[s]) groups[s].push(t);
+    else groups[s] = [t];
+  }
+
+  let html = '<div class="kb-board">';
+  for (const col of STATUS_COLUMNS) {
+    const items = groups[col] || [];
+    html += `<div class="kb-column kb-col-${col}">`;
+    html += `<div class="kb-col-header">${STATUS_LABELS[col] || col} <span class="count">${items.length}</span></div>`;
+    html += `<div class="kb-col-body">`;
+    if (items.length === 0) {
+      html += `<div style="color:#484f58;font-size:12px;text-align:center;padding:12px;">—</div>`;
+    } else {
+      for (const t of items) {
+        html += renderKanbanCard(t);
+      }
+    }
+    html += `</div></div>`;
+  }
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+function renderKanbanList(container, tasks) {
+  let html = '<table><thead><tr><th>Status</th><th>Title</th><th>Assignee</th><th>Priority</th><th>Created</th><th>ID</th></tr></thead><tbody>';
+  for (const t of tasks) {
+    const created = t.created_at ? new Date(t.created_at * 1000).toLocaleString() : "-";
+    const safeId = (t.id || "").replace(/[^a-zA-Z0-9_-]/g, "_");
+    html += `<tr class="kb-row" onclick="fetchAndShowKbDetail('${t.id}')">`;
+    html += `<td><span class="badge badge-${t.status}">${t.status}</span></td>`;
+    html += `<td><strong>${escHtml(t.title)}</strong></td>`;
+    html += `<td>${escHtml(t.assignee || "-")}</td>`;
+    html += `<td>${t.priority || 0}</td>`;
+    html += `<td>${created}</td>`;
+    html += `<td><code>${safeId.substring(0, 12)}</code></td></tr>`;
+    html += `<tr id="kb-details-${safeId}" class="kb-details"><td colspan="6"><div class="loading">Click to load details...</div></td></tr>`;
+  }
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function renderKanbanCard(t) {
+  const created = t.created_at ? new Date(t.created_at * 1000).toLocaleString() : "";
+  const assignee = t.assignee ? t.assignee : "";
+  const priority = t.priority || 0;
+  const titlePreview = t.title.length > 50 ? t.title.substring(0, 47) + "..." : t.title;
+  return `<div class="kb-card" onclick="fetchAndShowKbDetail('${t.id}')">
+    <div class="kb-card-title">${escHtml(titlePreview)}</div>
+    <div class="kb-card-meta">
+      ${assignee ? `<span>👤 ${escHtml(assignee)}</span>` : ""}
+      ${priority > 0 ? `<span>⚡ ${priority}</span>` : ""}
+      <span>${created}</span>
+    </div>
+  </div>`;
+}
+
+// ======================== KANBAN CRUD ========================
+
+function showCreateTaskModal() {
+  const existing = document.getElementById("create-task-modal");
+  if (existing) existing.remove();
+
+  const modal = document.createElement("div");
+  modal.id = "create-task-modal";
+  modal.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;padding:24px;";
+  modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+
+  const content = document.createElement("div");
+  content.style.cssText = "background:#0d1117;border:1px solid #30363d;border-radius:12px;max-width:520px;width:100%;padding:24px;position:relative;";
+
+  content.innerHTML = `
+    <h2 style="font-size:18px;font-weight:600;margin-bottom:16px;">创建任务</h2>
+    <div style="margin-bottom:12px;">
+      <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">标题 *</label>
+      <input id="crt-title" type="text" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
+    </div>
+    <div style="margin-bottom:12px;">
+      <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">描述</label>
+      <textarea id="crt-body" rows="4" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;resize:vertical;"></textarea>
+    </div>
+    <div style="display:flex;gap:12px;margin-bottom:12px;">
+      <div style="flex:1;">
+        <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">负责人</label>
+        <input id="crt-assignee" type="text" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
+      </div>
+      <div style="flex:0 0 90px;">
+        <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">优先级</label>
+        <select id="crt-priority" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
+          <option value="0">0</option>
+          <option value="1">1</option>
+          <option value="2" selected>2</option>
+          <option value="3">3</option>
+        </select>
+      </div>
+    </div>
+    <div style="margin-bottom:16px;">
+      <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">父任务 ID（可选，逗号分隔）</label>
+      <input id="crt-parents" type="text" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button onclick="document.getElementById('create-task-modal').remove()" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:8px 16px;color:#c9d1d9;cursor:pointer;">取消</button>
+      <button onclick="createKanbanTask()" style="background:#238636;border:1px solid #2ea043;border-radius:6px;padding:8px 16px;color:#fff;cursor:pointer;font-weight:500;">创建</button>
+    </div>
+  `;
+
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "✕";
+  closeBtn.style.cssText = "position:absolute;top:12px;right:16px;background:transparent;border:none;color:#8b949e;cursor:pointer;font-size:18px;";
+  closeBtn.onclick = () => modal.remove();
+  content.prepend(closeBtn);
+
+  modal.appendChild(content);
+  document.body.appendChild(modal);
+
+  // Focus title input
+  setTimeout(() => document.getElementById("crt-title").focus(), 100);
+}
+
+async function createKanbanTask() {
+  const title = document.getElementById("crt-title").value.trim();
+  if (!title) { alert("标题不能为空"); return; }
+
+  const body = document.getElementById("crt-body").value.trim();
+  const assignee = document.getElementById("crt-assignee").value.trim();
+  const priority = parseInt(document.getElementById("crt-priority").value) || 0;
+  const parentsRaw = document.getElementById("crt-parents").value.trim();
+  const parents = parentsRaw ? parentsRaw.split(",").map(s => s.trim()).filter(Boolean) : undefined;
+
+  const payload = { title, body: body || undefined, assignee: assignee || undefined, priority };
+  if (parents && parents.length > 0) payload.parents = parents;
+
+  try {
+    const resp = await fetch(`${API}/v2/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert("创建失败: " + (err.detail || resp.statusText));
+      return;
+    }
+    document.getElementById("create-task-modal").remove();
+    fetchKanban();
+  } catch (e) {
+    alert("创建失败: " + e.message);
+  }
+}
+
+async function handleDeleteTask(taskId) {
+  if (!confirm(`确定归档任务 ${taskId}？\n仅 completed/failed/cancelled 状态可归档。`)) return;
+
+  try {
+    const resp = await fetch(`${API}/v2/tasks/${taskId}`, { method: "DELETE" });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert("归档失败: " + (err.detail || resp.statusText));
+      return;
+    }
+    // Close the detail modal if open
+    const modal = document.getElementById("kb-detail-modal");
+    if (modal) modal.remove();
+    fetchKanban();
+  } catch (e) {
+    alert("归档失败: " + e.message);
+  }
+}
+
+// ── Status change actions ───────────────────────────────────────
+
+function _statusActions(status, taskId) {
+  // Returns HTML for status-transition buttons based on current status
+  const btns = {
+    "todo":        [{l:"▶ 开始", s:"ready"}, {l:"✕ 取消", s:"cancelled"}],
+    "ready":       [{l:"▶ 开始", s:"running"}, {l:"⛔ 阻塞", s:"blocked"}, {l:"✕ 取消", s:"cancelled"}],
+    "running":     [{l:"✓ 完成", s:"completed"}, {l:"✕ 失败", s:"failed"}, {l:"⛔ 阻塞", s:"blocked"}, {l:"✕ 取消", s:"cancelled"}],
+    "blocked":     [{l:"▶ 恢复", s:"running"}, {l:"↩ 回池", s:"ready"}, {l:"✕ 失败", s:"failed"}, {l:"✕ 取消", s:"cancelled"}],
+    "completed":   [{l:"🗑 归档", s:"archived"}],
+    "failed":      [{l:"↻ 重试", s:"ready"}, {l:"🗑 归档", s:"archived"}, {l:"✕ 取消", s:"cancelled"}],
+    "cancelled":   [],
+    "archived":    [],
+  };
+  const actions = btns[status] || [];
+  if (actions.length === 0) return "";
+  return actions.map(a => {
+    const styles = {
+      completed: "background:#3fb95033;border:1px solid #3fb95066;color:#3fb950;",
+      failed:    "background:#f8514933;border:1px solid #f8514966;color:#f85149;",
+      running:   "background:#d2a8ff33;border:1px solid #d2a8ff66;color:#d2a8ff;",
+      ready:     "background:#58a6ff33;border:1px solid #58a6ff66;color:#58a6ff;",
+      blocked:   "background:#f0883e33;border:1px solid #f0883e66;color:#f0883e;",
+      archived:  "background:#30363d66;border:1px solid #484f58;color:#8b949e;",
+      cancelled: "background:#f8514933;border:1px solid #f8514966;color:#f85149;",
+    };
+    const s = styles[a.s] || "background:#21262d;border:1px solid #30363d;color:#c9d1d9;";
+    return `<button onclick="handleStatusChange('${taskId}','${a.s}')" style="border-radius:6px;padding:3px 10px;cursor:pointer;font-size:12px;${s}">${a.l}</button>`;
+  }).join(" ");
+}
+
+async function handleStatusChange(taskId, newStatus) {
+  try {
+    const resp = await fetch(`${API}/v2/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: newStatus }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert("状态变更失败: " + (err.detail || err.error || resp.statusText));
+      return;
+    }
+    // Refresh detail modal and board
+    const data = await resp.json();
+    const modal = document.getElementById("kb-detail-modal");
+    if (modal) modal.remove();
+    fetchAndShowKbDetail(taskId);
+    fetchKanban();
+  } catch (e) {
+    alert("状态变更失败: " + e.message);
+  }
+}
+
+function showEditTaskModal(taskId) {
+  const existing = document.getElementById("edit-task-modal");
+  if (existing) existing.remove();
+
+  // Fetch latest task data
+  fetch(`${API}/v2/tasks/${taskId}`).then(r => r.json()).then(data => {
+    const task = data.task || data;
+
+    const modal = document.createElement("div");
+    modal.id = "edit-task-modal";
+    modal.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;padding:24px;";
+    modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+
+    const content = document.createElement("div");
+    content.style.cssText = "background:#0d1117;border:1px solid #30363d;border-radius:12px;max-width:520px;width:100%;padding:24px;position:relative;";
+
+    content.innerHTML = `
+      <h2 style="font-size:18px;font-weight:600;margin-bottom:16px;">✏️ 编辑任务</h2>
+      <div style="font-size:12px;color:#8b949e;margin-bottom:12px;">ID: <code>${escHtml(task.id)}</code></div>
+      <div style="margin-bottom:12px;">
+        <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">标题</label>
+        <input id="edt-title" type="text" value="${escHtml(task.title).replace(/"/g, '&quot;')}" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
+      </div>
+      <div style="margin-bottom:12px;">
+        <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">描述</label>
+        <textarea id="edt-body" rows="4" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;resize:vertical;">${escHtml(task.body || "")}</textarea>
+      </div>
+      <div style="display:flex;gap:12px;margin-bottom:12px;">
+        <div style="flex:1;">
+          <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">负责人</label>
+          <input id="edt-assignee" type="text" value="${escHtml(task.assignee || "")}" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
+        </div>
+        <div style="flex:0 0 90px;">
+          <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">优先级</label>
+          <select id="edt-priority" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
+            <option value="0" ${task.priority === 0 ? "selected" : ""}>0</option>
+            <option value="1" ${task.priority === 1 ? "selected" : ""}>1</option>
+            <option value="2" ${task.priority === 2 ? "selected" : ""}>2</option>
+            <option value="3" ${task.priority === 3 ? "selected" : ""}>3</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button onclick="document.getElementById('edit-task-modal').remove()" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:8px 16px;color:#c9d1d9;cursor:pointer;">取消</button>
+        <button onclick="handleUpdateTask('${task.id}')" style="background:#1f6feb;border:1px solid #1f6feb;border-radius:6px;padding:8px 16px;color:#fff;cursor:pointer;font-weight:500;">保存</button>
+      </div>
+    `;
+
+    const closeBtn = document.createElement("button");
+    closeBtn.textContent = "✕";
+    closeBtn.style.cssText = "position:absolute;top:12px;right:16px;background:transparent;border:none;color:#8b949e;cursor:pointer;font-size:18px;";
+    closeBtn.onclick = () => modal.remove();
+    content.prepend(closeBtn);
+
+    modal.appendChild(content);
+    document.body.appendChild(modal);
+
+    setTimeout(() => document.getElementById("edt-title").focus(), 100);
+  }).catch(e => alert("获取任务详情失败: " + e.message));
+}
+
+async function handleUpdateTask(taskId) {
+  const title = document.getElementById("edt-title").value.trim();
+  const body = document.getElementById("edt-body").value.trim();
+  const assignee = document.getElementById("edt-assignee").value.trim();
+  const priority = parseInt(document.getElementById("edt-priority").value) || 0;
+
+  const payload = {};
+  if (title) payload.title = title;
+  payload.body = body;
+  payload.assignee = assignee;
+  payload.priority = priority;
+
+  try {
+    const resp = await fetch(`${API}/v2/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert("更新失败: " + (err.detail || resp.statusText));
+      return;
+    }
+    document.getElementById("edit-task-modal").remove();
+    // Re-fetch and show detail with updated data
+    const modal = document.getElementById("kb-detail-modal");
+    if (modal) modal.remove();
+    fetchAndShowKbDetail(taskId);
+    fetchKanban();
+  } catch (e) {
+    alert("更新失败: " + e.message);
+  }
+}
+
+async function fetchAndShowKbDetail(taskId) {
+  const safeId = taskId.replace(/[^a-zA-Z0-9_-]/g, "_");
+
+  // Find the detail row in list view
+  const detailRow = document.getElementById(`kb-details-${safeId}`);
+  if (detailRow) {
+    const wasOpen = detailRow.classList.contains("open");
+    // Close all other detail rows
+    document.querySelectorAll(".kb-details.open").forEach(r => r.classList.remove("open"));
+    if (wasOpen) return;
+    detailRow.classList.add("open");
+    detailRow.querySelector("td").innerHTML = '<div class="loading">Loading task details...</div>';
+  }
+
+  // Fetch full detail
+  let task, parents, children, runs, comments, events;
+  try {
+    const data = await fetchData(`${API}/v2/tasks/${taskId}`);
+    task = data.task;
+    parents = data.parents || [];
+    children = data.children || [];
+    runs = data.runs || [];
+    comments = data.comments || [];
+    events = data.events || [];
+  } catch (e) {
+    if (detailRow) {
+      detailRow.querySelector("td").innerHTML = `<div class="error">Failed to load: ${e.message}</div>`;
+    } else {
+      showKbDetailModal(taskId, null, e.message);
+    }
+    return;
+  }
+
+  // For board view: show detail in a floating section
+  if (!detailRow) {
+    showKbDetailModal(taskId, { task, parents, children, runs, comments, events }, null);
+    return;
+  }
+
+  const html = buildKbDetailHtml(task, parents, children, runs, comments, events);
+  detailRow.querySelector("td").innerHTML = `<div style="padding:0;">${html}</div>`;
+}
+
+// Modal for board view detail
+let _detailModal = null;
+function showKbDetailModal(taskId, data, error) {
+  const existing = document.getElementById("kb-detail-modal");
+  if (existing) existing.remove();
+
+  const modal = document.createElement("div");
+  modal.id = "kb-detail-modal";
+  modal.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;padding:24px;";
+  modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+
+  const content = document.createElement("div");
+  content.style.cssText = "background:#0d1117;border:1px solid #30363d;border-radius:12px;max-width:700px;width:100%;max-height:80vh;overflow-y:auto;padding:24px;position:relative;";
+
+  if (error) {
+    content.innerHTML = `<div class="error">${error}</div>`;
+  } else {
+    content.innerHTML = buildKbDetailHtml(data.task, data.parents, data.children, data.runs, data.comments, data.events);
+  }
+
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "✕";
+  closeBtn.style.cssText = "position:absolute;top:12px;right:16px;background:transparent;border:none;color:#8b949e;cursor:pointer;font-size:18px;";
+  closeBtn.onclick = () => modal.remove();
+  content.prepend(closeBtn);
+
+  modal.appendChild(content);
+  document.body.appendChild(modal);
+  _detailModal = modal;
+}
+
+let _detailTab = "runs";
+
+function switchDetailTab(tab) {
+  _detailTab = tab;
+  // Re-render is done by the onclick binding in buildKbDetailHtml
+  // We update the pane visibility
+  const panes = document.querySelectorAll("#kb-detail-modal .detail-pane, .kb-details.open .detail-pane");
+  const tabs = document.querySelectorAll("#kb-detail-modal .detail-tabs button, .kb-details.open .detail-tabs button");
+  panes.forEach(p => p.classList.remove("active"));
+  tabs.forEach(b => { b.classList.remove("active"); if (b.dataset.tab === tab) b.classList.add("active"); });
+  const target = document.querySelector(`#kb-detail-modal .detail-pane[data-tab="${tab}"], .kb-details.open .detail-pane[data-tab="${tab}"]`);
+  if (target) target.classList.add("active");
+}
+
+function buildKbDetailHtml(task, parents, children, runs, comments, events) {
+  const created = task.created_at ? new Date(task.created_at * 1000).toLocaleString() : "-";
+  const started = task.started_at ? new Date(task.started_at * 1000).toLocaleString() : "-";
+  const completed = task.completed_at ? new Date(task.completed_at * 1000).toLocaleString() : "-";
+
+  let html = `
+    <div style="margin-bottom:16px;">
+      <h2 style="font-size:18px;font-weight:600;margin-bottom:4px;">${escHtml(task.title)}</h2>
+      <span class="badge badge-${task.status}" style="font-size:13px;">${task.status}</span>
+      ${task.assignee ? `<span style="margin-left:8px;color:#8b949e;">👤 ${escHtml(task.assignee)}</span>` : ""}
+      ${task.priority ? `<span style="margin-left:8px;color:#8b949e;">⚡ ${task.priority}</span>` : ""}
+      <div style="float:right;display:flex;gap:6px;">
+        <button onclick="showEditTaskModal('${task.id}')" style="background:#1f6feb22;border:1px solid #1f6feb55;border-radius:6px;padding:4px 12px;color:#58a6ff;cursor:pointer;font-size:12px;">✏️ 编辑</button>
+        <button onclick="handleDeleteTask('${task.id}')" style="background:#f8514922;border:1px solid #f8514955;border-radius:6px;padding:4px 12px;color:#f85149;cursor:pointer;font-size:12px;">🗑 归档</button>
+      </div>
+    </div>
+    <div style="margin-bottom:12px;display:flex;gap:4px;flex-wrap:wrap;">${_statusActions(task.status, task.id)}</div>`;
+
+  if (task.body) {
+    html += `<div class="detail-section"><h3>Description</h3><div style="background:#161b22;border:1px solid #21262d;border-radius:6px;padding:10px;font-size:13px;line-height:1.5;white-space:pre-wrap;">${escHtml(task.body)}</div></div>`;
+  }
+
+  // Dependency chain
+  if (parents.length > 0 || children.length > 0) {
+    html += `<div class="detail-section"><h3>Dependency Chain</h3><div class="dep-graph">`;
+    if (parents.length > 0) {
+      html += `<div style="margin-bottom:4px;"><span style="color:#8b949e;">Parents:</span> `;
+      for (const p of parents) {
+        html += `<span class="dep-node">${escHtml(p.id)} <span class="badge badge-${p.status}" style="font-size:10px;">${p.status}</span></span>`;
+      }
+      html += `</div>`;
+    }
+    html += `<div><span class="dep-node" style="background:#1f6feb33;border:1px solid #1f6feb55;font-weight:500;">${escHtml(task.id)} (this)</span></div>`;
+    if (children.length > 0) {
+      html += `<div style="margin-top:4px;"><span style="color:#8b949e;">Children:</span> `;
+      for (const c of children) {
+        html += `<span class="dep-node">${escHtml(c.id)} <span class="badge badge-${c.status}" style="font-size:10px;">${c.status}</span></span>`;
+      }
+      html += `</div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  // Metadata table
+  html += `<div class="detail-section"><h3>Details</h3><table style="font-size:12px;"><tbody>`;
+  html += `<tr><td style="color:#8b949e;padding:2px 8px;">ID</td><td><code>${escHtml(task.id)}</code></td></tr>`;
+  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Workspace</td><td>${task.workspace_kind || "-"} ${task.workspace_path ? `<code>${escHtml(task.workspace_path)}</code>` : ""}</td></tr>`;
+  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Created</td><td>${created}</td></tr>`;
+  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Started</td><td>${started}</td></tr>`;
+  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Completed</td><td>${completed}</td></tr>`;
+  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Failures</td><td>${task.consecutive_failures || 0} / ${task.max_retries || 3}</td></tr>`;
+  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Tenant</td><td>${task.tenant || "-"}</td></tr>`;
+  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Claim Lock</td><td>${task.claim_lock || "-"}</td></tr>`;
+  if (task.result) {
+    html += `<tr><td style="color:#8b949e;padding:2px 8px;">Result</td><td><pre style="background:#161b22;padding:6px;border-radius:4px;font-size:11px;max-height:120px;overflow:auto;">${escHtml(typeof task.result === 'string' ? task.result : JSON.stringify(task.result, null, 2))}</pre></td></tr>`;
+  }
+  html += `</tbody></table></div>`;
+
+  // Detail tabs: Runs / Comments / Events
+  html += `<div class="detail-section"><h3>Activity</h3>`;
+  html += `<div class="detail-tabs">`;
+  html += `<button class="active" data-tab="runs" onclick="switchDetailTab('runs')">Runs (${runs.length})</button>`;
+  html += `<button data-tab="comments" onclick="switchDetailTab('comments')">Comments (${comments.length})</button>`;
+  html += `<button data-tab="events" onclick="switchDetailTab('events')">Events (${events.length})</button>`;
+  html += `</div>`;
+
+  html += `<div class="detail-pane active" data-tab="runs">`;
+  if (runs.length === 0) {
+    html += `<div style="color:#484f58;font-size:12px;">No runs yet.</div>`;
+  } else {
+    for (const r of runs) {
+      const startedAt = r.started_at ? new Date(r.started_at * 1000).toLocaleString() : "-";
+      const endedAt = r.ended_at ? new Date(r.ended_at * 1000).toLocaleString() : "—";
+      html += `<div class="run-item"><span class="run-status">Run #${r.id}</span> `;
+      html += `<span class="badge badge-${r.outcome || r.status}" style="font-size:10px;">${r.outcome || r.status}</span> `;
+      html += `<span class="run-outcome">by ${r.profile || "-"} | ${startedAt} → ${endedAt}</span>`;
+      if (r.summary) html += `<div style="margin-top:4px;color:#c9d1d9;">${escHtml(r.summary)}</div>`;
+      if (r.error) html += `<div style="color:#f85149;font-size:11px;margin-top:2px;">${escHtml(r.error)}</div>`;
+      html += `</div>`;
+    }
+  }
+  html += `</div>`;
+
+  html += `<div class="detail-pane" data-tab="comments">`;
+  if (comments.length === 0) {
+    html += `<div style="color:#484f58;font-size:12px;">No comments.</div>`;
+  } else {
+    for (const c of comments) {
+      const ct = c.created_at ? new Date(c.created_at * 1000).toLocaleString() : "";
+      html += `<div class="comment-bubble"><span class="author">${escHtml(c.author)}</span><span class="time">${ct}</span><div class="body">${escHtml(c.body)}</div></div>`;
+    }
+  }
+  html += `</div>`;
+
+  html += `<div class="detail-pane" data-tab="events">`;
+  if (events.length === 0) {
+    html += `<div style="color:#484f58;font-size:12px;">No events.</div>`;
+  } else {
+    for (const e of events) {
+      const et = e.created_at ? new Date(e.created_at * 1000).toLocaleString() : "";
+      html += `<div class="event-item"><span class="kind">${e.kind}</span> <span style="color:#484f58;">${et}</span>`;
+      if (e.payload) {
+        const payload = typeof e.payload === 'string' ? e.payload : JSON.stringify(e.payload);
+        html += `<div style="color:#8b949e;font-size:11px;margin-left:12px;">${escHtml(payload)}</div>`;
+      }
+      html += `</div>`;
+    }
+  }
+  html += `</div>`;
+  html += `</div>`;
+
+  return html;
+}
+
+// ======================== STATS ========================
+
+async function updateStats() {
+  try {
+    const [health, tasks, v2stats] = await Promise.all([
+      fetchData(`${API}/health`).catch(() => null),
+      fetchData(`${API}/v1/tasks?limit=0`).catch(() => null),
+      fetchData(`${API}/v2/stats`).catch(() => null),
+    ]);
+    const s = health?.stats || {};
+    const v2 = v2stats || {};
+    const v2Counts = v2.by_status || {};
+
+    const total = s.total_agents ?? "?";
+    const alive = s.alive_agents ?? "?";
+    const stale = s.stale_agents ?? "?";
+    const v1Tasks = tasks?.total ?? "?";
+
+    let html = `
+      <div class="stat-card total"><div class="stat-label">Total Agents</div><div class="value">${total}</div></div>
+      <div class="stat-card alive"><div class="stat-label">Alive</div><div class="value">${alive}</div></div>
+      <div class="stat-card stale"><div class="stat-label">Stale</div><div class="value">${stale}</div></div>
+      <div class="stat-card tasks"><div class="stat-label">V1 Tasks</div><div class="value">${v1Tasks}</div></div>
+      <div class="stat-card v2-todo"><div class="stat-label">Todo</div><div class="value">${v2Counts.todo ?? 0}</div></div>
+      <div class="stat-card v2-ready"><div class="stat-label">Ready</div><div class="value">${v2Counts.ready ?? 0}</div></div>
+      <div class="stat-card v2-run"><div class="stat-label">Running</div><div class="value">${(v2Counts.running ?? 0) + (v2Counts.blocked ?? 0)}</div></div>
+      <div class="stat-card v2-done"><div class="stat-label">Done ✓</div><div class="value">${v2Counts.completed ?? 0}</div></div>
+    `;
+    document.getElementById("stats").innerHTML = html;
+  } catch (e) {
+    document.getElementById("stats").innerHTML = `<div class="stat-card total"><div class="stat-label">Status</div><div class="value">—</div></div>`;
+  }
+}
+
+// ======================== UTILITIES ========================
+
 function escHtml(s) {
   if (typeof s !== 'string') return String(s);
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function renderTaskResult(result) {
-  // If result has a simple 'text' field, show it prominently
   if (result.text && typeof result.text === 'string' && Object.keys(result).length === 1) {
     return `<pre style="white-space: pre-wrap; word-break: break-word; background:#161b22; border:1px solid #21262d; border-radius:6px; padding:12px; font-size:13px; line-height:1.5; max-height:300px; overflow-y:auto;">${escHtml(result.text)}</pre>`;
   }
-  // If result has 'text' plus other keys, show text first then the rest as JSON
   if (result.text && typeof result.text === 'string') {
     let html = `<div style="margin-bottom:8px; background:#161b22; border:1px solid #21262d; border-radius:6px; padding:12px; max-height:300px; overflow-y:auto;"><pre style="white-space: pre-wrap; word-break: break-word; font-size:13px; line-height:1.5; margin:0;">${escHtml(result.text)}</pre></div>`;
     const rest = {...result};
@@ -285,33 +996,13 @@ function renderTaskResult(result) {
     }
     return html;
   }
-  // Generic: show as formatted JSON
   return `<pre style="background:#161b22; border:1px solid #21262d; border-radius:6px; padding:12px; font-size:13px; overflow-x:auto; max-height:300px; overflow-y:auto;">${escHtml(JSON.stringify(result, null, 2))}</pre>`;
-}
-
-// ======================== STATS ========================
-
-async function updateStats() {
-  try {
-    const [health, tasks] = await Promise.all([
-      fetchData(`${API}/health`),
-      fetchData(`${API}/v1/tasks?limit=0`),
-    ]);
-    const s = health.stats;
-    document.getElementById("stats").innerHTML = `
-      <div class="stat-card total"><div class="stat-label">Total Agents</div><div class="value">${s.total_agents}</div></div>
-      <div class="stat-card alive"><div class="stat-label">Alive</div><div class="value">${s.alive_agents}</div></div>
-      <div class="stat-card stale"><div class="stat-label">Stale</div><div class="value">${s.stale_agents}</div></div>
-      <div class="stat-card tasks"><div class="stat-label">Tasks</div><div class="value">${tasks.total}</div></div>
-    `;
-  } catch (e) {
-    document.getElementById("stats").innerHTML = `<div class="stat-card total"><div class="stat-label">Total Agents</div><div class="value">?</div></div>`;
-  }
 }
 
 // Init
 fetchAgents();
-setInterval(fetchAgents, 15000);
+setInterval(() => { updateStats(); }, 30000);
+setInterval(() => { if (document.getElementById("tab-kanban").classList.contains("active")) fetchKanban(); }, 15000);
 </script>
 </body>
 </html>

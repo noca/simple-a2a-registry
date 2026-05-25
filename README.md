@@ -1,37 +1,42 @@
 # Simple A2A Registry
 
 轻量级、符合 Google A2A (Agent-to-Agent) 协议的 Agent 注册中心。
-支持 Agent 注册/发现、心跳保活、WebSocket 长连接、任务分发与状态查询。
+支持 Agent 注册/发现、心跳保活、WebSocket 长连接、任务分发与状态查询，
+以及 V2 **Kanban 编排引擎**（Orchestration Engine）。
 
 ## 架构概览
 
 ```
-┌─────────────┐      HTTP/WS       ┌─────────────────────┐
-│   Client    │ ──────────────────→ │  A2A Registry       │
-│ (调用方)     │                     │  (localhost:8321)   │
-└─────────────┘                     │                     │
-                                    │  ┌───────────────┐  │
-                                    │  │ RegistryStore │  │
-                                    │  │ (持久化存储)    │  │
-                                    │  └───────────────┘  │
-                                    └────────┬────────────┘
-                                             │
-                      ┌──────────────────────┼──────────────────────┐
-                      │                      │                      │
-              ┌───────▼───────┐    ┌─────────▼────────┐  ┌─────────▼────────┐
-              │  Agent A      │    │   Agent B        │  │   Agent C        │
-              │ (HTTP+WS)     │    │  (WS 长连接)      │  │  (HTTP 心跳)     │
-              └───────────────┘    └──────────────────┘  └──────────────────┘
+┌─────────────┐      HTTP/WS       ┌──────────────────────────────────────┐
+│   Client    │ ──────────────────→ │  A2A Registry (localhost:8321)      │
+│ (调用方)     │                     │                                      │
+└─────────────┘                     │  ┌────────────────────────────────┐  │
+                                    │  │ V1: Agent Registry & Dispatch  │  │
+                                    │  │  (注册/发现/WS/心跳/任务分发)    │  │
+                                    │  ├────────────────────────────────┤  │
+                                    │  │ V2: Orchestration Engine       │  │
+                                    │  │  (Kanban 任务编排/派发/工作区)   │  │
+                                    │  └────────────────────────────────┘  │
+                                    └──────────────────┬───────────────────┘
+                                                        │
+                         ┌──────────────────────────────┼──────────────────────────────┐
+                         │                               │                              │
+                 ┌───────▼───────┐             ┌─────────▼────────┐      ┌─────────────▼──┐
+                 │  Agent A      │             │   Agent B        │      │  Worker C     │
+                 │ (HTTP+WS)     │             │  (WS 长连接)      │      │ (V2 Profile)  │
+                 └───────────────┘             └──────────────────┘      └───────────────┘
 ```
 
-**核心工作流：**
+**V1 核心工作流：**
 1. Agent 通过 `POST /v1/agents` 向 Registry 注册
 2. Agent 通过 WebSocket (`/v1/agents/{id}/ws`) 建立长连接，或通过 HTTP 心跳保持活跃
 3. 客户端通过 `POST /v1/agents/{id}/dispatch` 向已连接的 Agent 分发任务
 4. Agent 通过 WebSocket 接收任务、处理、返回结果
 5. 客户端通过 `GET /v1/tasks/{id}` 轮询任务状态和结果
 
-> 详细架构说明请参见 [docs/architecture.md](docs/architecture.md)。
+**V2 编排引擎：** 可选的 Kanban 级任务编排系统，支持任务生命周期管理、依赖链、自动 Worker 派发、HITL 人工介入等。详见下方 [V2 Orchestration Engine](#v2-orchestration-engine) 章节。
+
+> 详细架构说明请参见 [docs/architecture.md](docs/architecture.md)（V1）和 [docs/architecture-v2.md](docs/architecture-v2.md)（V2）。
 
 ## 快速开始
 
@@ -45,10 +50,168 @@ a2a-registry
 ## 命令行
 
 ```bash
+# V1 基础模式
 a2a-registry --host 0.0.0.0 --port 8321 --data-dir ~/.simple-a2a-registry
+
+# 完整模式（V1 + V2 编排引擎）
+a2a-registry --host 0.0.0.0 --port 8321 --dispatcher-enabled true
+
+# 仅 V1 模式（关闭编排引擎）
+a2a-registry --host 0.0.0.0 --port 8321 --dispatcher-enabled false
 ```
 
-## API 参考
+### V2 编排引擎参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--board-path` | `<data-dir>/board.db` | SQLite 数据库路径 |
+| `--dispatcher-enabled` | `true` | 是否启动后台 Worker 派发器 |
+| `--dispatcher-interval` | `5` | 派发器轮询间隔（秒） |
+| `--claim-ttl` | `900` | 认领锁 TTL（秒，15 分钟） |
+| `--failure-limit` | `3` | 全局默认重试次数 |
+| `--workspaces-root` | `<data-dir>/workspaces` | Scratch 工作区根目录 |
+
+### 已废弃参数
+
+| 参数 | 替代 | 说明 |
+|------|------|------|
+| `--dispatcher` | `--dispatcher-enabled` | V1 兼容别名，使用时会打印警告 |
+
+## Dashboard
+
+打开 http://localhost:8321 查看 Web Dashboard：
+
+- Agent 列表（状态、标签、技能）
+- Agent 详情展开面板
+- WebSocket 连接标识（WS 徽章）
+- V2 Kanban 看板（Board/List 双视图）
+- 任务详情弹窗（依赖链、运行记录、事件流、评论）
+- V1+V2 统一统计
+- 实时刷新（每 15 秒）
+
+---
+
+## V2 Orchestration Engine
+
+V2 在 V1 的基础上新增 **Orchestration Engine（编排引擎）**，提供完整的 Kanban 级任务编排能力：
+
+| 能力 | 说明 |
+|------|------|
+| **任务生命周期管理** | 从创建到归档的完整状态机，支持依赖链、重试、超时释放 |
+| **Worker 自动派发** | 基于 Profile 的原子化任务认领与派发，防止重复执行 |
+| **多 Agent 协调** | 通过依赖链和 Workspace 隔离，实现多 Agent 分阶段协作 |
+| **人机协同** | Block/Unblock 机制、评论线程，支持 Human-in-the-Loop |
+| **可观测性** | 全事件审计日志、任务运行记录、结构化元数据 |
+| **非侵入集成** | 不改动 V1 的 Agent 发现和 WS Hub 模块 |
+
+### 数据模型
+
+V2 使用独立 SQLite 数据库，通过 WAL 模式 + `BEGIN IMMEDIATE` 事务保证并发安全。
+
+| 表 | 说明 |
+|----|------|
+| `tasks` | 核心任务实体（含状态、指派人、认领锁、优先级、工作区等） |
+| `task_links` | 父子依赖关系（多入度、扇出、自动提升） |
+| `task_runs` | 每次 Worker 执行的运行记录（含 outcome/summary/error/metadata） |
+| `task_comments` | 评论线程（Markdown 格式、作者追踪） |
+| `task_events` | 审计事件流（创建/认领/完成/阻塞/重试等事件） |
+
+### 状态机
+
+```
+                    ┌─────────────────────┐
+           ┌───────│       todo          │◄──── 有未完成的 parent
+           │       │ 待执行（依赖未满足）  │
+           │       └──────────┬──────────┘
+           │                  │ 所有 parent 完成
+           │                  ▼
+           │       ┌─────────────────────┐
+           │       │       ready         │◄──── TTL 超时释放回来
+           │       │ 准备就绪（可被认领）  │
+           │       └──────────┬──────────┘
+           │                  │ Worker 原子认领
+           │                  ▼
+           │       ┌─────────────────────┐
+           │       │      running        │
+           │       │ 执行中              │──────┬──────────┐
+           │       └─────────────────────┘      │          │
+           │                │     ▲             │          │
+           │           ┌────┘     └────┐        │          │
+           │           ▼               ▼        ▼          │
+           │  ┌──────────────┐  ┌──────────┐  ┌─────────┐ │
+           │  │   blocked    │  │completed │  │ failed  │ │
+           │  │ 人工阻塞等待   │  │ 成功完成  │  │ 失败    │ │
+           │  └──────┬───────┘  └──────────┘  └────┬────┘ │
+           │         │               │              │      │
+           │         ▼               ▼              ▼      │
+           │  ┌─────────────────────────────────────────┐  │
+           │  │               archived                  │──┘
+           │  │  归档（终点状态，不再调度）               │
+           │  └─────────────────────────────────────────┘
+           └─────────────────────────────────────────────────┘
+```
+
+### V2 API 端點一览
+
+所有 V2 端点统一以 `/v2/` 为前缀，与 V1 端点共存。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/v2/tasks` | 创建任务 |
+| GET | `/v2/tasks` | 列表查询 |
+| GET | `/v2/tasks/{id}` | 任务详情（含依赖链、评论、运行历史、事件流） |
+| POST | `/v2/tasks/{id}/claim` | Worker 原子认领 |
+| POST | `/v2/tasks/{id}/complete` | 完成任务 |
+| POST | `/v2/tasks/{id}/block` | 阻塞任务（HITL） |
+| POST | `/v2/tasks/{id}/unblock` | 解除阻塞 |
+| POST | `/v2/tasks/{id}/heartbeat` | 任务心跳（延长 TTL） |
+| POST | `/v2/tasks/{id}/comment` | 添加评论 |
+| DELETE | `/v2/tasks/{id}` | 归档任务 |
+| POST | `/v2/tasks/{id}/depend` | 添加依赖关系 |
+| DELETE | `/v2/tasks/{id}/depend/{parent_id}` | 移除依赖关系 |
+
+### V2 统计端點
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/v2/stats` | 编排引擎统计（按状态分组） |
+
+详细 V2 API 请参见 [docs/architecture-v2.md](docs/architecture-v2.md#4-api-契约)。
+
+### 使用示例
+
+```bash
+# 1. 创建任务
+curl -s -X POST http://localhost:8321/v2/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "实现登录模块",
+    "body": "## 需求\n实现用户登录功能...",
+    "assignee": "coder-agent",
+    "priority": 1
+  }'
+
+# 2. 查询任务列表
+curl -s "http://localhost:8321/v2/tasks?status=ready"
+
+# 3. 获取任务详情（含依赖链、运行记录、评论、事件）
+curl -s "http://localhost:8321/v2/tasks/t_a1b2c3d4"
+
+# 4. 创建带依赖的任务
+curl -s -X POST http://localhost:8321/v2/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "编写测试",
+    "parents": ["t_parent_id"]
+  }'
+
+# 5. 查询 V2 统计
+curl -s "http://localhost:8321/v2/stats"
+```
+
+---
+
+## V1 API 参考
 
 ### Agent 管理
 
@@ -65,7 +228,7 @@ a2a-registry --host 0.0.0.0 --port 8321 --data-dir ~/.simple-a2a-registry
 |------|------|------|
 | POST | `/v1/agents/{id}/heartbeat` | 发送心跳（成功返回 203） |
 
-### WebSocket 长连接（新增）
+### WebSocket 长连接
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -82,12 +245,13 @@ a2a-registry --host 0.0.0.0 --port 8321 --data-dir ~/.simple-a2a-registry
 | Registry → Agent | `task` | 分发任务：`{"type":"task","id":"...","query":"...","sessionId":"..."}` |
 | Registry → Agent | `close` | 连接被替换/关闭通知：`{"type":"close","reason":"replaced"}` |
 
-### 任务分发（新增）
+### 任务分发
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/v1/agents/{id}/dispatch` | 向 Agent 分发任务，要求 Agent 已通过 WebSocket 连接 |
-| GET | `/v1/tasks/{id}` | 查询任务状态和结果 |
+| GET | `/v1/tasks` | 列出 V1 任务 |
+| GET | `/v1/tasks/{id}` | 查询 V1 任务状态和结果 |
 
 **分发请求体：**
 ```json
@@ -239,22 +403,42 @@ while True:
     time.sleep(1)
 ```
 
+### V2 编排引擎示例
+
+```bash
+# 1. 创建任务
+curl -s -X POST http://localhost:8321/v2/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "设计数据库 Schema",
+    "assignee": "designer-agent"
+  }'
+
+# 2. 创建依赖子任务
+curl -s -X POST http://localhost:8321/v2/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "实现业务逻辑",
+    "assignee": "coder-agent",
+    "parents": ["t_parent_task_id"]
+  }'
+
+# 3. 查询状态
+curl -s "http://localhost:8321/v2/tasks?status=todo,ready,running"
+
+# 4. 获取编排引擎统计
+curl -s http://localhost:8321/v2/stats | jq .
+```
+
 ## 文档
 
 更多详细文档请参见 `docs/` 目录：
 
 | 文档 | 说明 |
 |------|------|
-| [docs/API.md](docs/API.md) | 完整的 API 参考（含 WS、任务分发、任务状态） |
-| [docs/architecture.md](docs/architecture.md) | 架构设计、组件说明、数据流图 |
-
-## Dashboard
-
-打开 http://localhost:8321 查看 Web Dashboard：
-- Agent 列表（状态、标签、技能）
-- Agent 详情展开面板
-- WebSocket 连接标识（WS 徽章）
-- 实时刷新（每 15 秒）
+| [docs/API.md](docs/API.md) | V1 + V2 完整 API 参考 |
+| [docs/architecture.md](docs/architecture.md) | V1 架构设计、组件说明、数据流图 |
+| [docs/architecture-v2.md](docs/architecture-v2.md) | V2 编排引擎架构设计（状态机、API 契约、Dispatcher、Workspace、HITL） |
 
 ## License
 

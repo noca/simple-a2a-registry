@@ -15,6 +15,15 @@ from aiohttp import web, WSMsgType
 
 from simple_a2a_registry.models import make_agent_card, make_agent_skill
 from simple_a2a_registry.store import A2ARegistryStore, HEARTBEAT_TIMEOUT
+from simple_a2a_registry.orchestration import (
+    TaskStore,
+    TaskStatus,
+    OrchestrationHandler,
+    register_v2_routes,
+    Dispatcher,
+    DispatcherConfig,
+    WorkspaceManager,
+)
 
 logger = logging.getLogger("a2a_registry.server")
 
@@ -76,6 +85,10 @@ class RegistryHandler:
 
         # Task store: task_id -> {"state":..., "query":..., "result":..., ...}
         self._tasks: Dict[str, Dict[str, Any]] = {}
+
+        # Kanban integration (wired up by create_app)
+        self.task_store: Optional[TaskStore] = None
+        self._dispatched_ws_tasks: Optional[Dict[str, str]] = None
 
     # ------------------------------------------------------------------
     # Health / meta
@@ -275,6 +288,9 @@ class RegistryHandler:
         # Mark alive in store
         self.store.heartbeat(agent_id)
 
+        # On reconnection, dispatch any pending tasks blocked for this agent
+        await _maybe_dispatch_pending(self.task_store, ws, agent_id, self._dispatched_ws_tasks)
+
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
@@ -318,6 +334,16 @@ class RegistryHandler:
                             logger.info("Task %s result received (auto-created) from agent '%s'",
                                         task_id, agent_id)
 
+                        # Reconcile with kanban TaskStore if this is a WS-dispatched kanban task
+                        _maybe_update_kanban(
+                            self.task_store,
+                            self._dispatched_ws_tasks,
+                            task_id,
+                            data.get("status", "completed"),
+                            data.get("result"),
+                            data.get("error"),
+                        )
+
                     elif msg_type == "task_progress":
                         task_id = data.get("id", "")
                         task = self._tasks.get(task_id)
@@ -356,7 +382,8 @@ class RegistryHandler:
         except Exception as e:
             logger.error("WS handler error for agent '%s': %s", agent_id, e)
         finally:
-            self._ws_connections.pop(agent_id, None)
+            if self._ws_connections.get(agent_id) is ws:
+                self._ws_connections.pop(agent_id, None)
             if not ws.closed:
                 await ws.close()
             logger.info("Agent '%s' disconnected via WebSocket (%d active)",
@@ -524,7 +551,58 @@ class RegistryHandler:
 
 
 # ---------------------------------------------------------------------------
-# App factory
+# Error handling middleware
+# ---------------------------------------------------------------------------
+
+
+@web.middleware
+async def _error_middleware(
+    request: web.Request, handler: Any
+) -> web.StreamResponse:
+    """Catch unhandled exceptions and return a consistent JSON error response.
+
+    All API endpoints (V1 and V2) use ``{"error": str, "detail": str}`` as their
+    error envelope.  This middleware ensures even an unexpected 500 follows the
+    same shape.
+    """
+    try:
+        response = await handler(request)
+        return response
+    except web.HTTPException as exc:
+        # aiohttp-native HTTP exceptions (404, 405, etc.)
+        return web.json_response(
+            {
+                "error": _status_to_error_code(exc.status),
+                "detail": exc.reason or str(exc),
+            },
+            status=exc.status,
+        )
+    except json.JSONDecodeError:
+        return _json_error(400, "invalid_json", "Invalid JSON body")
+    except Exception:
+        logger.exception("Unhandled error handling %s %s", request.method, request.path)
+        return _json_error(500, "internal_error", "Internal server error")
+
+
+def _status_to_error_code(status: int) -> str:
+    """Map an HTTP status code to a canonical error code string."""
+    _MAP = {
+        400: "bad_request",
+        401: "unauthorized",
+        403: "forbidden",
+        404: "not_found",
+        405: "method_not_allowed",
+        409: "conflict",
+        410: "gone",
+        422: "unprocessable_entity",
+        429: "too_many_requests",
+        500: "internal_error",
+        502: "bad_gateway",
+        503: "service_unavailable",
+    }
+    return _MAP.get(status, f"http_{status}")
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -555,15 +633,132 @@ async def _cleanup_task(app: web.Application) -> None:
         raise
 
 
+# ------------------------------------------------------------------
+# WebSocket ↔ Kanban bridge helpers
+# ------------------------------------------------------------------
+
+
+def _maybe_update_kanban(
+    task_store: Optional[TaskStore],
+    dispatched_tasks: Optional[Dict[str, str]],
+    task_id: str,
+    status: str,
+    result: Optional[str],
+    error: Optional[str],
+) -> None:
+    """If *task_id* was WS-dispatched from the kanban board,
+    update its status in the TaskStore.
+
+    Only completed/failed/error statuses are written back; progress
+    updates are ignored (the TaskStore has its own lifecycle model).
+    """
+    if task_store is None or dispatched_tasks is None:
+        return
+    if task_id not in dispatched_tasks:
+        return
+
+    if status in ("completed", "success"):
+        try:
+            task_store.update_task_status(
+                task_id, TaskStatus.COMPLETED.value,
+                result=json.dumps(result) if isinstance(result, dict) else result,
+            )
+            logger.info("Kanban task %s → completed (via WS task_result)", task_id)
+        except Exception:
+            logger.exception("Failed to complete kanban task '%s' from WS result", task_id)
+    elif status in ("failed", "error"):
+        try:
+            task_store.update_task_status(
+                task_id, TaskStatus.FAILED.value,
+                result=error or str(result) if result else "Agent reported failure",
+            )
+            logger.info("Kanban task %s → failed (via WS task_result)", task_id)
+        except Exception:
+            logger.exception("Failed to fail kanban task '%s' from WS result", task_id)
+
+
+async def _maybe_dispatch_pending(
+    task_store: Optional[TaskStore],
+    ws: web.WebSocketResponse,
+    agent_id: str,
+    dispatched_ws_tasks: Optional[Dict[str, str]] = None,
+) -> None:
+    """On reconnection, find blocked tasks assigned to *agent_id*
+    and re-dispatch them over the fresh WebSocket.
+
+    Args:
+        task_store: Kanban TaskStore (V2).
+        ws: The agent's WebSocket connection.
+        agent_id: Registered agent name.
+        dispatched_ws_tasks: Optional shared dict from the Dispatcher
+            so re-dispatched tasks are tracked for result reconciliation.
+    """
+    if task_store is None:
+        return
+    try:
+        blocked, _ = task_store.list_tasks(
+            status=TaskStatus.BLOCKED.value,
+            assignee=agent_id,
+            limit=50,
+            sort="-priority",
+        )
+        if not blocked:
+            return
+
+        for task in blocked:
+            try:
+                task_store.update_task_status(
+                    task.id, TaskStatus.RUNNING.value,
+                )
+                task_msg = {
+                    "type": "task",
+                    "id": task.id,
+                    "title": task.title,
+                    "body": task.body or "",
+                    "assignee": agent_id,
+                    "priority": task.priority,
+                    "workspace_path": task.workspace_path or "",
+                    "kanban": True,
+                }
+                await ws.send_json(task_msg)
+                # Record in shared tracking dict so _maybe_update_kanban can
+                # reconcile results when the agent reports completion
+                if dispatched_ws_tasks is not None:
+                    dispatched_ws_tasks[task.id] = agent_id
+                logger.info(
+                    "Re-dispatched pending task '%s' to reconnected agent '%s'",
+                    task.id, agent_id,
+                )
+            except Exception as e:
+                logger.error("Failed to re-dispatch task '%s': %s", task.id, e)
+    except Exception:
+        logger.exception("Error checking pending tasks for agent '%s'", agent_id)
+
+
 def create_app(
     data_dir: str = "~/.simple-a2a-registry",
     base_url: str = "http://localhost:8321",
+    board_path: Optional[str] = None,
+    *,
+    dispatcher_enabled: bool = True,
+    dispatcher_interval: int = 5,
+    claim_ttl: int = 900,
+    failure_limit: int = 3,
+    workspaces_root: Optional[str] = None,
 ) -> web.Application:
     """Create and configure the aiohttp web application.
 
     Args:
         data_dir: Path to persistent data directory.
         base_url: Public base URL for this registry.
+        board_path: SQLite path for the V2 orchestration board.
+            Defaults to ``<data_dir>/board.db``.
+        dispatcher_enabled: Whether to start the background Dispatcher.
+        dispatcher_interval: Dispatcher poll interval in seconds.
+        claim_ttl: Claim lock TTL in seconds (default 900 / 15 min).
+        failure_limit: Global default retry limit.
+        workspaces_root: Root directory for scratch workspaces.
+            Defaults to ``<data_dir>/workspaces``.
 
     Returns:
         Configured :class:`aiohttp.web.Application`.
@@ -571,9 +766,38 @@ def create_app(
     store = A2ARegistryStore(data_dir)
     handler = RegistryHandler(store, base_url)
 
-    app = web.Application()
+    # V2 Orchestration Engine
+    if board_path is None:
+        board_path = str(Path(data_dir).expanduser() / "board.db")
+    task_store = TaskStore(board_path)
+    orch_handler = OrchestrationHandler(task_store)
+
+    # V2 Workspace Manager
+    if workspaces_root is None:
+        workspaces_root = str(Path(data_dir).expanduser() / "workspaces")
+    ws_mgr = WorkspaceManager(workspaces_root)
+
+    # V2 Dispatcher (background worker dispatch)
+    disp_config = DispatcherConfig(
+        poll_interval=dispatcher_interval,
+        claim_ttl=claim_ttl,
+        failure_limit=failure_limit,
+    )
+    dispatcher = Dispatcher(task_store, ws_mgr, disp_config,
+                               ws_connections=handler._ws_connections) if dispatcher_enabled else None
+
+    # Wire up cross-references for WebSocket ↔ Kanban integration
+    handler.task_store = task_store
+    if dispatcher:
+        handler._dispatched_ws_tasks = dispatcher._dispatched_ws_tasks
+
+    app = web.Application(middlewares=[_error_middleware])
     app["store"] = store
     app["handler"] = handler
+    app["task_store"] = task_store
+    app["orch_handler"] = orch_handler
+    app["ws_mgr"] = ws_mgr
+    app["dispatcher"] = dispatcher
 
     # Health / well-known
     app.router.add_get("/health", handler.handle_health)
@@ -618,12 +842,26 @@ def create_app(
             return web.FileResponse(static_dir / "index.html")
         app.router.add_get("/", _dashboard, name="dashboard")
 
-    # Background cleanup
+    # V2 Orchestration routes
+    register_v2_routes(app, orch_handler)
+
+    # Background cleanup + Dispatcher
     cleanup_task_ref: list[asyncio.Task] = []
-    async def _start_cleanup(app: web.Application) -> None:
+    async def _start_background(app: web.Application) -> None:
+        # V1 cleanup task
         task = asyncio.create_task(_cleanup_task(app))
         cleanup_task_ref.append(task)
-    async def _stop_cleanup(app: web.Application) -> None:
+        # V2 Dispatcher
+        disp: Optional[Dispatcher] = app.get("dispatcher")
+        if disp:
+            asyncio.create_task(disp.run())
+
+    async def _stop_background(app: web.Application) -> None:
+        # Stop Dispatcher
+        disp: Optional[Dispatcher] = app.get("dispatcher")
+        if disp:
+            disp.stop()
+        # Cancel cleanup task
         if cleanup_task_ref:
             task = cleanup_task_ref[0]
             task.cancel()
@@ -631,8 +869,13 @@ def create_app(
                 await task
             except asyncio.CancelledError:
                 pass
-    app.on_startup.append(_start_cleanup)
-    app.on_cleanup.append(_stop_cleanup)
+        # Close TaskStore
+        ts: TaskStore = app.get("task_store")
+        if ts:
+            ts.close()
+
+    app.on_startup.append(_start_background)
+    app.on_cleanup.append(_stop_background)
 
     return app
 
@@ -641,6 +884,12 @@ def run_server(
     host: str = "0.0.0.0",
     port: int = 8321,
     data_dir: str = "~/.simple-a2a-registry",
+    board_path: Optional[str] = None,
+    dispatcher_enabled: bool = True,
+    dispatcher_interval: int = 5,
+    claim_ttl: int = 900,
+    failure_limit: int = 3,
+    workspaces_root: Optional[str] = None,
 ) -> None:
     """Start the A2A Registry HTTP server.
 
@@ -648,8 +897,22 @@ def run_server(
         host: Bind address.
         port: Bind port.
         data_dir: Persistent data directory.
+        board_path: SQLite database path for the V2 orchestration board.
+        dispatcher_enabled: Whether to start the background Dispatcher.
+        dispatcher_interval: Dispatcher poll interval in seconds.
+        claim_ttl: Claim lock TTL in seconds.
+        failure_limit: Global default retry limit.
+        workspaces_root: Root directory for scratch workspaces.
     """
-    app = create_app(data_dir=data_dir)
+    app = create_app(
+        data_dir=data_dir,
+        board_path=board_path,
+        dispatcher_enabled=dispatcher_enabled,
+        dispatcher_interval=dispatcher_interval,
+        claim_ttl=claim_ttl,
+        failure_limit=failure_limit,
+        workspaces_root=workspaces_root,
+    )
     logger.info(
         "Simple A2A Registry starting on %s:%s (data: %s)",
         host, port, data_dir,
