@@ -2,43 +2,40 @@
 
 Provides:
 - ``create_token()`` / ``verify_token()`` — JWT sign/verify (RS256 primary, HS256 fallback)
-- ``AuthStore`` — in-memory + JSON-persisted client/token tables
+- ``AuthStore`` — re-exported from ``store.py`` for backward compatibility
+- ``AuthHandler`` — aiohttp handlers for ``/auth/*`` token and registration endpoints
 - ``AuthMiddleware`` — aiohttp middleware that validates Bearer tokens
 - ``require_scope`` — view-level decorator for granular scope enforcement
+
+The persistent layer (``Store`` / ``AuthStore``) now lives in ``store.py``.
 """
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
-import secrets
 import time
 import uuid
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 import jwt
 from aiohttp import web
 
+# Re-export Store as AuthStore for backward compatibility.
+# The unified ``Store`` class in ``store.py`` now provides both registry
+# and auth persistence, but code that imports ``AuthStore`` from ``auth``
+# still works.
+from simple_a2a_registry.store import Store as AuthStore  # noqa: F401
+from simple_a2a_registry.store import ClientRecord, TokenRecord  # noqa: F401
+from simple_a2a_registry.store import SCOPES, AUTH_CODE_EXPIRY_SECONDS
+
 logger = logging.getLogger("a2a_registry.auth")
 
 # ---------------------------------------------------------------------------
-# Constants / scopes
+# Constants
 # ---------------------------------------------------------------------------
 
-SCOPES: Dict[str, str] = {
-    "task:read": "Read task list and details",
-    "task:write": "Create and modify tasks",
-    "agent:read": "Read agent list and details",
-    "agent:register": "Register new agents",
-    "agent:admin": "Manage agents (delete/disable)",
-    "registry:admin": "Registry administration operations",
-}
-
 TOKEN_EXPIRY_SECONDS = 3600  # 1 hour
-AUTH_CODE_EXPIRY_SECONDS = 600  # 10 minutes for authorization codes
 
 ISSUER = "simple-a2a-registry"
 
@@ -96,7 +93,7 @@ def create_token(
     Args:
         sub: Subject (client_id / agent_id).
         private_key: PEM-encoded private key (RS256) or shared secret (HS256).
-        algorithm: JWT signing algorithm ("RS256" or "HS256").
+        algorithm: JWT signing algorithm (``RS256`` or ``HS256``).
         audience: List of intended audiences.
         scope: Space-separated scope string.
         expiry: Token lifetime in seconds.
@@ -284,297 +281,6 @@ def _rsa_verify_jwt(
 
 
 # ---------------------------------------------------------------------------
-# AuthStore — client registration + token tracking
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ClientRecord:
-    """A registered OAuth 2.1 client (agent)."""
-
-    client_id: str
-    client_secret_hash: str
-    allowed_scopes: List[str] = field(default_factory=lambda: list(SCOPES.keys()))
-    agent_card_id: str = ""
-    created_at: float = 0.0
-    description: str = ""
-
-
-@dataclass
-class TokenRecord:
-    """An issued access token record for auditing / revocation."""
-
-    jti: str
-    client_id: str
-    scope: str
-    expires_at: float
-
-
-class AuthStore:
-    """Persistent OAuth client and token store (in-memory + JSON file)."""
-
-    def __init__(self, data_dir: str) -> None:
-        self.data_dir = Path(data_dir).expanduser().resolve()
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self._file = self.data_dir / "auth.json"
-        self._lock = asyncio.Lock()
-
-        self._clients: Dict[str, ClientRecord] = {}
-        self._tokens: Dict[str, TokenRecord] = {}
-        self._auth_codes: Dict[str, Dict[str, Any]] = {}  # code -> data
-
-        self._load()
-
-        # Bootstrap registry service account if not present
-        self._bootstrap_registry()
-
-    # -- Persistence -------------------------------------------------------
-
-    def _load(self) -> None:
-        if not self._file.exists():
-            return
-        try:
-            data = json.loads(self._file.read_text())
-            for cid, rec in data.get("clients", {}).items():
-                self._clients[cid] = ClientRecord(**rec)
-            for jti, rec in data.get("tokens", {}).items():
-                self._tokens[jti] = TokenRecord(**rec)
-            logger.info("Loaded %d clients, %d tokens from auth store",
-                        len(self._clients), len(self._tokens))
-        except Exception as e:
-            logger.warning("Failed to load auth store: %s", e)
-
-    def _save(self) -> None:
-        clients_dict = {
-            cid: {
-                "client_id": rec.client_id,
-                "client_secret_hash": rec.client_secret_hash,
-                "allowed_scopes": rec.allowed_scopes,
-                "agent_card_id": rec.agent_card_id,
-                "created_at": rec.created_at,
-                "description": rec.description,
-            }
-            for cid, rec in self._clients.items()
-        }
-        tokens_dict = {
-            jti: {
-                "jti": rec.jti,
-                "client_id": rec.client_id,
-                "scope": rec.scope,
-                "expires_at": rec.expires_at,
-            }
-            for jti, rec in self._tokens.items()
-        }
-        try:
-            tmp = self._file.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(
-                    {"clients": clients_dict, "tokens": tokens_dict},
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-            tmp.replace(self._file)
-        except Exception as e:
-            logger.error("Failed to save auth store: %s", e)
-
-    # -- Bootstrap ---------------------------------------------------------
-
-    def _bootstrap_registry(self) -> None:
-        """Create the registry's own service account if it doesn't exist."""
-        if "simple-a2a-registry" in self._clients:
-            return
-        secret = secrets.token_urlsafe(32)
-        secret_hash = self._hash_secret(secret)
-        self._clients["simple-a2a-registry"] = ClientRecord(
-            client_id="simple-a2a-registry",
-            client_secret_hash=secret_hash,
-            allowed_scopes=["registry:admin", "agent:admin"],
-            agent_card_id="simple-a2a-registry",
-            created_at=time.time(),
-            description="Registry service account (auto-bootstrapped)",
-        )
-        self._save()
-        logger.info(
-            "Bootstrapped registry service account "
-            "(client_id=simple-a2a-registry, secret=%s)", secret
-        )
-
-    # -- Client CRUD -------------------------------------------------------
-
-    def register_client(
-        self,
-        *,
-        agent_card_id: str = "",
-        allowed_scopes: Optional[List[str]] = None,
-        description: str = "",
-    ) -> Dict[str, str]:
-        """Register a new OAuth 2.1 client.
-
-        Returns:
-            Dict with ``client_id`` and ``client_secret`` (raw — show once).
-        """
-        client_id = f"client-{uuid.uuid4().hex[:12]}"
-        client_secret = secrets.token_urlsafe(32)
-        secret_hash = self._hash_secret(client_secret)
-
-        self._clients[client_id] = ClientRecord(
-            client_id=client_id,
-            client_secret_hash=secret_hash,
-            allowed_scopes=allowed_scopes or list(SCOPES.keys()),
-            agent_card_id=agent_card_id,
-            created_at=time.time(),
-            description=description,
-        )
-        self._save()
-        return {"client_id": client_id, "client_secret": client_secret}
-
-    def list_clients(self) -> List[Dict[str, Any]]:
-        """List all registered OAuth clients with token counts.
-
-        Returns:
-            List of dicts with client metadata + active token count.
-        """
-        now = time.time()
-        result: List[Dict[str, Any]] = []
-        for cid, rec in self._clients.items():
-            token_count = sum(
-                1 for t in self._tokens.values()
-                if t.client_id == cid and t.expires_at > now
-            )
-            result.append({
-                "client_id": rec.client_id,
-                "agent_card_id": rec.agent_card_id,
-                "description": rec.description,
-                "scopes": rec.allowed_scopes,
-                "token_count": token_count,
-                "created_at": rec.created_at,
-            })
-        return result
-
-    def delete_client(self, client_id: str) -> bool:
-        """Delete a client and revoke all its tokens.
-
-        Returns:
-            True if the client was found and deleted, False otherwise.
-        """
-        if client_id not in self._clients:
-            return False
-        # Revoke all tokens for this client first
-        self.revoke_client_tokens(client_id)
-        # Remove the client record
-        del self._clients[client_id]
-        self._save()
-        return True
-
-    def get_client(self, client_id: str) -> Optional[ClientRecord]:
-        return self._clients.get(client_id)
-
-    def verify_client_secret(self, client_id: str, secret: str) -> bool:
-        rec = self._clients.get(client_id)
-        if rec is None:
-            return False
-        return secrets.compare_digest(rec.client_secret_hash, self._hash_secret(secret))
-
-    def client_allowed_scopes(self, client_id: str, requested_scopes: str) -> bool:
-        """Check that all requested scopes are allowed for this client."""
-        rec = self._clients.get(client_id)
-        if rec is None:
-            return False
-        requested = set(requested_scopes.split())
-        allowed = set(rec.allowed_scopes)
-        return requested.issubset(allowed)
-
-    # -- Token tracking ----------------------------------------------------
-
-    def record_token(self, token_payload: Dict[str, Any]) -> None:
-        jti = token_payload.get("jti", "")
-        self._tokens[jti] = TokenRecord(
-            jti=jti,
-            client_id=token_payload.get("sub", ""),
-            scope=token_payload.get("scope", ""),
-            expires_at=token_payload.get("exp", 0),
-        )
-        self._save()
-
-    def get_token(self, jti: str) -> Optional[TokenRecord]:
-        rec = self._tokens.get(jti)
-        if rec is None:
-            return None
-        if rec.expires_at < time.time():
-            self._tokens.pop(jti, None)
-            self._save()
-            return None
-        return rec
-
-    def revoke_token(self, jti: str) -> bool:
-        if jti in self._tokens:
-            del self._tokens[jti]
-            self._save()
-            return True
-        return False
-
-    def revoke_client_tokens(self, client_id: str) -> int:
-        to_remove = [jti for jti, rec in self._tokens.items() if rec.client_id == client_id]
-        for jti in to_remove:
-            del self._tokens[jti]
-        if to_remove:
-            self._save()
-        return len(to_remove)
-
-    # -- Authorization codes (for authorization_code grant) ----------------
-
-    def create_auth_code(
-        self, client_id: str, code_challenge: str, code_challenge_method: str,
-        redirect_uri: str, scope: str,
-    ) -> str:
-        code = secrets.token_urlsafe(32)
-        self._auth_codes[code] = {
-            "client_id": client_id,
-            "code_challenge": code_challenge,
-            "code_challenge_method": code_challenge_method,
-            "redirect_uri": redirect_uri,
-            "scope": scope,
-            "created_at": time.time(),
-        }
-        return code
-
-    def consume_auth_code(self, code: str, code_verifier: str) -> Optional[Dict[str, Any]]:
-        data = self._auth_codes.pop(code, None)
-        if data is None:
-            return None
-        if time.time() - data["created_at"] > AUTH_CODE_EXPIRY_SECONDS:
-            return None
-        # PKCE verification
-        if data["code_challenge_method"] == "S256":
-            expected = self._hash_s256(code_verifier)
-            if not secrets.compare_digest(expected, data["code_challenge"]):
-                logger.warning("PKCE code_verifier mismatch")
-                return None
-        return data
-
-    # -- Internal helpers --------------------------------------------------
-
-    @staticmethod
-    def _hash_secret(secret: str) -> str:
-        return hashlib.sha256(secret.encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _hash_s256(value: str) -> str:
-        return hashlib.sha256(value.encode("utf-8")).digest().hex()
-
-    def stats(self) -> Dict[str, Any]:
-        now = time.time()
-        active_tokens = sum(1 for t in self._tokens.values() if t.expires_at > now)
-        return {
-            "totalClients": len(self._clients),
-            "totalTokens": len(self._tokens),
-            "activeTokens": active_tokens,
-        }
-
-
-# ---------------------------------------------------------------------------
 # AuthMiddleware — aiohttp middleware
 # ---------------------------------------------------------------------------
 
@@ -594,8 +300,6 @@ def _auth_middleware_factory(
     - ``/.well-known/*`` — discovery endpoints are public
     - ``/health`` — health check is public
     - ``/`` — dashboard is public
-    - ``/v1/*`` — V1 API is unauthenticated (deprecated)
-    - ``/v2/*`` — V2 API is unauthenticated (deprecated endpoints will be migrated)
 
     When ``enabled=False``, the middleware is a no-op pass-through.
     """
@@ -621,7 +325,6 @@ def _auth_middleware_factory(
             or path == "/"
             # WebSocket upgrade — token passed via ?token=xxx query param
             or path.endswith("/ws")
-            # Agent registration — now requires Bearer token
             # JWKS endpoint — public key distribution
             or path == "/.well-known/jwks.json"
         ):
@@ -958,6 +661,7 @@ def make_jwks_endpoint(public_key_pem: str) -> Callable:
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.hazmat.backends import default_backend
+    import base64
 
     public_key = serialization.load_pem_public_key(
         public_key_pem.encode("utf-8"),
@@ -967,9 +671,6 @@ def make_jwks_endpoint(public_key_pem: str) -> Callable:
         raise TypeError("Expected RSA public key")
 
     pub_numbers = public_key.public_numbers()
-
-    # Base64url-encode the modulus (n) and exponent (e)
-    import base64
 
     def _b64url(n: int) -> str:
         byte_length = (n.bit_length() + 7) // 8

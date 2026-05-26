@@ -14,9 +14,8 @@ from typing import Any, Dict, List, Optional
 from aiohttp import web, WSMsgType
 
 from simple_a2a_registry.models import make_agent_card, make_agent_skill
-from simple_a2a_registry.store import A2ARegistryStore, HEARTBEAT_TIMEOUT
+from simple_a2a_registry.store import Store, HEARTBEAT_TIMEOUT
 from simple_a2a_registry.auth import (
-    AuthStore,
     AuthHandler,
     _generate_rsa_keypair,
     _auth_middleware_factory,
@@ -91,8 +90,8 @@ def _registry_card(base_url: str) -> Dict:
 class RegistryHandler:
     """HTTP + WebSocket handler methods for the A2A Registry."""
 
-    def __init__(self, store: A2ARegistryStore, base_url: str,
-                 auth_store: Optional[AuthStore] = None) -> None:
+    def __init__(self, store: Store, base_url: str,
+                 auth_store: Optional[Store] = None) -> None:
         self.store = store
         self.base_url = base_url.rstrip("/")
         self._started_at = time.time()
@@ -351,14 +350,27 @@ class RegistryHandler:
             # Verify the token's sub matches:
             #   - the agent's own ID, or
             #   - "simple-a2a-registry" (registry service account), or
-            #   - an OAuth client_id whose agent_card_id matches this agent's name
+            #   - an OAuth client_id whose agent_card_id matches this agent's
+            #     name OR whose agent_card_id is a suffix/substring of the name
+            #     (e.g. agent_card_id="coder-agent" matches name="Hermes Coder Agent")
             token_sub = payload.get("sub", "")
             if token_sub not in (agent_id, "simple-a2a-registry"):
                 sub_ok = False
                 if self.auth_store:
                     client = self.auth_store.get_client(token_sub)
-                    if client and client.agent_card_id == card.get("name"):
-                        sub_ok = True
+                    if client and client.agent_card_id:
+                        card_name = (card.get("name") or "").lower()
+                        card_id = client.agent_card_id.lower()
+                        # Normalize hyphens/underscores to spaces for matching
+                        # e.g. "coder-agent" ↔ "hermes coder agent"
+                        card_id_norm = card_id.replace("-", " ").replace("_", " ")
+                        sub_ok = (
+                            card_id == card_name
+                            or card_id in card_name
+                            or card_name.endswith(card_id)
+                            or card_id_norm in card_name
+                            or card_name.endswith(card_id_norm)
+                        )
                 if not sub_ok:
                     return web.json_response(
                         {"error": "forbidden", "detail":
@@ -715,7 +727,7 @@ class AdminHandler:
     Only registered when ``auth_enabled=True``.
     """
 
-    def __init__(self, auth_store: AuthStore) -> None:
+    def __init__(self, auth_store: Store) -> None:
         self.auth_store = auth_store
 
     async def handle_create_client(self, request: web.Request) -> web.Response:
@@ -832,7 +844,7 @@ class AdminHandler:
 
 async def _cleanup_task(app: web.Application) -> None:
     """Background task to purge stale agents."""
-    store: A2ARegistryStore = app["store"]
+    store: Store = app["store"]
     handler: RegistryHandler = app.get("handler")
     try:
         while True:
@@ -965,6 +977,7 @@ def create_app(
     board_path: Optional[str] = None,
     *,
     auth_enabled: bool = False,
+    bootstrap_secret: Optional[str] = None,
     dispatcher_enabled: bool = True,
     dispatcher_interval: int = 5,
     claim_ttl: int = 900,
@@ -988,7 +1001,7 @@ def create_app(
     Returns:
         Configured :class:`aiohttp.web.Application`.
     """
-    store = A2ARegistryStore(data_dir)
+    store = Store(data_dir, bootstrap_secret=bootstrap_secret)
     handler = RegistryHandler(store, base_url)
 
     # V2 Orchestration Engine
@@ -1004,7 +1017,6 @@ def create_app(
 
     # OAuth 2.1 Authentication
     # Generate RSA key pair at startup (RS256 primary, HS256 dev fallback)
-    auth_store = AuthStore(data_dir)
     if auth_enabled:
         private_key, public_key = _generate_rsa_keypair()
         algorithm = "RS256"
@@ -1015,14 +1027,14 @@ def create_app(
         logger.info("OAuth 2.1 auth disabled — dev mode (HS256 fallback)")
 
     auth_handler = AuthHandler(
-        auth_store,
+        store,  # same Store instance handles both registry and auth persistence
         private_key=private_key,
         algorithm=algorithm,
         base_url=base_url,
     )
 
-    # Wire auth_store to handler for WebSocket client auth and admin endpoints
-    handler.auth_store = auth_store
+    # Wire store to handler for WebSocket client auth and admin endpoints
+    handler.auth_store = store
     handler._auth_public_key = public_key
     handler._auth_algorithm = algorithm
     handler._auth_enabled = auth_enabled
@@ -1044,7 +1056,7 @@ def create_app(
     app = web.Application(middlewares=[
         _error_middleware,
         _auth_middleware_factory(
-            auth_store,
+            store,
             enabled=auth_enabled,
             public_key=public_key,
             algorithm=algorithm,
@@ -1052,7 +1064,7 @@ def create_app(
     ])
     app["store"] = store
     app["handler"] = handler
-    app["auth_store"] = auth_store
+    app["auth_store"] = store
     app["auth_handler"] = auth_handler
     app["task_store"] = task_store
     app["orch_handler"] = orch_handler
@@ -1120,17 +1132,10 @@ def create_app(
             html_path = static_dir / "index.html"
             html = html_path.read_text(encoding="utf-8")
             if auth_enabled:
-                # Generate a dashboard-specific token with all scopes
-                dash_token = create_token(
-                    sub="dashboard",
-                    private_key=private_key,
-                    algorithm=algorithm,
-                    scope=" ".join(SCOPES.keys()),
-                )
-                # Inject auth config before closing </head>
+                # Inject auth config: client checks sessionStorage for token
                 config_script = (
                     "<script>\n"
-                    f"window.__AUTH_CONFIG = {{ enabled: true, token: {json.dumps(dash_token)} }};\n"
+                    "window.__AUTH_CONFIG = { enabled: true };\n"
                     "</script>\n</head>"
                 )
                 html = html.replace("</head>", config_script)
@@ -1165,7 +1170,7 @@ def create_app(
             logger.warning("Failed to create JWKS endpoint (non-fatal): %s", e)
 
         # Admin REST API — create/list/delete OAuth clients
-        admin_handler = AdminHandler(auth_store)
+        admin_handler = AdminHandler(store)
         app.router.add_post(
             "/admin/clients",
             require_scope("registry:admin")(admin_handler.handle_create_client),
@@ -1219,6 +1224,7 @@ def run_server(
     port: int = 8321,
     data_dir: str = "~/.simple-a2a-registry",
     auth_enabled: bool = False,
+    bootstrap_secret: Optional[str] = None,
     board_path: Optional[str] = None,
     dispatcher_enabled: bool = True,
     dispatcher_interval: int = 5,
@@ -1243,6 +1249,7 @@ def run_server(
     app = create_app(
         data_dir=data_dir,
         auth_enabled=auth_enabled,
+        bootstrap_secret=bootstrap_secret,
         board_path=board_path,
         dispatcher_enabled=dispatcher_enabled,
         dispatcher_interval=dispatcher_interval,

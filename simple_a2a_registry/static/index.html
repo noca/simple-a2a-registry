@@ -8,8 +8,9 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0d1117; color: #c9d1d9; }
   .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
-  h1 { font-size: 24px; font-weight: 600; margin-bottom: 24px; }
+  h1 { font-size: 24px; font-weight: 600; }
   h1 small { font-size: 14px; font-weight: 400; color: #8b949e; }
+  .header-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }
   .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
   .stat-label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -67,7 +68,7 @@
   .error { text-align: center; padding: 48px; color: #f85149; }
   code { font-size: 12px; color: #8b949e; word-break: break-all; }
 
-  /* --- Kanban-specific styles --- */
+  /* Kanban-specific styles */
   .badge-todo      { background: #8b949e22; color: #8b949e; }
   .badge-ready     { background: #58a6ff22; color: #58a6ff; }
   .badge-running   { background: #d2a8ff22; color: #d2a8ff; }
@@ -117,11 +118,79 @@
   .run-item { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; margin-bottom: 6px; font-size: 12px; }
   .run-item .run-status { font-weight: 500; }
   .run-item .run-outcome { color: #8b949e; }
+
+  /* Login overlay */
+  #login-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: #0d1117; z-index: 9999;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #login-overlay.hidden { display: none !important; }
+  .login-modal {
+    background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+    padding: 40px; width: 420px; max-width: 90vw;
+  }
+  .login-modal h2 {
+    font-size: 22px; font-weight: 600; color: #f0f6fc; margin-bottom: 6px;
+  }
+  .login-modal .subtitle {
+    font-size: 13px; color: #8b949e; margin-bottom: 28px;
+  }
+  .login-modal label {
+    display: block; font-size: 12px; color: #8b949e;
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;
+  }
+  .login-modal input {
+    width: 100%; background: #0d1117; border: 1px solid #30363d;
+    border-radius: 6px; padding: 10px 14px; color: #c9d1d9;
+    font-size: 14px; margin-bottom: 16px; outline: none;
+  }
+  .login-modal input:focus { border-color: #58a6ff; }
+  .login-modal .login-btn {
+    width: 100%; background: #238636; border: none; border-radius: 6px;
+    padding: 10px; color: #fff; font-size: 15px; font-weight: 500;
+    cursor: pointer; margin-top: 4px;
+  }
+  .login-modal .login-btn:hover { background: #2ea043; }
+  .login-modal .login-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+  .login-modal .login-error {
+    color: #f85149; font-size: 13px; margin-top: 12px; display: none;
+  }
+  .login-modal .login-error.show { display: block; }
+
+  /* Logout button in header */
+  .header-right { display: flex; align-items: center; gap: 12px; }
+  .auth-badge {
+    font-size: 11px; color: #8b949e; padding: 4px 10px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+  }
+  .logout-btn {
+    background: transparent; border: 1px solid #30363d; border-radius: 6px;
+    padding: 6px 14px; color: #8b949e; font-size: 13px; cursor: pointer;
+  }
+  .logout-btn:hover { background: #21262d; color: #f85149; border-color: #f85149; }
 </style>
 </head>
 <body>
-<div class="container">
-  <h1>A2A Registry <small>Agent-to-Agent + Orchestration Dashboard</small></h1>
+<div id="login-overlay">
+  <div class="login-modal">
+    <h2>A2A Registry</h2>
+    <div class="subtitle">Authentication required — enter your OAuth credentials</div>
+    <form id="login-form" onsubmit="doLogin(event)">
+      <label for="login-cid">Client ID</label>
+      <input id="login-cid" type="text" placeholder="e.g. client-a1b2c3d4e5f6" required>
+      <label for="login-secret">Client Secret</label>
+      <input id="login-secret" type="password" placeholder="your client secret" required>
+      <button type="submit" class="login-btn" id="login-btn">Login</button>
+      <div class="login-error" id="login-error"></div>
+    </form>
+  </div>
+</div>
+<div class="container" id="dashboard">
+  <div class="header-bar">
+    <h1>A2A Registry <small>Agent-to-Agent + Orchestration Dashboard</small></h1>
+    <div class="header-right" id="header-right"></div>
+  </div>
   <div class="stats" id="stats"></div>
   <div class="tabs">
     <button id="tab-agents" class="active" onclick="switchTab('agents')">Agents</button>
@@ -130,7 +199,7 @@
     <button id="tab-admin" onclick="switchTab('admin')">Admin</button>
   </div>
 
-  <!-- Agents tab (V1) -->
+  <!-- Agents tab -->
   <div id="content-agents" class="tab-content active">
     <div class="filter-bar">
       <input type="text" id="search" placeholder="Search agents..." oninput="debouncedSearch()">
@@ -139,7 +208,7 @@
     <div id="agent-list"><div class="loading">Loading agents...</div></div>
   </div>
 
-  <!-- Tasks tab (V1 tasks — WS dispatch) -->
+  <!-- Tasks tab -->
   <div id="content-tasks" class="tab-content">
     <div class="filter-bar">
       <input type="text" id="task-search" placeholder="Filter by agent ID..." oninput="debouncedTaskSearch()">
@@ -156,7 +225,7 @@
     <div id="task-list"><div class="loading">No tasks yet.</div></div>
   </div>
 
-  <!-- Kanban tab (V2 orchestration tasks) -->
+  <!-- Kanban tab -->
   <div id="content-kanban" class="tab-content">
     <div class="filter-bar">
       <input type="text" id="kb-search" placeholder="Search title / body..." oninput="debouncedKanbanSearch()">
@@ -195,7 +264,7 @@
         <div style="display:flex;gap:12px;margin-bottom:12px;">
           <div style="flex:1;">
             <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Agent Card ID</label>
-            <input id="ac-agent-card-id" type="text" placeholder="e.g. my-agent-v2" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
+            <input id="ac-agent-card-id" type="text" placeholder="e.g. my-agent" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
           </div>
           <div style="flex:2;">
             <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Description</label>
@@ -230,45 +299,168 @@
     </div>
   </div>
 </div>
+
 <script>
 const API = "";
 let searchTimeout = null;
 let taskSearchTimeout = null;
 let kbSearchTimeout = null;
+let adminSearchTimeout = null;
 let kanbanView = "board";
 const STATUS_COLUMNS = ["todo","ready","running","blocked","completed","failed","cancelled","archived"];
 const STATUS_LABELS = {todo:"Todo",ready:"Ready",running:"Running",blocked:"Blocked",completed:"Completed",failed:"Failed",cancelled:"Cancelled",archived:"Archived"};
 
-function debouncedSearch() {
-  clearTimeout(searchTimeout);
-  searchTimeout = setTimeout(fetchAgents, 300);
-}
-function debouncedTaskSearch() {
-  clearTimeout(taskSearchTimeout);
-  taskSearchTimeout = setTimeout(fetchTasks, 300);
-}
-function debouncedKanbanSearch() {
-  clearTimeout(kbSearchTimeout);
-  kbSearchTimeout = setTimeout(fetchKanban, 300);
+// ── Auth ──────────────────────────────────────────────────────────
+
+function getAuthToken() {
+  return sessionStorage.getItem("a2a_dash_token");
 }
 
-async function fetchData(url) {
-  const config = window.__AUTH_CONFIG || {};
-  const headers = {};
-  if (config.enabled && config.token) {
-    headers["Authorization"] = `Bearer ${config.token}`;
-  }
-  const resp = await fetch(url, { headers });
-  if (!resp.ok) throw new Error(resp.statusText);
-  return resp.json();
+function isAuthEnabled() {
+  return window.__AUTH_CONFIG && window.__AUTH_CONFIG.enabled === true;
 }
+
+function isAuthenticated() {
+  return !isAuthEnabled() || !!getAuthToken();
+}
+
 function authHeaders() {
-  const config = window.__AUTH_CONFIG || {};
-  if (config.enabled && config.token) {
-    return { "Authorization": `Bearer ${config.token}` };
+  const token = getAuthToken();
+  if (token) {
+    return { "Authorization": `Bearer ${token}` };
   }
   return {};
 }
+
+function doLogin(event) {
+  event.preventDefault();
+  const btn = document.getElementById("login-btn");
+  const errorEl = document.getElementById("login-error");
+  const cid = document.getElementById("login-cid").value.trim();
+  const secret = document.getElementById("login-secret").value.trim();
+  btn.disabled = true;
+  btn.textContent = "Authenticating...";
+  errorEl.classList.remove("show");
+  errorEl.textContent = "";
+  fetch(`${API}/auth/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `grant_type=client_credentials&client_id=${encodeURIComponent(cid)}&client_secret=${encodeURIComponent(secret)}`
+  })
+  .then(r => {
+    if (!r.ok) { throw new Error(`Login failed (HTTP ${r.status})`); }
+    return r.json();
+  })
+  .then(data => {
+    sessionStorage.setItem("a2a_dash_token", data.access_token);
+    document.getElementById("login-overlay").classList.add("hidden");
+    updateHeaderStatus();
+    initDashboard();
+  })
+  .catch(err => {
+    errorEl.textContent = err.message;
+    errorEl.classList.add("show");
+  })
+  .finally(() => {
+    btn.disabled = false;
+    btn.textContent = "Login";
+  });
+}
+
+function doLogout() {
+  sessionStorage.removeItem("a2a_dash_token");
+  document.getElementById("login-overlay").classList.remove("hidden");
+  updateHeaderStatus();
+}
+
+function updateHeaderStatus() {
+  const el = document.getElementById("header-right");
+  if (isAuthEnabled()) {
+    if (isAuthenticated()) {
+      el.innerHTML = '<span class="auth-badge">🔐 Authenticated</span><button class="logout-btn" onclick="doLogout()">Logout</button>';
+    } else {
+      el.innerHTML = '<span class="auth-badge" style="color:#d29922;">🔒 Auth Required</span>';
+    }
+  } else {
+    el.innerHTML = '<span class="auth-badge" style="color:#8b949e;">🔓 Auth Disabled</span>';
+  }
+}
+
+// ── Bootstrap ─────────────────────────────────────────────────────
+
+function initDashboard() {
+  updateHeaderStatus();
+  fetchAgents();
+  updateStats();
+}
+
+// On page load: check auth, show login overlay if needed
+(function() {
+  if (isAuthEnabled() && !isAuthenticated()) {
+    document.getElementById("login-overlay").classList.remove("hidden");
+    document.getElementById("dashboard").style.display = "block";
+  } else {
+    document.getElementById("login-overlay").classList.add("hidden");
+  }
+  updateHeaderStatus();
+  if (isAuthenticated()) {
+    initDashboard();
+  }
+})();
+
+// ── Data fetching ─────────────────────────────────────────────────
+
+function debouncedSearch() { clearTimeout(searchTimeout); searchTimeout = setTimeout(fetchAgents, 300); }
+function debouncedTaskSearch() { clearTimeout(taskSearchTimeout); taskSearchTimeout = setTimeout(fetchTasks, 300); }
+function debouncedKanbanSearch() { clearTimeout(kbSearchTimeout); kbSearchTimeout = setTimeout(fetchKanban, 300); }
+function debouncedAdminSearch() { clearTimeout(adminSearchTimeout); adminSearchTimeout = setTimeout(fetchAdminClients, 300); }
+
+async function fetchData(url) {
+  const resp = await fetch(url, { headers: authHeaders() });
+  if (resp.status === 401) {
+    sessionStorage.removeItem("a2a_dash_token");
+    document.getElementById("login-overlay").classList.remove("hidden");
+    document.getElementById("login-error").textContent = "Session expired — please login again.";
+    document.getElementById("login-error").classList.add("show");
+    throw new Error("Unauthorized");
+  }
+  if (!resp.ok) throw new Error(resp.statusText);
+  return resp.json();
+}
+
+// ── Stats ─────────────────────────────────────────────────────────
+
+async function updateStats() {
+  try {
+    const [health, kbStats] = await Promise.all([
+      fetchData(`${API}/health`).catch(() => null),
+      fetchData(`${API}/v2/stats`).catch(() => null)
+    ]);
+    const s = document.getElementById("stats");
+    if (!health && !kbStats) { s.innerHTML = ""; return; }
+    let html = "";
+    if (health) {
+      const st = health.stats || {};
+      html +=
+        `<div class="stat-card total"><div class="stat-label">Agents</div><div class="value">${st.total_agents || 0}</div></div>` +
+        `<div class="stat-card alive"><div class="stat-label">Alive</div><div class="value">${st.alive_agents || 0}</div></div>` +
+        `<div class="stat-card stale"><div class="stat-label">Stale</div><div class="value">${st.stale_agents || 0}</div></div>` +
+        `<div class="stat-card tasks"><div class="stat-label">WS</div><div class="value">${st.connected_via_ws || 0}</div></div>`;
+    }
+    if (kbStats) {
+      html +=
+        `<div class="stat-card v2-todo"><div class="stat-label">Todo</div><div class="value">${kbStats.todo||0}</div></div>` +
+        `<div class="stat-card v2-ready"><div class="stat-label">Ready</div><div class="value">${kbStats.ready||0}</div></div>` +
+        `<div class="stat-card v2-run"><div class="stat-label">Running</div><div class="value">${kbStats.running||0}</div></div>` +
+        `<div class="stat-card v2-block"><div class="stat-label">Blocked</div><div class="value">${kbStats.blocked||0}</div></div>` +
+        `<div class="stat-card v2-done"><div class="stat-label">Done</div><div class="value">${kbStats.completed||0}</div></div>` +
+        `<div class="stat-card v2-fail"><div class="stat-label">Failed</div><div class="value">${kbStats.failed||0}</div></div>`;
+    }
+    s.innerHTML = html;
+  } catch (e) { /* ignore */ }
+}
+
+// ── Tab switching ─────────────────────────────────────────────────
 
 function switchTab(name) {
   document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
@@ -280,7 +472,7 @@ function switchTab(name) {
   if (name === 'admin') fetchAdminClients();
 }
 
-// ======================== AGENTS (V1) ========================
+// ── AGENTS ────────────────────────────────────────────────────────
 
 async function fetchAgents() {
   const container = document.getElementById("agent-list");
@@ -342,7 +534,7 @@ function renderAgents(data) {
   container.innerHTML = html;
 }
 
-// ======================== TASKS (V1) ========================
+// ── TASKS ─────────────────────────────────────────────────────────
 
 async function fetchTasks() {
   const container = document.getElementById("task-list");
@@ -413,7 +605,7 @@ function renderTasks(data) {
   container.innerHTML = html;
 }
 
-// ======================== KANBAN (V2) ========================
+// ── KANBAN ────────────────────────────────────────────────────────
 
 async function fetchKanban() {
   const container = document.getElementById("kanban-board");
@@ -427,12 +619,9 @@ async function fetchKanban() {
     if (q) params.push(`q=${encodeURIComponent(q)}`);
     if (status) params.push(`status=${encodeURIComponent(status)}`);
     if (params.length) url += '&' + params.join('&');
-
     const data = await fetchData(url);
     renderKanban(data);
     updateStats();
-
-    // Build assignee filter dropdown
     const assigneeSet = new Set();
     for (const t of data.tasks) { if (t.assignee) assigneeSet.add(t.assignee); }
     const sel = document.getElementById("kb-assignee-filter");
@@ -452,7 +641,6 @@ function switchKanbanView(view) {
   document.getElementById("view-board").style.borderColor = view === "board" ? "#1f6feb55" : "";
   document.getElementById("view-list").style.background = view === "list" ? "#1f6feb33" : "";
   document.getElementById("view-list").style.borderColor = view === "list" ? "#1f6feb55" : "";
-  // Re-render with current data (last fetch results)
   const lastData = window._lastKanbanData;
   if (lastData) renderKanban(lastData);
 }
@@ -464,14 +652,11 @@ function renderKanban(data) {
     container.innerHTML = '<div class="loading">No orchestration tasks yet.<br><small style="color:#484f58">Create tasks via POST /v2/tasks to see them here.</small></div>';
     return;
   }
-
-  // Filter by assignee
   const assigneeFilter = document.getElementById("kb-assignee-filter").value;
   let tasks = data.tasks;
   if (assigneeFilter) {
     tasks = tasks.filter(t => t.assignee === assigneeFilter);
   }
-
   if (kanbanView === "list") {
     renderKanbanList(container, tasks);
   } else {
@@ -480,7 +665,6 @@ function renderKanban(data) {
 }
 
 function renderKanbanBoard(container, tasks) {
-  // Group by status
   const groups = {};
   for (const s of STATUS_COLUMNS) groups[s] = [];
   for (const t of tasks) {
@@ -488,7 +672,6 @@ function renderKanbanBoard(container, tasks) {
     if (groups[s]) groups[s].push(t);
     else groups[s] = [t];
   }
-
   let html = '<div class="kb-board">';
   for (const col of STATUS_COLUMNS) {
     const items = groups[col] || [];
@@ -499,7 +682,12 @@ function renderKanbanBoard(container, tasks) {
       html += `<div style="color:#484f58;font-size:12px;text-align:center;padding:12px;">—</div>`;
     } else {
       for (const t of items) {
-        html += renderKanbanCard(t);
+        const assignee = t.assignee ? `<span>👤 ${escHtml(t.assignee)}</span>` : '';
+        const priority = t.priority > 0 ? `<span>⚡${t.priority}</span>` : '';
+        html += `<div class="kb-card" onclick="showTaskDetail('${t.id}')">`;
+        html += `<div class="kb-card-title">${escHtml(t.title || "Untitled")}</div>`;
+        html += `<div class="kb-card-meta">${assignee}${priority}<span>#${escHtml(t.id)}</span></div>`;
+        html += `</div>`;
       }
     }
     html += `</div></div>`;
@@ -509,761 +697,300 @@ function renderKanbanBoard(container, tasks) {
 }
 
 function renderKanbanList(container, tasks) {
-  let html = '<table><thead><tr><th>Status</th><th>Title</th><th>Assignee</th><th>Priority</th><th>Created</th><th>ID</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Status</th><th>Title</th><th>Assignee</th><th>Priority</th><th>Created</th></tr></thead><tbody>';
   for (const t of tasks) {
-    const created = t.created_at ? new Date(t.created_at * 1000).toLocaleString() : "-";
-    const safeId = (t.id || "").replace(/[^a-zA-Z0-9_-]/g, "_");
-    html += `<tr class="kb-row" onclick="fetchAndShowKbDetail('${t.id}')">`;
+    html += `<tr class="kb-row" onclick="showTaskDetail('${t.id}')">`;
     html += `<td><span class="badge badge-${t.status}">${t.status}</span></td>`;
-    html += `<td><strong>${escHtml(t.title)}</strong></td>`;
+    html += `<td>${escHtml(t.title || "Untitled")}</td>`;
     html += `<td>${escHtml(t.assignee || "-")}</td>`;
     html += `<td>${t.priority || 0}</td>`;
-    html += `<td>${created}</td>`;
-    html += `<td><code>${safeId.substring(0, 12)}</code></td></tr>`;
-    html += `<tr id="kb-details-${safeId}" class="kb-details"><td colspan="6"><div class="loading">Click to load details...</div></td></tr>`;
+    html += `<td>${t.created_at ? new Date(t.created_at*1000).toLocaleString() : "-"}</td></tr>`;
   }
   html += '</tbody></table>';
   container.innerHTML = html;
 }
 
-function renderKanbanCard(t) {
-  const created = t.created_at ? new Date(t.created_at * 1000).toLocaleString() : "";
-  const assignee = t.assignee ? t.assignee : "";
-  const priority = t.priority || 0;
-  const titlePreview = t.title.length > 50 ? t.title.substring(0, 47) + "..." : t.title;
-  return `<div class="kb-card" onclick="fetchAndShowKbDetail('${t.id}')">
-    <div class="kb-card-title">${escHtml(titlePreview)}</div>
-    <div class="kb-card-meta">
-      ${assignee ? `<span>👤 ${escHtml(assignee)}</span>` : ""}
-      ${priority > 0 ? `<span>⚡ ${priority}</span>` : ""}
-      <span>${created}</span>
-    </div>
-  </div>`;
+// ── Task detail modal ─────────────────────────────────────────────
+
+let _taskDetailData = {};
+
+function applyTaskDetailTab(name) {
+  document.querySelectorAll('#modal-detail-tabs button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.detail-pane').forEach(p => p.classList.remove('active'));
+  document.getElementById(`dp-${name}`).classList.add('active');
 }
 
-// ======================== KANBAN CRUD ========================
+async function showTaskDetail(taskId) {
+  try {
+    const data = await fetchData(`${API}/v2/tasks/${taskId}`);
+    _taskDetailData = data;
+    const t = data.task;
+    let html = '<div style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;" onclick="event.target===this&&closeTaskDetail()">';
+    html += `<div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:28px;width:700px;max-width:95vw;max-height:85vh;overflow-y:auto;">`;
+    html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">`;
+    html += `<h2 style="font-size:18px;font-weight:600;color:#f0f6fc;">${escHtml(t.title)}</h2>`;
+    html += `<span class="badge badge-${t.status}" style="font-size:13px;padding:4px 12px;">${t.status}</span>`;
+    html += `</div>`;
+    html += `<div style="display:flex;gap:16px;margin-bottom:16px;font-size:13px;color:#8b949e;">`;
+    html += `<span>ID: <code>${escHtml(t.id)}</code></span>`;
+    if (t.assignee) html += `<span>Assignee: <code>${escHtml(t.assignee)}</code></span>`;
+    if (t.tenant) html += `<span>Tenant: <code>${escHtml(t.tenant)}</code></span>`;
+    html += `</div>`;
+
+    // Tabs
+    html += `<div id="modal-detail-tabs" class="detail-tabs">`;
+    html += `<button class="active" onclick="detailTab('runs')">Runs (${(data.runs||[]).length})</button>`;
+    html += `<button onclick="detailTab('events')">Events (${(data.events||[]).length})</button>`;
+    html += `<button onclick="detailTab('comments')">Comments (${(data.comments||[]).length})</button>`;
+    html += `<button onclick="detailTab('deps')">Dependencies</button>`;
+    if (t.body) html += `<button onclick="detailTab('body')">Body</button>`;
+    html += `</div>`;
+
+    // Runs pane
+    html += `<div id="dp-runs" class="detail-pane active">`;
+    if (!data.runs || data.runs.length === 0) {
+      html += `<div style="color:#484f58;font-size:13px;padding:16px;text-align:center;">No runs yet.</div>`;
+    } else {
+      for (const r of data.runs) {
+        html += `<div class="run-item">`;
+        html += `<span class="run-status badge badge-${r.status}">${r.status}</span> `;
+        html += `<span class="run-outcome">${r.outcome || ""}</span> — `;
+        html += `<span>${r.started_at ? new Date(r.started_at*1000).toLocaleString() : "?"}`;
+        if (r.ended_at) html += ` → ${new Date(r.ended_at*1000).toLocaleString()}`;
+        html += `</span>`;
+        if (r.summary) html += `<div style="margin-top:4px;font-size:12px;color:#c9d1d9;">${escHtml(r.summary)}</div>`;
+        if (r.error) html += `<div style="margin-top:4px;font-size:12px;color:#f85149;">${escHtml(r.error)}</div>`;
+        html += `</div>`;
+      }
+    }
+    html += `</div>`;
+
+    // Events pane
+    html += `<div id="dp-events" class="detail-pane">`;
+    if (!data.events || data.events.length === 0) {
+      html += `<div style="color:#484f58;font-size:13px;padding:16px;text-align:center;">No events logged.</div>`;
+    } else {
+      for (const e of data.events) {
+        const date = e.created_at ? new Date(e.created_at*1000).toLocaleString() : "";
+        html += `<div class="event-item"><span class="kind">${e.kind}</span> <span style="color:#484f58">${date}</span></div>`;
+      }
+    }
+    html += `</div>`;
+
+    // Comments pane
+    html += `<div id="dp-comments" class="detail-pane">`;
+    if (!data.comments || data.comments.length === 0) {
+      html += `<div style="color:#484f58;font-size:13px;padding:16px;text-align:center;">No comments yet.</div>`;
+    } else {
+      for (const c of data.comments) {
+        html += `<div class="comment-bubble"><span class="author">${escHtml(c.author)}</span><span class="time">${c.created_at ? new Date(c.created_at*1000).toLocaleString() : ""}</span><div class="body">${escHtml(c.body)}</div></div>`;
+      }
+    }
+    html += `</div>`;
+
+    // Dependencies pane
+    html += `<div id="dp-deps" class="detail-pane">`;
+    const parents = data.parents || [];
+    const children = data.children || [];
+    if (parents.length === 0 && children.length === 0) {
+      html += `<div style="color:#484f58;font-size:13px;padding:16px;text-align:center;">No dependencies.</div>`;
+    } else {
+      if (parents.length > 0) {
+        html += `<div class="detail-section"><h3>Depends on (parents)</h3>`;
+        for (const p of parents) html += `<div class="dep-node"><span class="badge badge-${p.status}" style="font-size:10px;margin-right:6px;">${p.status}</span>${escHtml(p.title)} <code style="font-size:11px;">${escHtml(p.id)}</code></div> `;
+        html += `</div>`;
+      }
+      if (children.length > 0) {
+        html += `<div class="detail-section" style="margin-top:12px;"><h3>Blocks (children)</h3>`;
+        for (const c of children) html += `<div class="dep-node"><span class="badge badge-${c.status}" style="font-size:10px;margin-right:6px;">${c.status}</span>${escHtml(c.title)} <code style="font-size:11px;">${escHtml(c.id)}</code></div> `;
+        html += `</div>`;
+      }
+    }
+    html += `</div>`;
+
+    // Body pane
+    if (t.body) {
+      html += `<div id="dp-body" class="detail-pane"><pre style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;font-size:12px;white-space:pre-wrap;margin-top:8px;">${escHtml(t.body)}</pre></div>`;
+    }
+
+    html += `<div style="margin-top:16px;text-align:right;"><button onclick="closeTaskDetail()" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:6px 16px;color:#c9d1d9;cursor:pointer;">Close</button></div>`;
+    html += `</div></div>`;
+    const div = document.createElement("div");
+    div.id = "task-detail-modal";
+    div.innerHTML = html;
+    document.body.appendChild(div);
+    window._taskDetailTab = function(name) {
+      document.querySelectorAll('#modal-detail-tabs button').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.detail-pane').forEach(p => p.classList.remove('active'));
+      document.getElementById(`dp-${name}`).classList.add('active');
+    };
+  } catch (e) {
+    alert("Failed to load task details: " + e.message);
+  }
+}
+
+function detailTab(name) {
+  if (window._taskDetailTab) window._taskDetailTab(name);
+}
+
+function closeTaskDetail() {
+  const el = document.getElementById("task-detail-modal");
+  if (el) { el.remove(); }
+}
+
+// ── Create Task modal ─────────────────────────────────────────────
 
 function showCreateTaskModal() {
-  const existing = document.getElementById("create-task-modal");
-  if (existing) existing.remove();
-
-  const modal = document.createElement("div");
-  modal.id = "create-task-modal";
-  modal.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;padding:24px;";
-  modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
-
-  const content = document.createElement("div");
-  content.style.cssText = "background:#0d1117;border:1px solid #30363d;border-radius:12px;max-width:520px;width:100%;padding:24px;position:relative;";
-
-  content.innerHTML = `
-    <h2 style="font-size:18px;font-weight:600;margin-bottom:16px;">创建任务</h2>
-    <div style="margin-bottom:12px;">
-      <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">标题 *</label>
-      <input id="crt-title" type="text" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
-    </div>
-    <div style="margin-bottom:12px;">
-      <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">描述</label>
-      <textarea id="crt-body" rows="4" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;resize:vertical;"></textarea>
-    </div>
-    <div style="display:flex;gap:12px;margin-bottom:12px;">
-      <div style="flex:1;">
-        <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">负责人</label>
-        <input id="crt-assignee" type="text" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
-      </div>
-      <div style="flex:0 0 90px;">
-        <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">优先级</label>
-        <select id="crt-priority" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
-          <option value="0">0</option>
-          <option value="1">1</option>
-          <option value="2" selected>2</option>
-          <option value="3">3</option>
-        </select>
-      </div>
-    </div>
-    <div style="margin-bottom:16px;">
-      <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">父任务 ID（可选，逗号分隔）</label>
-      <input id="crt-parents" type="text" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
-    </div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;">
-      <button onclick="document.getElementById('create-task-modal').remove()" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:8px 16px;color:#c9d1d9;cursor:pointer;">取消</button>
-      <button onclick="createKanbanTask()" style="background:#238636;border:1px solid #2ea043;border-radius:6px;padding:8px 16px;color:#fff;cursor:pointer;font-weight:500;">创建</button>
-    </div>
-  `;
-
-  const closeBtn = document.createElement("button");
-  closeBtn.textContent = "✕";
-  closeBtn.style.cssText = "position:absolute;top:12px;right:16px;background:transparent;border:none;color:#8b949e;cursor:pointer;font-size:18px;";
-  closeBtn.onclick = () => modal.remove();
-  content.prepend(closeBtn);
-
-  modal.appendChild(content);
-  document.body.appendChild(modal);
-
-  // Focus title input
-  setTimeout(() => document.getElementById("crt-title").focus(), 100);
+  let html = '<div style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;" onclick="event.target===this&&closeCreateTaskModal()">';
+  html += '<div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:28px;width:500px;max-width:95vw;" onclick="event.stopPropagation()">';
+  html += '<h2 style="font-size:18px;font-weight:600;color:#f0f6fc;margin-bottom:16px;">Create Task</h2>';
+  html += '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Title *</label>';
+  html += '<input id="ct-title" type="text" placeholder="Task title" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;margin-bottom:12px;">';
+  html += '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Body (Markdown)</label>';
+  html += '<textarea id="ct-body" rows="4" placeholder="## Requirements..." style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;margin-bottom:12px;resize:vertical;font-family:inherit;"></textarea>';
+  html += '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Assign to (profile)</label>';
+  html += '<input id="ct-assignee" type="text" placeholder="e.g. coder-agent" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;margin-bottom:12px;">';
+  html += '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Parent Task IDs (comma-separated)</label>';
+  html += '<input id="ct-parents" type="text" placeholder="e.g. t_abc123, t_def456" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;margin-bottom:16px;">';
+  html += '<div style="display:flex;gap:8px;justify-content:flex-end;">';
+  html += '<button onclick="closeCreateTaskModal()" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:8px 16px;color:#c9d1d9;cursor:pointer;">Cancel</button>';
+  html += '<button onclick="submitCreateTask()" style="background:#238636;border:none;border-radius:6px;padding:8px 16px;color:#fff;cursor:pointer;font-weight:500;">Create</button>';
+  html += '</div><div id="ct-status" style="margin-top:12px;font-size:13px;color:#8b949e;"></div></div></div>';
+  const div = document.createElement("div");
+  div.id = "create-task-modal";
+  div.innerHTML = html;
+  document.body.appendChild(div);
 }
 
-async function createKanbanTask() {
-  const title = document.getElementById("crt-title").value.trim();
-  if (!title) { alert("标题不能为空"); return; }
+function closeCreateTaskModal() {
+  const el = document.getElementById("create-task-modal");
+  if (el) el.remove();
+}
 
-  const body = document.getElementById("crt-body").value.trim();
-  const assignee = document.getElementById("crt-assignee").value.trim();
-  const priority = parseInt(document.getElementById("crt-priority").value) || 0;
-  const parentsRaw = document.getElementById("crt-parents").value.trim();
-  const parents = parentsRaw ? parentsRaw.split(",").map(s => s.trim()).filter(Boolean) : undefined;
-
-  const payload = { title, body: body || undefined, assignee: assignee || undefined, priority };
-  if (parents && parents.length > 0) payload.parents = parents;
-
+async function submitCreateTask() {
+  const title = document.getElementById("ct-title").value.trim();
+  if (!title) { document.getElementById("ct-status").textContent = "Title is required."; return; }
+  const body = document.getElementById("ct-body").value.trim();
+  const assignee = document.getElementById("ct-assignee").value.trim();
+  const parentsRaw = document.getElementById("ct-parents").value.trim();
+  const parents = parentsRaw ? parentsRaw.split(",").map(s => s.trim()).filter(Boolean) : [];
+  const payload = { title };
+  if (body) payload.body = body;
+  if (assignee) payload.assignee = assignee;
+  if (parents.length > 0) payload.parents = parents;
   try {
+    document.getElementById("ct-status").textContent = "Creating...";
     const resp = await fetch(`${API}/v2/tasks`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(payload)
     });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      alert("创建失败: " + (err.detail || resp.statusText));
-      return;
-    }
-    document.getElementById("create-task-modal").remove();
-    fetchKanban();
-  } catch (e) {
-    alert("创建失败: " + e.message);
-  }
-}
-
-async function handleDeleteTask(taskId) {
-  if (!confirm(`确定归档任务 ${taskId}？\n仅 completed/failed/cancelled 状态可归档。`)) return;
-
-  try {
-    const resp = await fetch(`${API}/v2/tasks/${taskId}`, { method: "DELETE", headers: authHeaders() });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      alert("归档失败: " + (err.detail || resp.statusText));
-      return;
-    }
-    // Close the detail modal if open
-    const modal = document.getElementById("kb-detail-modal");
-    if (modal) modal.remove();
-    fetchKanban();
-  } catch (e) {
-    alert("归档失败: " + e.message);
-  }
-}
-
-// ── Status change actions ───────────────────────────────────────
-
-function _statusActions(status, taskId) {
-  // Returns HTML for status-transition buttons based on current status
-  const btns = {
-    "todo":        [{l:"▶ 开始", s:"ready"}, {l:"✕ 取消", s:"cancelled"}],
-    "ready":       [{l:"▶ 开始", s:"running"}, {l:"⛔ 阻塞", s:"blocked"}, {l:"✕ 取消", s:"cancelled"}],
-    "running":     [{l:"✓ 完成", s:"completed"}, {l:"✕ 失败", s:"failed"}, {l:"⛔ 阻塞", s:"blocked"}, {l:"✕ 取消", s:"cancelled"}],
-    "blocked":     [{l:"▶ 恢复", s:"running"}, {l:"↩ 回池", s:"ready"}, {l:"✕ 失败", s:"failed"}, {l:"✕ 取消", s:"cancelled"}],
-    "completed":   [{l:"🗑 归档", s:"archived"}],
-    "failed":      [{l:"↻ 重试", s:"ready"}, {l:"🗑 归档", s:"archived"}, {l:"✕ 取消", s:"cancelled"}],
-    "cancelled":   [],
-    "archived":    [],
-  };
-  const actions = btns[status] || [];
-  if (actions.length === 0) return "";
-  return actions.map(a => {
-    const styles = {
-      completed: "background:#3fb95033;border:1px solid #3fb95066;color:#3fb950;",
-      failed:    "background:#f8514933;border:1px solid #f8514966;color:#f85149;",
-      running:   "background:#d2a8ff33;border:1px solid #d2a8ff66;color:#d2a8ff;",
-      ready:     "background:#58a6ff33;border:1px solid #58a6ff66;color:#58a6ff;",
-      blocked:   "background:#f0883e33;border:1px solid #f0883e66;color:#f0883e;",
-      archived:  "background:#30363d66;border:1px solid #484f58;color:#8b949e;",
-      cancelled: "background:#f8514933;border:1px solid #f8514966;color:#f85149;",
-    };
-    const s = styles[a.s] || "background:#21262d;border:1px solid #30363d;color:#c9d1d9;";
-    return `<button onclick="handleStatusChange('${taskId}','${a.s}')" style="border-radius:6px;padding:3px 10px;cursor:pointer;font-size:12px;${s}">${a.l}</button>`;
-  }).join(" ");
-}
-
-async function handleStatusChange(taskId, newStatus) {
-  try {
-    const resp = await fetch(`${API}/v2/tasks/${taskId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ status: newStatus }),
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      alert("状态变更失败: " + (err.detail || err.error || resp.statusText));
-      return;
-    }
-    // Refresh detail modal and board
+    if (!resp.ok) { const err = await resp.json(); throw new Error(err.detail || resp.statusText); }
     const data = await resp.json();
-    const modal = document.getElementById("kb-detail-modal");
-    if (modal) modal.remove();
-    fetchAndShowKbDetail(taskId);
-    fetchKanban();
+    document.getElementById("ct-status").innerHTML = `✅ Created <code>${data.task.id}</code>`;
+    setTimeout(closeCreateTaskModal, 800);
+    setTimeout(fetchKanban, 1000);
   } catch (e) {
-    alert("状态变更失败: " + e.message);
+    document.getElementById("ct-status").textContent = "Error: " + e.message;
   }
 }
 
-function showEditTaskModal(taskId) {
-  const existing = document.getElementById("edit-task-modal");
-  if (existing) existing.remove();
-
-  // Fetch latest task data
-  fetch(`${API}/v2/tasks/${taskId}`, { headers: authHeaders() }).then(r => r.json()).then(data => {
-    const task = data.task || data;
-
-    const modal = document.createElement("div");
-    modal.id = "edit-task-modal";
-    modal.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;padding:24px;";
-    modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
-
-    const content = document.createElement("div");
-    content.style.cssText = "background:#0d1117;border:1px solid #30363d;border-radius:12px;max-width:520px;width:100%;padding:24px;position:relative;";
-
-    content.innerHTML = `
-      <h2 style="font-size:18px;font-weight:600;margin-bottom:16px;">✏️ 编辑任务</h2>
-      <div style="font-size:12px;color:#8b949e;margin-bottom:12px;">ID: <code>${escHtml(task.id)}</code></div>
-      <div style="margin-bottom:12px;">
-        <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">标题</label>
-        <input id="edt-title" type="text" value="${escHtml(task.title).replace(/"/g, '&quot;')}" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
-      </div>
-      <div style="margin-bottom:12px;">
-        <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">描述</label>
-        <textarea id="edt-body" rows="4" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;resize:vertical;">${escHtml(task.body || "")}</textarea>
-      </div>
-      <div style="display:flex;gap:12px;margin-bottom:12px;">
-        <div style="flex:1;">
-          <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">负责人</label>
-          <input id="edt-assignee" type="text" value="${escHtml(task.assignee || "")}" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
-        </div>
-        <div style="flex:0 0 90px;">
-          <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">优先级</label>
-          <select id="edt-priority" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
-            <option value="0" ${task.priority === 0 ? "selected" : ""}>0</option>
-            <option value="1" ${task.priority === 1 ? "selected" : ""}>1</option>
-            <option value="2" ${task.priority === 2 ? "selected" : ""}>2</option>
-            <option value="3" ${task.priority === 3 ? "selected" : ""}>3</option>
-          </select>
-        </div>
-      </div>
-      <div style="display:flex;gap:8px;justify-content:flex-end;">
-        <button onclick="document.getElementById('edit-task-modal').remove()" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:8px 16px;color:#c9d1d9;cursor:pointer;">取消</button>
-        <button onclick="handleUpdateTask('${task.id}')" style="background:#1f6feb;border:1px solid #1f6feb;border-radius:6px;padding:8px 16px;color:#fff;cursor:pointer;font-weight:500;">保存</button>
-      </div>
-    `;
-
-    const closeBtn = document.createElement("button");
-    closeBtn.textContent = "✕";
-    closeBtn.style.cssText = "position:absolute;top:12px;right:16px;background:transparent;border:none;color:#8b949e;cursor:pointer;font-size:18px;";
-    closeBtn.onclick = () => modal.remove();
-    content.prepend(closeBtn);
-
-    modal.appendChild(content);
-    document.body.appendChild(modal);
-
-    setTimeout(() => document.getElementById("edt-title").focus(), 100);
-  }).catch(e => alert("获取任务详情失败: " + e.message));
-}
-
-async function handleUpdateTask(taskId) {
-  const title = document.getElementById("edt-title").value.trim();
-  const body = document.getElementById("edt-body").value.trim();
-  const assignee = document.getElementById("edt-assignee").value.trim();
-  const priority = parseInt(document.getElementById("edt-priority").value) || 0;
-
-  const payload = {};
-  if (title) payload.title = title;
-  payload.body = body;
-  payload.assignee = assignee;
-  payload.priority = priority;
-
-  try {
-    const resp = await fetch(`${API}/v2/tasks/${taskId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify(payload),
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      alert("更新失败: " + (err.detail || resp.statusText));
-      return;
-    }
-    document.getElementById("edit-task-modal").remove();
-    // Re-fetch and show detail with updated data
-    const modal = document.getElementById("kb-detail-modal");
-    if (modal) modal.remove();
-    fetchAndShowKbDetail(taskId);
-    fetchKanban();
-  } catch (e) {
-    alert("更新失败: " + e.message);
-  }
-}
-
-async function fetchAndShowKbDetail(taskId) {
-  const safeId = taskId.replace(/[^a-zA-Z0-9_-]/g, "_");
-
-  // Find the detail row in list view
-  const detailRow = document.getElementById(`kb-details-${safeId}`);
-  if (detailRow) {
-    const wasOpen = detailRow.classList.contains("open");
-    // Close all other detail rows
-    document.querySelectorAll(".kb-details.open").forEach(r => r.classList.remove("open"));
-    if (wasOpen) return;
-    detailRow.classList.add("open");
-    detailRow.querySelector("td").innerHTML = '<div class="loading">Loading task details...</div>';
-  }
-
-  // Fetch full detail
-  let task, parents, children, runs, comments, events;
-  try {
-    const data = await fetchData(`${API}/v2/tasks/${taskId}`);
-    task = data.task;
-    parents = data.parents || [];
-    children = data.children || [];
-    runs = data.runs || [];
-    comments = data.comments || [];
-    events = data.events || [];
-  } catch (e) {
-    if (detailRow) {
-      detailRow.querySelector("td").innerHTML = `<div class="error">Failed to load: ${e.message}</div>`;
-    } else {
-      showKbDetailModal(taskId, null, e.message);
-    }
-    return;
-  }
-
-  // For board view: show detail in a floating section
-  if (!detailRow) {
-    showKbDetailModal(taskId, { task, parents, children, runs, comments, events }, null);
-    return;
-  }
-
-  const html = buildKbDetailHtml(task, parents, children, runs, comments, events);
-  detailRow.querySelector("td").innerHTML = `<div style="padding:0;">${html}</div>`;
-}
-
-// Modal for board view detail
-let _detailModal = null;
-function showKbDetailModal(taskId, data, error) {
-  const existing = document.getElementById("kb-detail-modal");
-  if (existing) existing.remove();
-
-  const modal = document.createElement("div");
-  modal.id = "kb-detail-modal";
-  modal.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;padding:24px;";
-  modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
-
-  const content = document.createElement("div");
-  content.style.cssText = "background:#0d1117;border:1px solid #30363d;border-radius:12px;max-width:700px;width:100%;max-height:80vh;overflow-y:auto;padding:24px;position:relative;";
-
-  if (error) {
-    content.innerHTML = `<div class="error">${error}</div>`;
-  } else {
-    content.innerHTML = buildKbDetailHtml(data.task, data.parents, data.children, data.runs, data.comments, data.events);
-  }
-
-  const closeBtn = document.createElement("button");
-  closeBtn.textContent = "✕";
-  closeBtn.style.cssText = "position:absolute;top:12px;right:16px;background:transparent;border:none;color:#8b949e;cursor:pointer;font-size:18px;";
-  closeBtn.onclick = () => modal.remove();
-  content.prepend(closeBtn);
-
-  modal.appendChild(content);
-  document.body.appendChild(modal);
-  _detailModal = modal;
-}
-
-let _detailTab = "runs";
-
-function switchDetailTab(tab) {
-  _detailTab = tab;
-  // Re-render is done by the onclick binding in buildKbDetailHtml
-  // We update the pane visibility
-  const panes = document.querySelectorAll("#kb-detail-modal .detail-pane, .kb-details.open .detail-pane");
-  const tabs = document.querySelectorAll("#kb-detail-modal .detail-tabs button, .kb-details.open .detail-tabs button");
-  panes.forEach(p => p.classList.remove("active"));
-  tabs.forEach(b => { b.classList.remove("active"); if (b.dataset.tab === tab) b.classList.add("active"); });
-  const target = document.querySelector(`#kb-detail-modal .detail-pane[data-tab="${tab}"], .kb-details.open .detail-pane[data-tab="${tab}"]`);
-  if (target) target.classList.add("active");
-}
-
-function buildKbDetailHtml(task, parents, children, runs, comments, events) {
-  const created = task.created_at ? new Date(task.created_at * 1000).toLocaleString() : "-";
-  const started = task.started_at ? new Date(task.started_at * 1000).toLocaleString() : "-";
-  const completed = task.completed_at ? new Date(task.completed_at * 1000).toLocaleString() : "-";
-
-  let html = `
-    <div style="margin-bottom:16px;">
-      <h2 style="font-size:18px;font-weight:600;margin-bottom:4px;">${escHtml(task.title)}</h2>
-      <span class="badge badge-${task.status}" style="font-size:13px;">${task.status}</span>
-      ${task.assignee ? `<span style="margin-left:8px;color:#8b949e;">👤 ${escHtml(task.assignee)}</span>` : ""}
-      ${task.priority ? `<span style="margin-left:8px;color:#8b949e;">⚡ ${task.priority}</span>` : ""}
-      <div style="float:right;display:flex;gap:6px;">
-        <button onclick="showEditTaskModal('${task.id}')" style="background:#1f6feb22;border:1px solid #1f6feb55;border-radius:6px;padding:4px 12px;color:#58a6ff;cursor:pointer;font-size:12px;">✏️ 编辑</button>
-        <button onclick="handleDeleteTask('${task.id}')" style="background:#f8514922;border:1px solid #f8514955;border-radius:6px;padding:4px 12px;color:#f85149;cursor:pointer;font-size:12px;">🗑 归档</button>
-      </div>
-    </div>
-    <div style="margin-bottom:12px;display:flex;gap:4px;flex-wrap:wrap;">${_statusActions(task.status, task.id)}</div>`;
-
-  if (task.body) {
-    html += `<div class="detail-section"><h3>Description</h3><div style="background:#161b22;border:1px solid #21262d;border-radius:6px;padding:10px;font-size:13px;line-height:1.5;white-space:pre-wrap;">${escHtml(task.body)}</div></div>`;
-  }
-
-  // Dependency chain
-  if (parents.length > 0 || children.length > 0) {
-    html += `<div class="detail-section"><h3>Dependency Chain</h3><div class="dep-graph">`;
-    if (parents.length > 0) {
-      html += `<div style="margin-bottom:4px;"><span style="color:#8b949e;">Parents:</span> `;
-      for (const p of parents) {
-        html += `<span class="dep-node">${escHtml(p.id)} <span class="badge badge-${p.status}" style="font-size:10px;">${p.status}</span></span>`;
-      }
-      html += `</div>`;
-    }
-    html += `<div><span class="dep-node" style="background:#1f6feb33;border:1px solid #1f6feb55;font-weight:500;">${escHtml(task.id)} (this)</span></div>`;
-    if (children.length > 0) {
-      html += `<div style="margin-top:4px;"><span style="color:#8b949e;">Children:</span> `;
-      for (const c of children) {
-        html += `<span class="dep-node">${escHtml(c.id)} <span class="badge badge-${c.status}" style="font-size:10px;">${c.status}</span></span>`;
-      }
-      html += `</div>`;
-    }
-    html += `</div></div>`;
-  }
-
-  // Metadata table
-  html += `<div class="detail-section"><h3>Details</h3><table style="font-size:12px;"><tbody>`;
-  html += `<tr><td style="color:#8b949e;padding:2px 8px;">ID</td><td><code>${escHtml(task.id)}</code></td></tr>`;
-  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Workspace</td><td>${task.workspace_kind || "-"} ${task.workspace_path ? `<code>${escHtml(task.workspace_path)}</code>` : ""}</td></tr>`;
-  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Created</td><td>${created}</td></tr>`;
-  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Started</td><td>${started}</td></tr>`;
-  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Completed</td><td>${completed}</td></tr>`;
-  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Failures</td><td>${task.consecutive_failures || 0} / ${task.max_retries || 3}</td></tr>`;
-  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Tenant</td><td>${task.tenant || "-"}</td></tr>`;
-  html += `<tr><td style="color:#8b949e;padding:2px 8px;">Claim Lock</td><td>${task.claim_lock || "-"}</td></tr>`;
-  if (task.result) {
-    html += `<tr><td style="color:#8b949e;padding:2px 8px;">Result</td><td><pre style="background:#161b22;padding:6px;border-radius:4px;font-size:11px;max-height:120px;overflow:auto;">${escHtml(typeof task.result === 'string' ? task.result : JSON.stringify(task.result, null, 2))}</pre></td></tr>`;
-  }
-  html += `</tbody></table></div>`;
-
-  // Detail tabs: Runs / Comments / Events
-  html += `<div class="detail-section"><h3>Activity</h3>`;
-  html += `<div class="detail-tabs">`;
-  html += `<button class="active" data-tab="runs" onclick="switchDetailTab('runs')">Runs (${runs.length})</button>`;
-  html += `<button data-tab="comments" onclick="switchDetailTab('comments')">Comments (${comments.length})</button>`;
-  html += `<button data-tab="events" onclick="switchDetailTab('events')">Events (${events.length})</button>`;
-  html += `</div>`;
-
-  html += `<div class="detail-pane active" data-tab="runs">`;
-  if (runs.length === 0) {
-    html += `<div style="color:#484f58;font-size:12px;">No runs yet.</div>`;
-  } else {
-    for (const r of runs) {
-      const startedAt = r.started_at ? new Date(r.started_at * 1000).toLocaleString() : "-";
-      const endedAt = r.ended_at ? new Date(r.ended_at * 1000).toLocaleString() : "—";
-      html += `<div class="run-item"><span class="run-status">Run #${r.id}</span> `;
-      html += `<span class="badge badge-${r.outcome || r.status}" style="font-size:10px;">${r.outcome || r.status}</span> `;
-      html += `<span class="run-outcome">by ${r.profile || "-"} | ${startedAt} → ${endedAt}</span>`;
-      if (r.summary) html += `<div style="margin-top:4px;color:#c9d1d9;">${escHtml(r.summary)}</div>`;
-      if (r.error) html += `<div style="color:#f85149;font-size:11px;margin-top:2px;">${escHtml(r.error)}</div>`;
-      html += `</div>`;
-    }
-  }
-  html += `</div>`;
-
-  html += `<div class="detail-pane" data-tab="comments">`;
-  if (comments.length === 0) {
-    html += `<div style="color:#484f58;font-size:12px;">No comments.</div>`;
-  } else {
-    for (const c of comments) {
-      const ct = c.created_at ? new Date(c.created_at * 1000).toLocaleString() : "";
-      html += `<div class="comment-bubble"><span class="author">${escHtml(c.author)}</span><span class="time">${ct}</span><div class="body">${escHtml(c.body)}</div></div>`;
-    }
-  }
-  html += `</div>`;
-
-  html += `<div class="detail-pane" data-tab="events">`;
-  if (events.length === 0) {
-    html += `<div style="color:#484f58;font-size:12px;">No events.</div>`;
-  } else {
-    for (const e of events) {
-      const et = e.created_at ? new Date(e.created_at * 1000).toLocaleString() : "";
-      html += `<div class="event-item"><span class="kind">${e.kind}</span> <span style="color:#484f58;">${et}</span>`;
-      if (e.payload) {
-        const payload = typeof e.payload === 'string' ? e.payload : JSON.stringify(e.payload);
-        html += `<div style="color:#8b949e;font-size:11px;margin-left:12px;">${escHtml(payload)}</div>`;
-      }
-      html += `</div>`;
-    }
-  }
-  html += `</div>`;
-  html += `</div>`;
-
-  return html;
-}
-
-// ======================== ADMIN — OAuth Client Management ========================
-
-let adminSearchTimeout = null;
-function debouncedAdminSearch() {
-  clearTimeout(adminSearchTimeout);
-  adminSearchTimeout = setTimeout(fetchAdminClients, 300);
-}
+// ── ADMIN ─────────────────────────────────────────────────────────
 
 async function fetchAdminClients() {
   const container = document.getElementById("admin-clients");
-  const filter = document.getElementById("admin-search").value.trim().toLowerCase();
   container.innerHTML = '<div class="loading">Loading OAuth clients...</div>';
   try {
-    const data = await fetchData(`${API}/admin/clients`);
-    renderAdminClients(data, filter);
+    const q = document.getElementById("admin-search").value.trim();
+    let url = `${API}/admin/clients`;
+    if (q) url += `?q=${encodeURIComponent(q)}`;
+    const data = await fetchData(url);
+    renderAdminClients(data);
   } catch (e) {
-    container.innerHTML = `<div class="error">Failed to load OAuth clients: ${e.message}</div>`;
+    container.innerHTML = `<div class="error">Failed to load clients: ${e.message}</div>`;
   }
 }
 
-function renderAdminClients(clients, filter) {
+function renderAdminClients(data) {
   const container = document.getElementById("admin-clients");
-  if (!clients || clients.length === 0) {
-    container.innerHTML = '<div class="loading">No OAuth clients yet. Create one below.</div>';
+  const clients = Array.isArray(data) ? data : (data.clients || []);
+  if (clients.length === 0) {
+    container.innerHTML = '<div class="loading">No OAuth clients registered.</div>';
     return;
   }
-
-  let filtered = clients;
-  if (filter) {
-    filtered = clients.filter(c =>
-      (c.client_id && c.client_id.toLowerCase().includes(filter)) ||
-      (c.agent_card_id && c.agent_card_id.toLowerCase().includes(filter))
-    );
-  }
-
-  if (filtered.length === 0) {
-    container.innerHTML = `<div class="loading">No clients match "${filter}"</div>`;
-    return;
-  }
-
-  let html = '<table><thead><tr><th>Client ID</th><th>Agent Card ID</th><th>Description</th><th>Scopes</th><th>Tokens</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
-  for (const c of filtered) {
-    const created = c.created_at ? new Date(c.created_at * 1000).toLocaleString() : "-";
-    const scopes = (c.scopes || []).map(s => `<span class="tag">${escHtml(s)}</span>`).join("") || "-";
-    html += `<tr class="agent-row">`;
-    html += `<td><code>${escHtml(c.client_id).substring(0, 24)}...</code></td>`;
-    html += `<td>${escHtml(c.agent_card_id || "-")}</td>`;
+  let html = '<table><thead><tr><th>Client ID</th><th>Description</th><th>Scopes</th><th>Created</th><th>Action</th></tr></thead><tbody>';
+  for (const c of clients) {
+    html += '<tr>';
+    html += `<td><code>${escHtml(c.client_id)}</code></td>`;
     html += `<td>${escHtml(c.description || "-")}</td>`;
-    html += `<td>${scopes}</td>`;
-    html += `<td>${c.token_count ?? 0}</td>`;
-    html += `<td>${created}</td>`;
-    html += `<td><button onclick="deleteAdminClient('${c.client_id}')" style="background:#f8514922;border:1px solid #f8514955;border-radius:6px;padding:4px 10px;color:#f85149;cursor:pointer;font-size:12px;">Delete</button></td>`;
-    html += `</tr>`;
+    html += `<td>${(c.scopes||[]).map(s => `<span class="tag">${s}</span>`).join("")}</td>`;
+    html += `<td>${c.created_at ? new Date(c.created_at*1000).toLocaleString() : "-"}</td>`;
+    html += `<td><button onclick="confirmDeleteClient('${c.client_id}')" style="background:transparent;border:1px solid #f85149;color:#f85149;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;">Delete</button></td>`;
+    html += '</tr>';
   }
   html += '</tbody></table>';
-  if (filtered.length < clients.length) {
-    html += `<p style="color:#8b949e;margin-top:8px;font-size:12px;">Showing ${filtered.length} of ${clients.length} clients</p>`;
-  }
   container.innerHTML = html;
 }
 
-async function deleteAdminClient(clientId) {
-  if (!confirm(`确定删除 OAuth client "${clientId}"？此操作不可撤销。`)) return;
-
-  const statusEl = document.getElementById("ac-status");
-  try {
-    const headers = authHeaders();
-    headers["Content-Type"] = "application/json";
-    const resp = await fetch(`${API}/admin/clients/${clientId}`, {
-      method: "DELETE",
-      headers,
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      statusEl.textContent = "❌ " + (err.detail || resp.statusText);
-      return;
-    }
-    statusEl.textContent = "✅ Client deleted";
-    fetchAdminClients();
-  } catch (e) {
-    statusEl.textContent = "❌ " + e.message;
-  }
-  setTimeout(() => { statusEl.textContent = ""; }, 4000);
+function confirmDeleteClient(clientId) {
+  if (!confirm(`Delete OAuth client ${clientId}? This will revoke all its tokens.`)) return;
+  fetch(`${API}/admin/clients/${clientId}`, {
+    method: "DELETE",
+    headers: { ...authHeaders() }
+  }).then(r => { if (r.ok) fetchAdminClients(); else alert("Delete failed"); });
 }
 
 async function createAdminClient() {
   const agentCardId = document.getElementById("ac-agent-card-id").value.trim();
   const description = document.getElementById("ac-description").value.trim();
-  const scopeCheckboxes = document.querySelectorAll(".ac-scope:checked");
-  const allowedScopes = Array.from(scopeCheckboxes).map(cb => cb.value);
-
-  if (!agentCardId) {
-    document.getElementById("ac-status").textContent = "⚠️ Agent Card ID is required";
-    return;
-  }
-  if (allowedScopes.length === 0) {
-    document.getElementById("ac-status").textContent = "⚠️ Select at least one scope";
-    return;
-  }
-
-  const statusEl = document.getElementById("ac-status");
-  statusEl.textContent = "⏳ Creating...";
-
+  const scopeEls = document.querySelectorAll(".ac-scope:checked");
+  const allowedScopes = Array.from(scopeEls).map(el => el.value);
+  const payload = {};
+  if (description) payload.description = description;
+  if (allowedScopes.length > 0) payload.allowed_scopes = allowedScopes;
+  if (agentCardId) payload.agent_card_id = agentCardId;
   try {
-    const headers = { "Content-Type": "application/json", ...authHeaders() };
+    document.getElementById("ac-status").textContent = "Creating...";
     const resp = await fetch(`${API}/admin/clients`, {
       method: "POST",
-      headers,
-      body: JSON.stringify({
-        agent_card_id: agentCardId,
-        description: description || undefined,
-        allowed_scopes: allowedScopes,
-      }),
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(payload)
     });
-
-    const body = await resp.json();
-    if (!resp.ok) {
-      statusEl.textContent = "❌ " + (body.detail || resp.statusText);
-      return;
-    }
-
-    // Show client_secret in a modal (one-time display)
-    showClientSecretModal(body);
-
-    // Clear form and refresh
-    document.getElementById("ac-agent-card-id").value = "";
-    document.getElementById("ac-description").value = "";
-    document.querySelectorAll(".ac-scope").forEach(cb => { cb.checked = cb.value === "task:read"; });
-    statusEl.textContent = "✅ Client created!";
+    if (!resp.ok) { const err = await resp.json(); throw new Error(err.detail || resp.statusText); }
+    const data = await resp.json();
+    const secret = data.client_secret || "(no secret returned)";
+    document.getElementById("ac-status").innerHTML = `✅ Created <code>${data.client_id}</code><br><small style="color:#d29922;">Secret: ${secret} (save it now — won't be shown again)</small>`;
     fetchAdminClients();
   } catch (e) {
-    statusEl.textContent = "❌ " + e.message;
-  }
-  setTimeout(() => {
-    const el = document.getElementById("ac-status");
-    if (el && el.textContent && !el.textContent.startsWith("⏳")) el.textContent = "";
-  }, 5000);
-}
-
-function showClientSecretModal(clientData) {
-  const existing = document.getElementById("client-secret-modal");
-  if (existing) existing.remove();
-
-  const modal = document.createElement("div");
-  modal.id = "client-secret-modal";
-  modal.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;padding:24px;";
-  modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
-
-  const content = document.createElement("div");
-  content.style.cssText = "background:#0d1117;border:1px solid #30363d;border-radius:12px;max-width:520px;width:100%;padding:24px;position:relative;";
-
-  content.innerHTML = `
-    <h2 style="font-size:18px;font-weight:600;margin-bottom:16px;color:#f0f6fc;">🔑 Client Created</h2>
-    <div style="margin-bottom:16px;">
-      <div style="font-size:12px;color:#8b949e;margin-bottom:4px;">Client ID</div>
-      <code style="display:block;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;font-size:14px;word-break:break-all;">${escHtml(clientData.client_id)}</code>
-    </div>
-    <div style="margin-bottom:16px;">
-      <div style="font-size:12px;color:#d29922;margin-bottom:4px;">⚠️ Client Secret (shown once — copy now!)</div>
-      <div style="display:flex;gap:8px;">
-        <code id="secret-text" style="flex:1;background:#161b22;border:1px solid #d29922;border-radius:6px;padding:10px;font-size:14px;word-break:break-all;">${escHtml(clientData.client_secret)}</code>
-        <button onclick="copyClientSecret()" style="background:#1f6feb;border:1px solid #1f6feb;border-radius:6px;padding:8px 12px;color:#fff;cursor:pointer;font-size:13px;">📋 Copy</button>
-      </div>
-    </div>
-    <div style="margin-bottom:16px;">
-      <div style="font-size:12px;color:#8b949e;margin-bottom:4px;">Scopes</div>
-      <div>${(clientData.scopes || []).map(s => `<span class="tag">${escHtml(s)}</span>`).join("")}</div>
-    </div>
-    <div style="display:flex;justify-content:flex-end;">
-      <button onclick="document.getElementById('client-secret-modal').remove()" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:8px 20px;color:#c9d1d9;cursor:pointer;font-weight:500;">Close</button>
-    </div>
-  `;
-
-  const closeBtn = document.createElement("button");
-  closeBtn.textContent = "✕";
-  closeBtn.style.cssText = "position:absolute;top:12px;right:16px;background:transparent;border:none;color:#8b949e;cursor:pointer;font-size:18px;";
-  closeBtn.onclick = () => modal.remove();
-  content.prepend(closeBtn);
-
-  modal.appendChild(content);
-  document.body.appendChild(modal);
-}
-
-function copyClientSecret() {
-  const el = document.getElementById("secret-text");
-  if (!el) return;
-  const text = el.textContent;
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = el.nextElementSibling;
-    if (btn) btn.textContent = "✅ Copied!";
-    setTimeout(() => { if (btn) btn.textContent = "📋 Copy"; }, 2000);
-  }).catch(() => {
-    // Fallback: select the text
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-  });
-}
-
-// ======================== STATS ========================
-
-async function updateStats() {
-  try {
-    const [health, tasks, v2stats] = await Promise.all([
-      fetchData(`${API}/health`).catch(() => null),
-      fetchData(`${API}/v1/tasks?limit=0`).catch(() => null),
-      fetchData(`${API}/v2/stats`).catch(() => null),
-    ]);
-    const s = health?.stats || {};
-    const v2 = v2stats || {};
-    const v2Counts = v2.by_status || {};
-
-    const total = s.total_agents ?? "?";
-    const alive = s.alive_agents ?? "?";
-    const stale = s.stale_agents ?? "?";
-    const v1Tasks = tasks?.total ?? "?";
-
-    let html = `
-      <div class="stat-card total"><div class="stat-label">Total Agents</div><div class="value">${total}</div></div>
-      <div class="stat-card alive"><div class="stat-label">Alive</div><div class="value">${alive}</div></div>
-      <div class="stat-card stale"><div class="stat-label">Stale</div><div class="value">${stale}</div></div>
-      <div class="stat-card tasks"><div class="stat-label">V1 Tasks</div><div class="value">${v1Tasks}</div></div>
-      <div class="stat-card v2-todo"><div class="stat-label">Todo</div><div class="value">${v2Counts.todo ?? 0}</div></div>
-      <div class="stat-card v2-ready"><div class="stat-label">Ready</div><div class="value">${v2Counts.ready ?? 0}</div></div>
-      <div class="stat-card v2-run"><div class="stat-label">Running</div><div class="value">${(v2Counts.running ?? 0) + (v2Counts.blocked ?? 0)}</div></div>
-      <div class="stat-card v2-done"><div class="stat-label">Done ✓</div><div class="value">${v2Counts.completed ?? 0}</div></div>
-    `;
-    document.getElementById("stats").innerHTML = html;
-  } catch (e) {
-    document.getElementById("stats").innerHTML = `<div class="stat-card total"><div class="stat-label">Status</div><div class="value">—</div></div>`;
+    document.getElementById("ac-status").textContent = "Error: " + e.message;
   }
 }
 
-// ======================== UTILITIES ========================
+// ── Helpers ───────────────────────────────────────────────────────
 
 function escHtml(s) {
-  if (typeof s !== 'string') return String(s);
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  if (!s) return "";
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML.replace(/"/g, "&quot;");
 }
 
 function renderTaskResult(result) {
-  if (result.text && typeof result.text === 'string' && Object.keys(result).length === 1) {
-    return `<pre style="white-space: pre-wrap; word-break: break-word; background:#161b22; border:1px solid #21262d; border-radius:6px; padding:12px; font-size:13px; line-height:1.5; max-height:300px; overflow-y:auto;">${escHtml(result.text)}</pre>`;
-  }
-  if (result.text && typeof result.text === 'string') {
-    let html = `<div style="margin-bottom:8px; background:#161b22; border:1px solid #21262d; border-radius:6px; padding:12px; max-height:300px; overflow-y:auto;"><pre style="white-space: pre-wrap; word-break: break-word; font-size:13px; line-height:1.5; margin:0;">${escHtml(result.text)}</pre></div>`;
-    const rest = {...result};
-    delete rest.text;
-    if (Object.keys(rest).length > 0) {
-      html += `<details style="margin-top:4px;"><summary style="color:#8b949e; cursor:pointer; font-size:12px; user-select:none;">Raw metadata</summary><pre style="margin-top:8px; background:#0d1117; border:1px solid #21262d; border-radius:6px; padding:8px; font-size:12px; overflow-x:auto;">${escHtml(JSON.stringify(rest, null, 2))}</pre></details>`;
-    }
-    return html;
-  }
-  return `<pre style="background:#161b22; border:1px solid #21262d; border-radius:6px; padding:12px; font-size:13px; overflow-x:auto; max-height:300px; overflow-y:auto;">${escHtml(JSON.stringify(result, null, 2))}</pre>`;
+  if (typeof result === "string") return `<pre>${escHtml(result)}</pre>`;
+  return `<pre>${escHtml(JSON.stringify(result, null, 2))}</pre>`;
 }
 
-// Init
-fetchAgents();
+// Auto-refresh every 15s
+setInterval(() => {
+  if (isAuthenticated()) {
+    updateStats();
+    const tab = document.querySelector('.tabs .active');
+    if (tab) {
+      const name = tab.id.replace('tab-', '');
+      if (name === 'agents') fetchAgents();
+    }
+  }
+}, 15000);
 </script>
 </body>
 </html>

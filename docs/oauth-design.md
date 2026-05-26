@@ -16,7 +16,7 @@
 | `models.py` — AgentCard | 重构 | 字段完全重写对齐 v1.0 spec |
 | `models.py` — 安全模型 | 新增 | SecurityScheme 体系（5 种 scheme） |
 | `server.py` — HTTP Server | 新增 | OAuth 2.1 Token 端点 + 认证中间件 |
-| `server.py` — Registry API | 修改 | V1 Registry 端点集成认证 |
+| `server.py` — Registry API | 修改 | Registry 端点集成认证 |
 | `store.py` — Card 持久化 | 修改 | 新数据结构适配 |
 | `examples/a2a_coder_agent.py` | 修改 | 新 Card 格式 + 认证流程 |
 | `tests/test_models.py` | 修改 | 新模型的序列化/反序列化测试 |
@@ -223,8 +223,8 @@ Request → AuthMiddleware
 
 ## 6. 向下兼容策略
 
-1. **V1 API**（无认证的旧端点）保留 `/v1/agents` 和 `/v2/tasks`，标记为 `deprecated`
-2. **V2 API**（带认证的新端点）新增 `/v2/auth/*` 和认证后的端点
+1. **现有 API**（无认证的旧端点）保留 `/v1/agents` 和 `/v2/tasks`
+2. **认证端点多**新增 `/auth/*` 和认证后的端点
 3. **配置开关**：`--auth-enabled false` 可禁用认证（开发/测试模式）
 4. **预创建凭据**：Operator 通过 Admin CLI/API 为每个 Agent 预创建 client credentials，通过配置文件分发。不再需要 bootstrap agent 自举，方案C 已替代原自举方案。
 
@@ -263,7 +263,7 @@ Request → AuthMiddleware
 ## 8. 风险与注意事项
 
 1. **JWT 密钥管理**：目前使用 HMAC 对称密钥，生产环境应使用 RS256 非对称密钥对
-2. **Token 撤销**：V1 暂不实现 token revocation endpoint（可通过短过期时间缓解）
+2. **Token 撤销**：暂不实现 token revocation endpoint（可通过短过期时间缓解）
 3. **中间件兼容性**：auth middleware 必须正确处理 WebSocket upgrade 请求（WS 不支持 Bearer header，需用查询参数）
 4. **Agent 重连**：Token 过期后 Agent 需要重新获取 Token
 
@@ -451,14 +451,11 @@ message OAuthFlows {
 
 ---
 
-#### W4. WebSocket 认证方案未定
+#### W4. WebSocket 认证方案已定 → 查询参数 ?token=xxx（方案C）
 
 **位置**：第 8 节风险 #3
 **现状**："auth middleware 必须正确处理 WebSocket upgrade 请求（WS 不支持 Bearer header，需用查询参数）"
-**问题**：仅提了风险但没有给出具体方案。WebSocket 认证是痛点——查询参数 token 会进入服务器日志。建议明确方案：
-- 方案 A：首次 HTTP 握手带 `Authorization: Bearer` header → upgrade 成功后建立 WS 连接，后续帧不认证
-- 方案 B：WS 连接建立后在第一条消息中发送 token
-- 方案 C：查询参数 `?token=xxx`（需注意日志脱敏）
+**方案决策**：已采用 **方案C — 查询参数 `?token=xxx`**。WebSocket 端点 `GET /v1/agents/{agent_id}/ws` 在 `--auth-enabled` 开启时要求 `?token=<jwt>` 查询参数。Token 的 `sub` 需匹配 agent_id、registry 服务账号、或 client 的 agent_card_id。查询参数中的 token 建议由 Agent 程序内部传递，避免进入服务器日志脱敏策略。
 
 ---
 
@@ -478,7 +475,7 @@ message OAuthFlows {
 
 **方案C 决策理由**：
 
-1. **最小攻击面**：Agent 注册端点是受保护的 `/v2/agents`，只有持有有效 JWT 的 Agent 可以注册。Operator 预创建的凭据完全在内部控制。
+1. **最小攻击面**：Agent 注册端点是受保护的 `/v1/agents`（需 `agent:register` scope），只有持有有效 JWT 的 Agent 可以注册。Operator 预创建的凭据完全在内部控制。
 2. **运维与安全职责分离**：Admin（运维人员）负责凭据生命周期管理，Agent 仅使用凭据获取 Token。符合最小权限原则。
 3. **与生产环境的 Share Responsibility 模型一致**：凭据管理属于 Operator 的职责范围，Agent 是"受管节点"，通过配置文件/Secrets 机制注入凭据。这与 K8s Secret、HashiCorp Vault 等基础设施标准一致。
 4. **支持多通道分发**：Operator 可通过 Admin CLI、REST API、Web UI 三种方式创建和分发，适配不同运维场景。
@@ -506,6 +503,8 @@ a2a-admin create-client \
 # 输出
 # {"client_id": "cli_abc123", "client_secret": "***", "scopes": ["task:read", "task:write", "agent:register"]}
 ```
+
+> **Registry 服务账号自举**：启动时 Registry 会自动创建一个内置的 `simple-a2a-registry` 服务账号（拥有全部 6 个 scope），用于自身管理操作。可通过 `--bootstrap-secret` CLI 参数显式指定其 secret（默认自动生成并打印到日志）。此账号受保护，不能通过 Admin API 删除。
 
 **REST API 示例**：
 ```bash
@@ -537,11 +536,11 @@ a2a:
 
 ### 🟢 INFO（文档澄清，无代码修改）
 
-#### I1. 向后兼容第 1 点：`/v2/tasks` 归类为 V1 API 易混淆
+#### I1. 向后兼容第 1 点：/v2/tasks 归类为现有 API 易混淆
 
 **位置**：第 6 节第 1 点
-**现状**："V1 API（无认证的旧端点）保留 `/v1/agents` 和 `/v2/tasks`"
-**说明**：代码中 `/v2/tasks` 是 kanban 编排模块（orchestration）已有的端点，归类为 "V1 API" 名称上有歧义。建议改为 "保留现有端点（不含认证）：`/v1/agents` 和 `/v2/tasks`" 以避免 `v2` 前缀引起误解。
+**现状**："现有 API 保留 /v1/agents 和 /v2/tasks"
+**说明**：代码中 `/v2/tasks` 是 kanban 编排模块（orchestration）已有的端点，归类为 API 名称上有歧义。建议改为 "保留现有端点（不含认证）：/v1/agents 和 /v2/tasks" 以避免 v2 前缀引起误解。
 
 ---
 
@@ -571,3 +570,24 @@ a2a:
 **总体评价**：设计方向正确，AgentCard 顶层字段对齐良好，OAuth 2.1 流程合理。主要问题集中在嵌套类型（AgentInterface、AgentCapabilities、AgentSkill）的字段准确度。Bootstrap 认证流程缺口已通过方案C（Operator 预创建 client credentials）解决。建议先解决 B1-B5，再针对 W4（WebSocket 认证）决定技术方案。
 
 —— PM Review, 2026-05-25
+
+---
+
+## 附录 B — 实现状态对照
+
+| 设计项 | 实现状态 | 说明 |
+|--------|---------|------|
+| AgentCard 模型重构对齐 v1.0 protobuf | ✅ 已完成 | `models.py` 完全重写 |
+| SecurityScheme 体系（5 种 scheme） | ✅ 已完成 | 含 APIKey/HTTP/OAuth2/OpenID/MutualTLS |
+| OAuth 2.1 Token 端点 `POST /auth/token` | ✅ 已完成 | 支持 client_credentials + authorization_code |
+| JWT 签发（RS256 生产 / HS256 开发） | ✅ 已完成 | 启动时自动生成 RSA 密钥对 |
+| Auth 认证中间件 | ✅ 已完成 | aiohttp middleware，Scope 校验 |
+| Admin 客户端管理（/admin/clients） | ✅ 已完成 | CLI + REST API + Web UI 三种通道 |
+| WebSocket 认证（?token=xxx） | ✅ 已完成 | 查询参数传递 JWT，sub 匹配 agent_id / client |
+| 统一 SQLite Store | ✅ 已完成 | 4 表 (agents/oauth_clients/oauth_tokens/auth_codes)，自动 JSON 迁移 |
+| `--bootstrap-secret` CLI 参数 | ✅ 已完成 | 指定 Registry 服务账号 secret，不传则自动生成 |
+| Admin Web UI | ✅ 已完成 | OAuth 客户端管理 + Kanban 看板增强 |
+| A2A Coder Agent 示例 | ✅ 已完成 | `examples/a2a_coder_agent.py`，完整 A2A 协议兼容 |
+| Authorization Code + PKCE flow | ✅ 已完成 | store.py 含 auth_codes 表 + PKCE S256 验证 |
+| Implicit/Password 废弃流程保留 | ✅ 已完成 | OAuthFlows 已标注 deprecated 字段 |
+| Token revocation endpoint | ❌ 未实现 | 通过短过期时间（3600s）缓解；Admin 删除 client 时自动吊销其所有 token |

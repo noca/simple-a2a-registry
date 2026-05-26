@@ -1125,13 +1125,32 @@ class TestV1V2Coexistence:
 # ===================================================================
 
 
-class TestOAuthIntegration:
-    """Integration tests: Agent register → get client_id → get Token → authenticated request."""
+class TestOAuthFlow:
+    """Integration tests: admin-provisioned client (方案C) → get Token → authenticated request."""
 
-    async def _register_and_get_token(self, client) -> tuple[str, str]:
-        """Helper: register a client and get an access token. Returns (client_id, access_token)."""
-        reg = await client.post("/auth/register", json={"description": "Integration Test Agent"})
-        creds = await reg.json()
+    async def _register_and_get_token(self, client) -> tuple[str, str, str]:
+        """Helper: create a client via admin API and get an access token. Returns (client_id, client_secret, access_token)."""
+        # 1. Get admin token via public /auth/register
+        reg = await client.post("/auth/register", json={"description": "Admin Helper"})
+        admin_creds = await reg.json()
+        admin_tok = await client.post("/auth/token", data={
+            "grant_type": "client_credentials",
+            "client_id": admin_creds["client_id"],
+            "client_secret": admin_creds["client_secret"],
+            "scope": "registry:admin",
+        })
+        admin_token = (await admin_tok.json())["access_token"]
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+        # 2. Create client via admin API
+        create = await client.post("/admin/clients", json={
+            "agent_card_id": "OAuth Flow Agent",
+            "description": "Created via admin for OAuth flow test",
+            "allowed_scopes": ["agent:read", "agent:register", "task:read"],
+        }, headers=admin_headers)
+        creds = await create.json()
+
+        # 3. Get access token from the admin-created client
         tok = await client.post("/auth/token", data={
             "grant_type": "client_credentials",
             "client_id": creds["client_id"],
@@ -1139,33 +1158,53 @@ class TestOAuthIntegration:
             "scope": "agent:read",
         })
         token_data = await tok.json()
-        return creds["client_id"], token_data["access_token"]
+        return creds["client_id"], creds["client_secret"], token_data["access_token"]
 
-    async def test_agent_register_and_authenticated_request(self, api_client):
-        """Agent register → get client_id → get Token → call protected endpoint."""
-        async with await api_client() as client:
-            # 1. Register an agent
-            reg = await client.post("/v1/agents", json={
-                "name": "OAuth Agent",
-                "description": "Agent testing OAuth flow",
+    async def test_agent_register_and_authenticated_request(self):
+        """Admin creates client → get Token → register agent → call protected endpoint."""
+        tmpdir_obj = tempfile.TemporaryDirectory()
+        data_dir = tmpdir_obj.name
+        app = create_app(
+            data_dir=data_dir,
+            base_url="http://localhost:8321",
+            auth_enabled=True,
+        )
+        server = TestServer(app)
+        await server.start_server()
+        client = TestClient(server)
+
+        try:
+            # 1. Create client via admin API and get token
+            client_id, client_secret, access_token = await self._register_and_get_token(client)
+
+            # 2. Register an agent with agent:register scope
+            reg_tok = await client.post("/auth/token", data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "scope": "agent:register",
             })
+            reg_token = (await reg_tok.json())["access_token"]
+            reg_headers = {"Authorization": f"Bearer {reg_token}"}
+
+            reg = await client.post("/v1/agents", json={
+                "name": "OAuth Flow Agent",
+                "description": "Agent testing OAuth flow",
+            }, headers=reg_headers)
             assert reg.status == 201
-            agent_id = (await reg.json())["id"]
 
-            # 2. Get client_id via auth register (this happens in the real flow
-            #    as part of agent registration — server automatically creates a client)
-            client_id, access_token = await self._register_and_get_token(client)
-
-            # 3. Call protected /v1/agents endpoint with Bearer token
-            #    (this endpoint requires agent:read scope)
+            # 3. Call protected /v1/agents endpoint with agent:read token
             headers = {"Authorization": f"Bearer {access_token}"}
             resp = await client.get("/v1/agents", headers=headers)
             assert resp.status == 200
             data = await resp.json()
             assert data["total"] >= 1
+        finally:
+            await client.close()
+            tmpdir_obj.cleanup()
 
     async def test_token_expired_then_refreshed(self, api_client):
-        """Token expired → 401 → re-get Token → request succeeds."""
+        """Token expired → re-get Token → request succeeds."""
         async with await api_client() as client:
             # Get a client and its credentials
             reg = await client.post("/auth/register", json={"description": "Expiry Test"})

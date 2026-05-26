@@ -1,6 +1,7 @@
 """Unit tests for OAuth 2.1 authentication module."""
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import time
@@ -162,7 +163,7 @@ class TestAuthStore:
     def test_auth_code_pkce(self):
         store = AuthStore(tempfile.mkdtemp())
         code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
-        code_challenge = store._hash_s256(code_verifier)
+        code_challenge = hashlib.sha256(code_verifier.encode()).hexdigest()
 
         code = store.create_auth_code(
             client_id="client-1",
@@ -180,7 +181,7 @@ class TestAuthStore:
 
     def test_auth_code_bad_verifier(self):
         store = AuthStore(tempfile.mkdtemp())
-        challenge = store._hash_s256("correct-verifier")
+        challenge = hashlib.sha256("correct-verifier".encode()).hexdigest()
         code = store.create_auth_code(
             client_id="client-1", code_challenge=challenge,
             code_challenge_method="S256",
@@ -191,7 +192,7 @@ class TestAuthStore:
     def test_auth_code_consumed_once(self):
         store = AuthStore(tempfile.mkdtemp())
         verifier = "test-verifier-123"
-        challenge = store._hash_s256(verifier)
+        challenge = hashlib.sha256(verifier.encode()).hexdigest()
         code = store.create_auth_code(
             client_id="client-1", code_challenge=challenge,
             code_challenge_method="S256",
@@ -500,3 +501,186 @@ class MockRequest:
 async def _run_handler(handler, request):
     """Run an async handler with a mock request."""
     return await handler(request)
+
+
+# ---------------------------------------------------------------------------
+# Admin Clients API (requires auth_enabled=True + registry:admin scope)
+# ---------------------------------------------------------------------------
+
+
+class TestAdminClients:
+    """Tests for POST/GET/DELETE /admin/clients endpoints."""
+
+    async def _get_admin_token(self, client) -> str:
+        """Register a client via public /auth/register, then get token with registry:admin scope."""
+        reg = await client.post("/auth/register", json={"description": "Admin Test"})
+        creds = await reg.json()
+        tok = await client.post("/auth/token", data={
+            "grant_type": "client_credentials",
+            "client_id": creds["client_id"],
+            "client_secret": creds["client_secret"],
+            "scope": "registry:admin",
+        })
+        data = await tok.json()
+        return data["access_token"]
+
+    async def test_create_client(self):
+        """POST /admin/clients creates a new OAuth client successfully."""
+        async with await _make_app(auth_enabled=True) as client:
+            admin_token = await self._get_admin_token(client)
+            headers = {"Authorization": f"Bearer {admin_token}"}
+            resp = await client.post("/admin/clients", json={
+                "agent_card_id": "test-agent",
+                "description": "Test Client via Admin",
+                "allowed_scopes": ["task:read", "task:write"],
+            }, headers=headers)
+            assert resp.status == 201
+            data = await resp.json()
+            assert data["client_id"].startswith("client-")
+            assert "client_secret" in data
+            assert data["agent_card_id"] == "test-agent"
+            assert data["scopes"] == ["task:read", "task:write"]
+
+    async def test_create_client_requires_admin_scope(self):
+        """POST /admin/clients without registry:admin scope returns 403."""
+        async with await _make_app(auth_enabled=True) as client:
+            # Get a token without registry:admin scope
+            reg = await client.post("/auth/register", json={"description": "No Admin"})
+            creds = await reg.json()
+            tok = await client.post("/auth/token", data={
+                "grant_type": "client_credentials",
+                "client_id": creds["client_id"],
+                "client_secret": creds["client_secret"],
+                "scope": "task:read",
+            })
+            no_admin_token = (await tok.json())["access_token"]
+            headers = {"Authorization": f"Bearer {no_admin_token}"}
+            resp = await client.post("/admin/clients", json={
+                "agent_card_id": "test",
+                "description": "Should Fail",
+            }, headers=headers)
+            assert resp.status == 403
+
+    async def test_list_clients(self):
+        """GET /admin/clients returns the client list."""
+        async with await _make_app(auth_enabled=True) as client:
+            admin_token = await self._get_admin_token(client)
+            headers = {"Authorization": f"Bearer {admin_token}"}
+            resp = await client.get("/admin/clients", headers=headers)
+            assert resp.status == 200
+            data = await resp.json()
+            assert isinstance(data, list)
+            # Should contain the bootstrap account + the admin test client we created
+            client_ids = [c["client_id"] for c in data]
+            assert "simple-a2a-registry" in client_ids
+
+    async def test_delete_client(self):
+        """DELETE /admin/clients/{id} deletes a client successfully."""
+        async with await _make_app(auth_enabled=True) as client:
+            admin_token = await self._get_admin_token(client)
+            headers = {"Authorization": f"Bearer {admin_token}"}
+
+            # Create a client first
+            create = await client.post("/admin/clients", json={
+                "agent_card_id": "delete-me",
+                "description": "To be deleted",
+            }, headers=headers)
+            client_id = (await create.json())["client_id"]
+
+            # Delete it
+            resp = await client.delete(f"/admin/clients/{client_id}", headers=headers)
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["message"] == "Client deleted successfully"
+
+    async def test_list_after_delete(self):
+        """After deleting a client, the list no longer contains it."""
+        async with await _make_app(auth_enabled=True) as client:
+            admin_token = await self._get_admin_token(client)
+            headers = {"Authorization": f"Bearer {admin_token}"}
+
+            # Create a client
+            create = await client.post("/admin/clients", json={
+                "agent_card_id": "gone-soon",
+                "description": "Will be deleted",
+            }, headers=headers)
+            client_id = (await create.json())["client_id"]
+
+            # Delete it
+            await client.delete(f"/admin/clients/{client_id}", headers=headers)
+
+            # List should not contain it
+            list_resp = await client.get("/admin/clients", headers=headers)
+            data = await list_resp.json()
+            client_ids = [c["client_id"] for c in data]
+            assert client_id not in client_ids
+
+
+# ---------------------------------------------------------------------------
+# Auth Integration — Admin-provisioned flow (方案C)
+# ---------------------------------------------------------------------------
+
+
+class TestAuthIntegration:
+    """Integration: admin creates client → token → register agent with scope."""
+
+    async def test_admin_provisioned_flow(self):
+        """POST /admin/clients (Bearer + registry:admin) → creds → POST /auth/token → POST /v1/agents (Bearer + agent:register)."""
+        async with await _make_app(auth_enabled=True) as client:
+            # 1. Get an admin token (registry:admin scope)
+            reg = await client.post("/auth/register", json={"description": "Admin Provisioner"})
+            creds = await reg.json()
+            tok = await client.post("/auth/token", data={
+                "grant_type": "client_credentials",
+                "client_id": creds["client_id"],
+                "client_secret": creds["client_secret"],
+                "scope": "registry:admin",
+            })
+            assert tok.status == 200
+            admin_token = (await tok.json())["access_token"]
+            admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+            # 2. Create an OAuth client via admin API (simulates admin pre-provisioning)
+            admin_create = await client.post("/admin/clients", json={
+                "agent_card_id": "my-agent",
+                "description": "Pre-provisioned for my-agent",
+                "allowed_scopes": ["agent:register", "agent:read", "task:read"],
+            }, headers=admin_headers)
+            assert admin_create.status == 201
+            agent_creds = await admin_create.json()
+            assert "client_id" in agent_creds
+            assert "client_secret" in agent_creds
+
+            # 3. Get a token with agent:register scope (as the agent would)
+            tok2 = await client.post("/auth/token", data={
+                "grant_type": "client_credentials",
+                "client_id": agent_creds["client_id"],
+                "client_secret": agent_creds["client_secret"],
+                "scope": "agent:register",
+            })
+            assert tok2.status == 200
+            register_token = (await tok2.json())["access_token"]
+            register_headers = {"Authorization": f"Bearer {register_token}"}
+
+            # 4. Register an agent with the agent:register token
+            reg_agent = await client.post("/v1/agents", json={
+                "name": "Pre-Provisioned Agent",
+                "description": "Agent registered with admin-provisioned client",
+            }, headers=register_headers)
+            assert reg_agent.status == 201
+            agent_data = await reg_agent.json()
+            assert agent_data["id"].startswith("agent_") or agent_data["id"]
+
+            # 5. Verify the agent appears in the listing (use agent:read scope)
+            tok3 = await client.post("/auth/token", data={
+                "grant_type": "client_credentials",
+                "client_id": agent_creds["client_id"],
+                "client_secret": agent_creds["client_secret"],
+                "scope": "agent:read",
+            })
+            read_token = (await tok3.json())["access_token"]
+            read_headers = {"Authorization": f"Bearer {read_token}"}
+            list_resp = await client.get("/v1/agents", headers=read_headers)
+            assert list_resp.status == 200
+            list_data = await list_resp.json()
+            assert list_data["total"] >= 1

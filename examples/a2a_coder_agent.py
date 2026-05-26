@@ -51,13 +51,92 @@ HEARTBEAT_INTERVAL = 30  # seconds
 HERMES_PROFILE = "coder"
 HERMES_TIMEOUT = 300  # max seconds for a task
 
-# ── OAuth 2.1 Authentication config ──────────────────────────────────────
-REGISTRY_AUTH_ENABLED = True  # set True when registry starts with --auth-enabled
+# ── Config file paths (overridable via CLI args) ──────────────────────────
+# auth.json: {"client_id": "...", "client_secret": "..."}
+# agent.json: {"agent_id": "..."}
+_DEFAULT_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".a2a-coder")
+AUTH_CONFIG_PATH: str = os.path.join(_DEFAULT_CONFIG_DIR, "auth.json")
+AGENT_CONFIG_PATH: str = os.path.join(_DEFAULT_CONFIG_DIR, "agent.json")
+
+# Loaded at startup
 OAUTH_CLIENT_ID = ""
 OAUTH_CLIENT_SECRET = ""
-OAUTH_CLIENT_REGISTERED = False
 OAUTH_ACCESS_TOKEN = ""
-OAUTH_TOKEN_EXPIRES_AT = 0.0  # unix timestamp
+OAUTH_TOKEN_EXPIRES_AT = 0.0
+
+# When True, the registry is running with --auth-enabled and all API calls
+# carry a Bearer token obtained via client_credentials grant.
+REGISTRY_AUTH_ENABLED = True
+
+
+def _ensure_config_dir(path: str) -> None:
+    """Create parent dir for *path* if it doesn't exist."""
+    parent = os.path.dirname(path)
+    if parent and not os.path.isdir(parent):
+        os.makedirs(parent, exist_ok=True)
+
+
+def _load_auth_config(path: str) -> dict:
+    """Load auth config from *path* and update global OAUTH_CLIENT_ID/SECRET.
+
+    Falls back to environment variables ``OAUTH_CLIENT_ID`` /
+    ``OAUTH_CLIENT_SECRET`` for backward compatibility.
+    Returns a dict with ``client_id`` and ``client_secret`` (both may be empty).
+    """
+    global OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET
+
+    # Env vars take precedence (backward compat)
+    env_id = os.environ.get("OAUTH_CLIENT_ID", "")
+    env_secret = os.environ.get("OAUTH_CLIENT_SECRET", "")
+    if env_id and env_secret:
+        OAUTH_CLIENT_ID = env_id
+        OAUTH_CLIENT_SECRET = env_secret
+        return {"client_id": env_id, "client_secret": env_secret}
+
+    # Load from JSON file
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        OAUTH_CLIENT_ID = data.get("client_id", "")
+        OAUTH_CLIENT_SECRET = data.get("client_secret", "")
+        logger.debug("Loaded auth config from %s", path)
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+        logger.debug("No auth config at %s (%s)", path, e)
+        OAUTH_CLIENT_ID = ""
+        OAUTH_CLIENT_SECRET = ""
+
+    return {"client_id": OAUTH_CLIENT_ID, "client_secret": OAUTH_CLIENT_SECRET}
+
+
+def _load_agent_config(path: str) -> str:
+    """Load agent_id from *path*.
+
+    Returns the stored agent_id, or empty string if not found.
+    """
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        aid = data.get("agent_id", "")
+        if aid:
+            logger.debug("Loaded agent_id '%s' from %s", aid, path)
+        return aid
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return ""
+
+
+def _save_agent_config(path: str, agent_id: str) -> None:
+    """Atomically write agent_id to *path*."""
+    _ensure_config_dir(path)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump({"agent_id": agent_id}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        logger.info("Saved agent_id '%s' to %s", agent_id, path)
+    except OSError as e:
+        logger.warning("Failed to save agent_id to %s: %s", path, e)
 
 # ── WebSocket Registry client config ─────────────────────────────────────
 REGISTRY_WS_URL = f"{REGISTRY_URL.replace('http', 'ws')}/v1/agents"
@@ -125,8 +204,9 @@ def build_agent_card() -> Dict[str, Any]:
     fields (``id``, ``tags`` removed from AgentCard model).
 
     When ``REGISTRY_AUTH_ENABLED`` is True, includes an ``OAuth2SecurityScheme``
-    declaring the agent's supported OAuth flows so the Registry can auto-create
-    a client on registration.
+    declaring the agent's supported OAuth flows.  The OAuth client is
+    pre-provisioned by the admin (方案C) — see environment variables
+    ``OAUTH_CLIENT_ID`` / ``OAUTH_CLIENT_SECRET``.
     """
     card = {
         "name": "Hermes Coder Agent",
@@ -186,25 +266,29 @@ def build_agent_card() -> Dict[str, Any]:
 def _ensure_token() -> str:
     """Get or refresh an OAuth 2.1 access token from the Registry.
 
-    Uses the client_credentials grant with the configured
-    ``OAUTH_CLIENT_ID`` / ``OAUTH_CLIENT_SECRET``.  Caches the token and
-    auto-refreshes shortly before expiry (30 s grace margin).
+    Uses the client_credentials grant with the pre-provisioned
+    ``OAUTH_CLIENT_ID`` / ``OAUTH_CLIENT_SECRET`` (read from env vars).
+    Caches the token and auto-refreshes shortly before expiry (30 s grace margin).
 
     When ``REGISTRY_AUTH_ENABLED`` is False, returns an empty string and
-    is effectively a no-op.
+    is effectively a no-op.  When ``OAUTH_CLIENT_ID`` is empty but auth is
+    enabled, logs a warning and returns empty (the caller should check).
     """
-    global OAUTH_ACCESS_TOKEN, OAUTH_TOKEN_EXPIRES_AT, OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_CLIENT_REGISTERED
+    global OAUTH_ACCESS_TOKEN, OAUTH_TOKEN_EXPIRES_AT
 
     if not REGISTRY_AUTH_ENABLED:
+        return ""
+
+    if not OAUTH_CLIENT_ID or not OAUTH_CLIENT_SECRET:
+        logger.warning(
+            "OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET not set — "
+            "cannot obtain token.  Set these via environment variables."
+        )
         return ""
 
     # Still valid, return cached token (with 30 s grace margin)
     if OAUTH_ACCESS_TOKEN and time.time() < OAUTH_TOKEN_EXPIRES_AT - 30:
         return OAUTH_ACCESS_TOKEN
-
-    # Not registered yet — register an OAuth client first
-    if not OAUTH_CLIENT_REGISTERED:
-        _register_oauth_client()
 
     # Request a fresh token via client_credentials grant
     body = urllib.parse.urlencode({
@@ -223,54 +307,17 @@ def _ensure_token() -> str:
     try:
         with urllib.request.urlopen(req) as resp:
             result = json.loads(resp.read())
+    except HTTPError as e:
+        logger.warning("OAuth token request failed (HTTP %s): %s", e.code, e.read().decode()[:200])
+        return ""
     except Exception as e:
-        logger.warning("OAuth token request failed: %s — re-registering client", e)
-        OAUTH_CLIENT_REGISTERED = False
-        _register_oauth_client()
-        with urllib.request.urlopen(req) as resp:
-            result = json.loads(resp.read())
+        logger.warning("OAuth token request failed: %s", e)
+        return ""
 
     OAUTH_ACCESS_TOKEN = result["access_token"]
     OAUTH_TOKEN_EXPIRES_AT = time.time() + result.get("expires_in", 3600)
     logger.debug("Obtained OAuth token (expires in %ss)", result.get("expires_in", 3600))
     return OAUTH_ACCESS_TOKEN
-
-
-def _register_oauth_client() -> None:
-    """Register this agent as an OAuth 2.1 client with the Registry.
-
-    Populates ``OAUTH_CLIENT_ID`` and ``OAUTH_CLIENT_SECRET``.
-    Safe to call multiple times — a 409 (already registered) is handled
-    gracefully (looks up the existing client).
-    """
-    global OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_CLIENT_REGISTERED
-
-    body = json.dumps({
-        "agent_card_id": "Hermes Coder Agent",
-        "allowed_scopes": ["task:read", "task:write", "agent:read", "agent:register"],
-        "description": "A2A Coder Agent for Hermes",
-    }).encode()
-
-    req = urllib.request.Request(
-        f"{REGISTRY_URL}/auth/register",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read())
-            OAUTH_CLIENT_ID = data["client_id"]
-            OAUTH_CLIENT_SECRET = data["client_secret"]
-            OAUTH_CLIENT_REGISTERED = True
-            logger.info("Registered OAuth client: %s", OAUTH_CLIENT_ID)
-    except HTTPError as e:
-        err_body = e.read().decode()
-        if e.code == 409:
-            logger.info("OAuth client already registered — using existing credentials")
-            OAUTH_CLIENT_REGISTERED = True
-        else:
-            raise RuntimeError(f"OAuth client registration failed ({e.code}): {err_body}") from e
 
 
 def _auth_header() -> Dict[str, str]:
@@ -716,33 +763,44 @@ async def handle_health(request: web.Request) -> web.Response:
 
 # ── Registry Integration ────────────────────────────────────────────────────
 
-def register_with_registry() -> str:
+def register_with_registry(auth_config: str = AUTH_CONFIG_PATH,
+                           agent_config: str = AGENT_CONFIG_PATH) -> str:
     """Register this agent with the A2A Registry. Returns agent_id.
 
-    Registration (POST /v1/agents) is a public endpoint — no auth required.
-    After successful registration, also registers as an OAuth client and
-    obtains a bearer token if ``REGISTRY_AUTH_ENABLED`` is True.
+    Uses Bearer token auth when ``REGISTRY_AUTH_ENABLED`` is True (方案C).
+    The OAuth client is loaded from *auth_config* (or env vars as fallback).
+
+    On successful registration or lookup, the agent_id is persisted to
+    *agent_config* so subsequent restarts reuse the same ID.
     """
+    _load_auth_config(auth_config)
     card = build_agent_card()
     payload = {k: v for k, v in card.items() if v is not None}
+
+    # Obtain Bearer token first if auth is enabled and client is pre-provisioned
+    token = _ensure_token() if REGISTRY_AUTH_ENABLED else ""
+
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
     req = urllib.request.Request(
         f"{REGISTRY_URL}/v1/agents",
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
-    agent_id: str
     try:
         with urllib.request.urlopen(req) as resp:
             data = json.loads(resp.read())
-            logger.info("Registered with A2A Registry as '%s'", data["id"])
             agent_id = data["id"]
+            _save_agent_config(agent_config, agent_id)
+            logger.info("Registered with A2A Registry as '%s'", agent_id)
     except HTTPError as e:
         body = e.read().decode()
         if e.code == 409:
             if REGISTRY_AUTH_ENABLED:
                 logger.info("Agent already registered, fetching ID with auth...")
-                _register_oauth_client()
                 _ensure_token()
                 auth_headers = _auth_header()
                 search_url = f"{REGISTRY_URL}/v1/agents?q={urllib.parse.quote('Hermes Coder Agent')}"
@@ -760,13 +818,9 @@ def register_with_registry() -> str:
                 with urllib.request.urlopen(search_url) as resp:
                     agents = json.loads(resp.read())["agents"]
                     agent_id = agents[0]["id"] if agents else "a2a:coder-agent"
+            _save_agent_config(agent_config, agent_id)
         else:
             raise RuntimeError(f"Registry registration failed ({e.code}): {body}")
-
-    # Register OAuth client and obtain token (no-op if auth disabled)
-    if REGISTRY_AUTH_ENABLED:
-        _register_oauth_client()
-        _ensure_token()  # warm the cache
 
     return agent_id
 
@@ -836,8 +890,10 @@ async def _ensure_registered() -> str:
             ) as resp:
                 if resp.status == 200 or resp.status == 201:
                     data = await resp.json()
-                    logger.info("(Re-)registered with A2A Registry as '%s'", data["id"])
-                    return data["id"]
+                    aid = data["id"]
+                    _save_agent_config(AGENT_CONFIG_PATH, aid)
+                    logger.info("(Re-)registered with A2A Registry as '%s'", aid)
+                    return aid
                 elif resp.status == 409:
                     # Already registered — search by name (needs auth)
                     async with _ws_session.get(
@@ -847,8 +903,10 @@ async def _ensure_registered() -> str:
                         agents = (await search_resp.json())["agents"]
                         if agents:
                             aid = agents[0]["id"]
+                            _save_agent_config(AGENT_CONFIG_PATH, aid)
                             logger.info("Agent already registered as '%s'", aid)
                             return aid
+                        logger.warning("Agent 409 but not found by name — using fallback ID")
                         return "a2a:coder-agent"
                 else:
                     body = await resp.text()
@@ -891,8 +949,10 @@ def _ensure_registered_sync(card: Dict[str, Any], payload: Dict[str, Any]) -> st
         )
         with urllib.request.urlopen(req) as resp:
             data = json.loads(resp.read())
-            logger.info("(Re-)registered with A2A Registry as '%s'", data["id"])
-            return data["id"]
+            aid = data["id"]
+            _save_agent_config(AGENT_CONFIG_PATH, aid)
+            logger.info("(Re-)registered with A2A Registry as '%s'", aid)
+            return aid
     except HTTPError as e:
         body = e.read().decode()
         if e.code == 409:
@@ -906,8 +966,10 @@ def _ensure_registered_sync(card: Dict[str, Any], payload: Dict[str, Any]) -> st
                 agents = json.loads(resp.read())["agents"]
                 if agents:
                     aid = agents[0]["id"]
+                    _save_agent_config(AGENT_CONFIG_PATH, aid)
                     logger.info("Agent already registered as '%s'", aid)
                     return aid
+            logger.warning("Agent 409 but not found by name — using fallback ID")
             return "a2a:coder-agent"
         raise RuntimeError(f"Registry registration failed ({e.code}): {body}")
 
@@ -1067,10 +1129,14 @@ def create_app() -> web.Application:
 
 
 def main() -> None:
-    """Entry point: register, start heartbeat, run HTTP + WS concurrently."""
+    """Entry point: load configs, (re-)use persistent agent_id, start services."""
     parser = argparse.ArgumentParser(description="A2A Coder Agent")
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG-level logging")
     parser.add_argument("--log-file", default=None, help="Log to file instead of stderr")
+    parser.add_argument("--auth-config", default=AUTH_CONFIG_PATH,
+                        help=f"Path to auth config file (default: {AUTH_CONFIG_PATH})")
+    parser.add_argument("--agent-config", default=AGENT_CONFIG_PATH,
+                        help=f"Path to agent config file (default: {AGENT_CONFIG_PATH})")
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.debug else logging.INFO
@@ -1082,13 +1148,47 @@ def main() -> None:
     if args.log_file:
         log_kwargs["filename"] = str(Path(args.log_file).expanduser())
     logging.basicConfig(**log_kwargs)
-    # Re-apply level to our logger in case basicConfig was already called
     logger.setLevel(log_level)
     logging.getLogger("a2a_registry").setLevel(log_level)
 
-    logger.info("Registering with A2A Registry at %s...", REGISTRY_URL)
+    auth_config = args.auth_config
+    agent_config = args.agent_config
+
+    # 1. Load OAuth client credentials from config file (or env vars)
+    _load_auth_config(auth_config)
+
+    # 2. Try to reuse a previously persisted agent_id
     global _ws_agent_id
-    _ws_agent_id = register_with_registry()
+    _ws_agent_id = _load_agent_config(agent_config)
+    if _ws_agent_id:
+        logger.info("Found stored agent_id '%s' — validating...", _ws_agent_id)
+        # Quick check: does this agent_id still exist in the registry?
+        try:
+            req = urllib.request.Request(
+                f"{REGISTRY_URL}/v1/agents/{_ws_agent_id}",
+                headers={**_auth_header()},
+                method="GET",
+            )
+            with urllib.request.urlopen(req) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read())
+                    if data.get("id"):
+                        logger.info("Reusing existing agent_id '%s'", _ws_agent_id)
+                    else:
+                        _ws_agent_id = ""
+        except (HTTPError, OSError, json.JSONDecodeError):
+            logger.warning("Stored agent_id '%s' no longer valid — re-registering", _ws_agent_id)
+            _ws_agent_id = ""
+    else:
+        logger.info("No stored agent_id found — registering fresh")
+
+    # 3. Register (or re-register) if we don't have a valid agent_id
+    if not _ws_agent_id:
+        logger.info("Registering with A2A Registry at %s...", REGISTRY_URL)
+        _ws_agent_id = register_with_registry(auth_config, agent_config)
+    else:
+        # Even if we have a valid agent_id, persist it again (defensive)
+        _save_agent_config(agent_config, _ws_agent_id)
 
     import threading
     hb_thread = threading.Thread(target=heartbeat_loop, args=(_ws_agent_id,), daemon=True)

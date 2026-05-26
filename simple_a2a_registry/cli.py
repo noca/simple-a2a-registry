@@ -64,6 +64,12 @@ def main(argv: list[str] | None = None) -> None:
         action=argparse.BooleanOptionalAction,
         help="Enable OAuth 2.1 authentication middleware (default: disabled — dev mode)",
     )
+    parser.add_argument(
+        "--bootstrap-secret",
+        default=None,
+        help="Bootstrap client secret for the 'simple-a2a-registry' admin account "
+             "(default: auto-generated on first start, logged to stdout)",
+    )
 
     # --- V2 Orchestration Engine options ---
     parser.add_argument(
@@ -159,6 +165,7 @@ def main(argv: list[str] | None = None) -> None:
         port=args.port,
         data_dir=args.data_dir,
         auth_enabled=args.auth_enabled,
+        bootstrap_secret=args.bootstrap_secret,
         board_path=args.board_path,
         dispatcher_enabled=args.dispatcher_enabled,
         dispatcher_interval=args.dispatcher_interval,
