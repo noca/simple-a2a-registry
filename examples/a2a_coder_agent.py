@@ -51,6 +51,14 @@ HEARTBEAT_INTERVAL = 30  # seconds
 HERMES_PROFILE = "coder"
 HERMES_TIMEOUT = 300  # max seconds for a task
 
+# ── OAuth 2.1 Authentication config ──────────────────────────────────────
+REGISTRY_AUTH_ENABLED = True  # set True when registry starts with --auth-enabled
+OAUTH_CLIENT_ID = ""
+OAUTH_CLIENT_SECRET = ""
+OAUTH_CLIENT_REGISTERED = False
+OAUTH_ACCESS_TOKEN = ""
+OAUTH_TOKEN_EXPIRES_AT = 0.0  # unix timestamp
+
 # ── WebSocket Registry client config ─────────────────────────────────────
 REGISTRY_WS_URL = f"{REGISTRY_URL.replace('http', 'ws')}/v1/agents"
 
@@ -110,33 +118,172 @@ SKILLS = [
 
 
 def build_agent_card() -> Dict[str, Any]:
-    """Build the A2A Agent Card for the Coder Agent."""
-    return {
-        "id": "a2a:coder-agent",
+    """Build the A2A v1.0 Agent Card for the Coder Agent.
+
+    Returns a v1.0-style card with top-level ``skills`` (not nested in
+    ``capabilities.skills``), ``supported_interfaces``, and no deprecated
+    fields (``id``, ``tags`` removed from AgentCard model).
+
+    When ``REGISTRY_AUTH_ENABLED`` is True, includes an ``OAuth2SecurityScheme``
+    declaring the agent's supported OAuth flows so the Registry can auto-create
+    a client on registration.
+    """
+    card = {
         "name": "Hermes Coder Agent",
         "description": "An A2A-compliant coding agent powered by the Hermes Coder profile. "
                        "Can write, debug, test, and review code; manage GitHub workflows; "
                        "perform DevOps tasks; generate diagrams and documents; "
                        "analyze data; and retrieve knowledge.",
-        "url": AGENT_URL,
+        "supported_interfaces": [
+            {
+                "url": AGENT_URL,
+                "protocol_binding": "JSONRPC",
+                "protocol_version": "1.0",
+            },
+        ],
         "version": "1.0.0",
         "capabilities": {
-            "skills": SKILLS,
+            "streaming": False,
+            "push_notifications": True,
         },
         "provider": {
             "organization": "Hermes Agent",
             "url": "https://hermes-agent.nousresearch.com",
         },
-        "tags": [
-            "coder",
-            "hermes-cli",
-            "software-development",
-            "github",
-            "devops",
-            "creative",
-            "research",
-        ],
+        "default_input_modes": ["text/plain"],
+        "default_output_modes": ["text/plain"],
+        "skills": SKILLS,
     }
+
+    # Include OAuth2SecurityScheme when Registry auth is enabled
+    if REGISTRY_AUTH_ENABLED:
+        card["security_schemes"] = {
+            "registry-oauth": {
+                "scheme_type": "oauth2",
+                "description": "OAuth 2.1 client_credentials grant for Registry API access",
+                "oauth2": {
+                    "flows": {
+                        "client_credentials": {
+                            "token_url": f"{REGISTRY_URL}/auth/token",
+                            "scopes": {
+                                "task:read": "Read task list and details",
+                                "task:write": "Create and modify tasks",
+                                "agent:read": "Read agent list and details",
+                                "agent:register": "Register new agents",
+                            },
+                        },
+                    },
+                },
+            },
+        }
+
+    return card
+
+
+# ── OAuth Token Management ────────────────────────────────────────────────
+
+
+def _ensure_token() -> str:
+    """Get or refresh an OAuth 2.1 access token from the Registry.
+
+    Uses the client_credentials grant with the configured
+    ``OAUTH_CLIENT_ID`` / ``OAUTH_CLIENT_SECRET``.  Caches the token and
+    auto-refreshes shortly before expiry (30 s grace margin).
+
+    When ``REGISTRY_AUTH_ENABLED`` is False, returns an empty string and
+    is effectively a no-op.
+    """
+    global OAUTH_ACCESS_TOKEN, OAUTH_TOKEN_EXPIRES_AT, OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_CLIENT_REGISTERED
+
+    if not REGISTRY_AUTH_ENABLED:
+        return ""
+
+    # Still valid, return cached token (with 30 s grace margin)
+    if OAUTH_ACCESS_TOKEN and time.time() < OAUTH_TOKEN_EXPIRES_AT - 30:
+        return OAUTH_ACCESS_TOKEN
+
+    # Not registered yet — register an OAuth client first
+    if not OAUTH_CLIENT_REGISTERED:
+        _register_oauth_client()
+
+    # Request a fresh token via client_credentials grant
+    body = urllib.parse.urlencode({
+        "grant_type": "client_credentials",
+        "client_id": OAUTH_CLIENT_ID,
+        "client_secret": OAUTH_CLIENT_SECRET,
+        "scope": "task:read task:write agent:read agent:register",
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{REGISTRY_URL}/auth/token",
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            result = json.loads(resp.read())
+    except Exception as e:
+        logger.warning("OAuth token request failed: %s — re-registering client", e)
+        OAUTH_CLIENT_REGISTERED = False
+        _register_oauth_client()
+        with urllib.request.urlopen(req) as resp:
+            result = json.loads(resp.read())
+
+    OAUTH_ACCESS_TOKEN = result["access_token"]
+    OAUTH_TOKEN_EXPIRES_AT = time.time() + result.get("expires_in", 3600)
+    logger.debug("Obtained OAuth token (expires in %ss)", result.get("expires_in", 3600))
+    return OAUTH_ACCESS_TOKEN
+
+
+def _register_oauth_client() -> None:
+    """Register this agent as an OAuth 2.1 client with the Registry.
+
+    Populates ``OAUTH_CLIENT_ID`` and ``OAUTH_CLIENT_SECRET``.
+    Safe to call multiple times — a 409 (already registered) is handled
+    gracefully (looks up the existing client).
+    """
+    global OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_CLIENT_REGISTERED
+
+    body = json.dumps({
+        "agent_card_id": "Hermes Coder Agent",
+        "allowed_scopes": ["task:read", "task:write", "agent:read", "agent:register"],
+        "description": "A2A Coder Agent for Hermes",
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{REGISTRY_URL}/auth/register",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read())
+            OAUTH_CLIENT_ID = data["client_id"]
+            OAUTH_CLIENT_SECRET = data["client_secret"]
+            OAUTH_CLIENT_REGISTERED = True
+            logger.info("Registered OAuth client: %s", OAUTH_CLIENT_ID)
+    except HTTPError as e:
+        err_body = e.read().decode()
+        if e.code == 409:
+            logger.info("OAuth client already registered — using existing credentials")
+            OAUTH_CLIENT_REGISTERED = True
+        else:
+            raise RuntimeError(f"OAuth client registration failed ({e.code}): {err_body}") from e
+
+
+def _auth_header() -> Dict[str, str]:
+    """Return the ``Authorization: Bearer …`` header dict.
+
+    Returns an empty dict when ``REGISTRY_AUTH_ENABLED`` is False,
+    making callers transparently skip auth by merging ``**_auth_header()``
+    into the request headers.
+    """
+    if not REGISTRY_AUTH_ENABLED:
+        return {}
+    token = _ensure_token()
+    return {"Authorization": f"Bearer {token}"}
 
 
 # ── A2A Task States (per A2A spec) ─────────────────────────────────────────
@@ -570,45 +717,70 @@ async def handle_health(request: web.Request) -> web.Response:
 # ── Registry Integration ────────────────────────────────────────────────────
 
 def register_with_registry() -> str:
-    """Register this agent with the A2A Registry. Returns agent_id."""
+    """Register this agent with the A2A Registry. Returns agent_id.
+
+    Registration (POST /v1/agents) is a public endpoint — no auth required.
+    After successful registration, also registers as an OAuth client and
+    obtains a bearer token if ``REGISTRY_AUTH_ENABLED`` is True.
+    """
     card = build_agent_card()
-    payload = {
-        "name": card["name"],
-        "description": card["description"],
-        "url": card["url"],
-        "tags": card["tags"],
-        "capabilities": card["capabilities"],
-    }
+    payload = {k: v for k, v in card.items() if v is not None}
     req = urllib.request.Request(
         f"{REGISTRY_URL}/v1/agents",
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    agent_id: str
     try:
         with urllib.request.urlopen(req) as resp:
             data = json.loads(resp.read())
             logger.info("Registered with A2A Registry as '%s'", data["id"])
-            return data["id"]
+            agent_id = data["id"]
     except HTTPError as e:
         body = e.read().decode()
         if e.code == 409:
-            logger.info("Agent already registered, fetching ID...")
-            search_url = f"{REGISTRY_URL}/v1/agents?q={urllib.parse.quote('Hermes Coder Agent')}"
-            with urllib.request.urlopen(search_url) as resp:
-                agents = json.loads(resp.read())["agents"]
-                if agents:
-                    return agents[0]["id"]
-            return "a2a:coder-agent"
-        raise RuntimeError(f"Registry registration failed ({e.code}): {body}")
+            if REGISTRY_AUTH_ENABLED:
+                logger.info("Agent already registered, fetching ID with auth...")
+                _register_oauth_client()
+                _ensure_token()
+                auth_headers = _auth_header()
+                search_url = f"{REGISTRY_URL}/v1/agents?q={urllib.parse.quote('Hermes Coder Agent')}"
+                req2 = urllib.request.Request(
+                    search_url,
+                    headers=auth_headers if auth_headers else {},
+                    method="GET",
+                )
+                with urllib.request.urlopen(req2) as resp:
+                    agents = json.loads(resp.read())["agents"]
+                    agent_id = agents[0]["id"] if agents else "a2a:coder-agent"
+            else:
+                logger.info("Agent already registered, fetching ID...")
+                search_url = f"{REGISTRY_URL}/v1/agents?q={urllib.parse.quote('Hermes Coder Agent')}"
+                with urllib.request.urlopen(search_url) as resp:
+                    agents = json.loads(resp.read())["agents"]
+                    agent_id = agents[0]["id"] if agents else "a2a:coder-agent"
+        else:
+            raise RuntimeError(f"Registry registration failed ({e.code}): {body}")
+
+    # Register OAuth client and obtain token (no-op if auth disabled)
+    if REGISTRY_AUTH_ENABLED:
+        _register_oauth_client()
+        _ensure_token()  # warm the cache
+
+    return agent_id
 
 
 def heartbeat_loop(agent_id: str) -> None:
-    """Send heartbeats to the registry in a loop."""
+    """Send heartbeats to the registry in a loop.
+
+    Uses Bearer token auth when ``REGISTRY_AUTH_ENABLED`` is True.
+    """
     while True:
         try:
             req = urllib.request.Request(
                 f"{REGISTRY_URL}/v1/agents/{agent_id}/heartbeat",
+                headers={**_auth_header()},
                 method="POST",
             )
             with urllib.request.urlopen(req) as resp:
@@ -631,13 +803,7 @@ async def _ensure_registered() -> str:
     global _ws_agent_id, _ws_session
 
     card = build_agent_card()
-    payload = {
-        "name": card["name"],
-        "description": card["description"],
-        "url": card["url"],
-        "tags": card["tags"],
-        "capabilities": card["capabilities"],
-    }
+    payload = {k: v for k, v in card.items() if v is not None}
 
     logger.debug("_ensure_registered: ws_session=%s, agent_id=%s", _ws_session, _ws_agent_id)
 
@@ -646,7 +812,8 @@ async def _ensure_registered() -> str:
         try:
             logger.debug("_ensure_registered: checking if agent '%s' still exists...", _ws_agent_id)
             async with _ws_session.get(
-                f"{REGISTRY_URL}/v1/agents/{_ws_agent_id}"
+                f"{REGISTRY_URL}/v1/agents/{_ws_agent_id}",
+                headers=_auth_header(),
             ) as resp:
                 logger.debug("_ensure_registered: GET /v1/agents/%s -> status=%s", _ws_agent_id, resp.status)
                 if resp.status == 200:
@@ -672,9 +839,10 @@ async def _ensure_registered() -> str:
                     logger.info("(Re-)registered with A2A Registry as '%s'", data["id"])
                     return data["id"]
                 elif resp.status == 409:
-                    # Already registered — search by name
+                    # Already registered — search by name (needs auth)
                     async with _ws_session.get(
-                        f"{REGISTRY_URL}/v1/agents?q={urllib.parse.quote(card['name'])}"
+                        f"{REGISTRY_URL}/v1/agents?q={urllib.parse.quote(card['name'])}",
+                        headers=_auth_header(),
                     ) as search_resp:
                         agents = (await search_resp.json())["agents"]
                         if agents:
@@ -702,6 +870,7 @@ def _ensure_registered_sync(card: Dict[str, Any], payload: Dict[str, Any]) -> st
         try:
             req = urllib.request.Request(
                 f"{REGISTRY_URL}/v1/agents/{_ws_agent_id}",
+                headers={**_auth_header()},
                 method="GET",
             )
             with urllib.request.urlopen(req) as resp:
@@ -728,7 +897,12 @@ def _ensure_registered_sync(card: Dict[str, Any], payload: Dict[str, Any]) -> st
         body = e.read().decode()
         if e.code == 409:
             search_url = f"{REGISTRY_URL}/v1/agents?q={urllib.parse.quote(card['name'])}"
-            with urllib.request.urlopen(search_url) as resp:
+            search_req = urllib.request.Request(
+                search_url,
+                headers={**_auth_header()},
+                method="GET",
+            )
+            with urllib.request.urlopen(search_req) as resp:
                 agents = json.loads(resp.read())["agents"]
                 if agents:
                     aid = agents[0]["id"]
@@ -774,7 +948,11 @@ async def ws_connect_loop(close_event: asyncio.Event) -> None:
             retry_delay = min(retry_delay * 2, 60.0)
             continue
 
-        ws_url = f"{REGISTRY_WS_URL}/{_ws_agent_id}/ws"
+        if REGISTRY_AUTH_ENABLED:
+            token = _ensure_token()
+            ws_url = f"{REGISTRY_WS_URL}/{_ws_agent_id}/ws?token={urllib.parse.quote(token, safe='')}"
+        else:
+            ws_url = f"{REGISTRY_WS_URL}/{_ws_agent_id}/ws"
         logger.info("WS: connecting to %s", ws_url)
 
         try:

@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 class TaskStatus(str, Enum):
     """Kanban task lifecycle — 8 states in progression order."""
 
-    TODO = "todo"           # Created, waiting for parent dependencies
+    TODO = "todo"           # Created, waiting for assignee or parents to complete
     READY = "ready"         # All parents done, waiting for a worker to claim
     RUNNING = "running"     # Actively being worked on by a worker
     BLOCKED = "blocked"     # Blocked by human intervention (HITL)

@@ -15,6 +15,18 @@ from aiohttp import web, WSMsgType
 
 from simple_a2a_registry.models import make_agent_card, make_agent_skill
 from simple_a2a_registry.store import A2ARegistryStore, HEARTBEAT_TIMEOUT
+from simple_a2a_registry.auth import (
+    AuthStore,
+    AuthHandler,
+    _generate_rsa_keypair,
+    _auth_middleware_factory,
+    make_jwks_endpoint,
+    verify_token,
+    require_scope,
+    create_token,
+    ISSUER,
+    SCOPES,
+)
 from simple_a2a_registry.orchestration import (
     TaskStore,
     TaskStatus,
@@ -50,8 +62,12 @@ def _json_error(status: int, error_code: str, detail: str) -> web.Response:
 
 
 def _registry_card(base_url: str) -> Dict:
+    """Build a v1.0 Agent Card for the Registry itself.
+
+    Returns a v1.0-style card with ``supported_interfaces`` and top-level
+    ``skills`` (not nested in ``capabilities.skills``).
+    """
     return make_agent_card(
-        agent_id=REGISTRY_AGENT_ID,
         name=REGISTRY_AGENT_NAME,
         description=REGISTRY_AGENT_DESCRIPTION,
         url=f"{base_url}/",
@@ -75,7 +91,8 @@ def _registry_card(base_url: str) -> Dict:
 class RegistryHandler:
     """HTTP + WebSocket handler methods for the A2A Registry."""
 
-    def __init__(self, store: A2ARegistryStore, base_url: str) -> None:
+    def __init__(self, store: A2ARegistryStore, base_url: str,
+                 auth_store: Optional[AuthStore] = None) -> None:
         self.store = store
         self.base_url = base_url.rstrip("/")
         self._started_at = time.time()
@@ -89,6 +106,17 @@ class RegistryHandler:
         # Kanban integration (wired up by create_app)
         self.task_store: Optional[TaskStore] = None
         self._dispatched_ws_tasks: Optional[Dict[str, str]] = None
+
+        # OAuth 2.1 Auth store for auto-creating clients on registration
+        self.auth_store = auth_store
+
+        # Track registered client IDs for cleanup on unregister
+        self._agent_client_map: Dict[str, str] = {}
+
+        # Auth state (wired up by create_app)
+        self._auth_public_key: str = ""
+        self._auth_algorithm: str = "HS256"
+        self._auth_enabled: bool = False
 
     # ------------------------------------------------------------------
     # Health / meta
@@ -112,6 +140,7 @@ class RegistryHandler:
     async def handle_well_known(self, request: web.Request) -> web.Response:
         """GET /.well-known/agent-card.json"""
         card = _registry_card(self.base_url)
+        card["id"] = REGISTRY_AGENT_ID
         card["version"] = REGISTRY_VERSION
         return web.json_response(card, headers={
             "Cache-Control": "public, max-age=300",
@@ -165,7 +194,34 @@ class RegistryHandler:
         return web.json_response(card)
 
     async def handle_register(self, request: web.Request) -> web.Response:
-        """POST /v1/agents"""
+        """POST /v1/agents — register an agent.
+
+        If the agent's AgentCard includes an ``OAuth2SecurityScheme`` in
+        ``security_schemes``, the Registry auto-creates a client and returns
+        ``client_id``/``client_secret`` in the response.
+
+        Body::
+
+            {
+                "name": "...",
+                "description": "...",
+                "security_schemes": {
+                    "my-oauth": {
+                        "scheme_type": "oauth2",
+                        "description": "OAuth 2.1 client credentials",
+                        "oauth2": {
+                            "flows": {
+                                "client_credentials": {
+                                    "token_url": "http://localhost:8321/auth/token",
+                                    "scopes": {"task:read": "Read tasks"}
+                                }
+                            }
+                        }
+                    }
+                },
+                ...
+            }
+        """
         try:
             body = await request.json()
         except json.JSONDecodeError:
@@ -186,17 +242,87 @@ class RegistryHandler:
         agent_id = self.store.register_agent(body)
         card = self.store.get_agent(agent_id)
 
-        return web.json_response(
-            {
-                "message": "Agent registered successfully",
-                "id": agent_id,
-                "card": card,
-            },
-            status=201,
+        # ── Auto-create OAuth 2.1 client if AgentCard declares OAuth2SecurityScheme ──
+        client_id = None
+        client_secret = None
+        auth_result = None
+        if self.auth_store is not None:
+            client_result = self._create_oauth_client_from_card(card, agent_id)
+            if client_result:
+                client_id = client_result["client_id"]
+                client_secret = client_result["client_secret"]
+                self._agent_client_map[agent_id] = client_id
+                auth_result = {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "token_url": f"{self.base_url}/auth/token",
+                    "grant_type": "client_credentials",
+                }
+
+        response = {
+            "message": "Agent registered successfully",
+            "id": agent_id,
+            "card": card,
+        }
+        if auth_result:
+            response["authentication"] = auth_result
+
+        return web.json_response(response, status=201)
+
+    def _create_oauth_client_from_card(
+        self, card: Optional[Dict[str, Any]], agent_id: str,
+    ) -> Optional[Dict[str, str]]:
+        """Extract OAuth2SecurityScheme from *card* and auto-register a client.
+
+        Returns ``None`` if the card has no OAuth2SecurityScheme or if auth
+        is not configured.
+        """
+        if self.auth_store is None:
+            return None
+        if card is None:
+            return None
+
+        security_schemes = card.get("security_schemes", {})
+        if not security_schemes:
+            return None
+
+        # Find the first OAuth2 scheme
+        oauth_scheme = None
+        for name, scheme in security_schemes.items():
+            if isinstance(scheme, dict) and scheme.get("scheme_type") == "oauth2":
+                oauth_scheme = scheme
+                break
+
+        if oauth_scheme is None:
+            return None
+
+        # Determine scopes from the OAuth flow definition
+        allowed_scopes = None
+        oauth2 = oauth_scheme.get("oauth2", {})
+        flows = oauth2.get("flows", {})
+        cc_flow = flows.get("client_credentials", {})
+        if cc_flow and "scopes" in cc_flow:
+            allowed_scopes = list(cc_flow["scopes"].keys())
+
+        # Register the client with the auth store
+        client_card = self.store.get_agent(agent_id)
+        description = card.get("name", agent_id)
+        result = self.auth_store.register_client(
+            agent_card_id=agent_id,
+            allowed_scopes=allowed_scopes,
+            description=description,
         )
+        logger.info(
+            "Auto-created OAuth client '%s' for agent '%s' (scopes=%s)",
+            result["client_id"], agent_id, allowed_scopes,
+        )
+        return result
 
     async def handle_unregister(self, request: web.Request) -> web.Response:
-        """DELETE /v1/agents/{agent_id}"""
+        """DELETE /v1/agents/{agent_id} — unregister an agent.
+
+        Cleans up associated OAuth client credentials and WebSocket connection.
+        """
         agent_id = request.match_info["agent_id"]
 
         # Close WS connection if open
@@ -207,6 +333,17 @@ class RegistryHandler:
                 await ws.close()
             except Exception:
                 pass
+
+        # Clean up OAuth client credentials
+        client_id = self._agent_client_map.pop(agent_id, None)
+        if client_id and self.auth_store:
+            self.auth_store.revoke_client_tokens(client_id)
+            self.auth_store._clients.pop(client_id, None)
+            self.auth_store._save()
+            logger.info(
+                "Revoked OAuth client '%s' for unregistered agent '%s'",
+                client_id, agent_id,
+            )
 
         success = self.store.unregister(agent_id)
         if not success:
@@ -258,16 +395,58 @@ class RegistryHandler:
 
         Agents connect here instead of (or on top of) HTTP heartbeat.
         The Registry can dispatch tasks directly to connected agents via WS.
+
+        Authentication:
+        - When auth is disabled: no token required
+        - When auth is enabled: pass ``?token=xxx`` query parameter
+          (WS upgrade doesn't support Bearer header from browser contexts)
         """
         agent_id = request.match_info["agent_id"]
 
-        # Verify the agent is registered
+        # Verify the agent is registered FIRST (needed for sub check below)
         card = self.store.get_agent(agent_id)
         if card is None:
             return web.json_response(
                 {"error": "agent_not_found", "detail": f"Agent '{agent_id}' not found"},
                 status=404,
             )
+
+        # WebSocket token validation via query parameter
+        if self._auth_enabled:
+            token = request.query.get("token", "")
+            if not token:
+                return web.json_response(
+                    {"error": "unauthorized", "detail": "WebSocket upgrade requires ?token= query parameter"},
+                    status=401,
+                )
+            payload = verify_token(
+                token,
+                public_key=self._auth_public_key,
+                algorithm=self._auth_algorithm,
+                issuer=ISSUER,
+            )
+            if payload is None:
+                return web.json_response(
+                    {"error": "invalid_token", "detail": "Token expired or invalid"},
+                    status=401,
+                )
+            # Verify the token's sub matches:
+            #   - the agent's own ID, or
+            #   - "simple-a2a-registry" (registry service account), or
+            #   - an OAuth client_id whose agent_card_id matches this agent's name
+            token_sub = payload.get("sub", "")
+            if token_sub not in (agent_id, "simple-a2a-registry"):
+                sub_ok = False
+                if self.auth_store:
+                    client = self.auth_store.get_client(token_sub)
+                    if client and client.agent_card_id == card.get("name"):
+                        sub_ok = True
+                if not sub_ok:
+                    return web.json_response(
+                        {"error": "forbidden", "detail":
+                         f"Token subject '{token_sub}' does not match agent '{agent_id}'"},
+                        status=403,
+                    )
 
         ws = web.WebSocketResponse(max_msg_size=0)  # no size limit
         await ws.prepare(request)
@@ -536,7 +715,10 @@ class RegistryHandler:
             return _json_error(404, "agent_not_found",
                                f"Agent '{agent_id}' not found")
 
-        target_url = card.get("url", "")
+        # v1.0 AgentCard: URL is in supported_interfaces (top-level `url` is removed)
+        target_url = card.get("url") or (
+            card.get("supported_interfaces", [{}])[0].get("url", "") if card.get("supported_interfaces") else ""
+        )
         if not target_url:
             return _json_error(
                 400, "agent_not_routable",
@@ -740,6 +922,7 @@ def create_app(
     base_url: str = "http://localhost:8321",
     board_path: Optional[str] = None,
     *,
+    auth_enabled: bool = False,
     dispatcher_enabled: bool = True,
     dispatcher_interval: int = 5,
     claim_ttl: int = 900,
@@ -777,6 +960,31 @@ def create_app(
         workspaces_root = str(Path(data_dir).expanduser() / "workspaces")
     ws_mgr = WorkspaceManager(workspaces_root)
 
+    # OAuth 2.1 Authentication
+    # Generate RSA key pair at startup (RS256 primary, HS256 dev fallback)
+    auth_store = AuthStore(data_dir)
+    if auth_enabled:
+        private_key, public_key = _generate_rsa_keypair()
+        algorithm = "RS256"
+        logger.info("OAuth 2.1 auth enabled — generated RS256 key pair")
+    else:
+        private_key, public_key = "dev-secret-not-for-production", "dev-secret-not-for-production"
+        algorithm = "HS256"
+        logger.info("OAuth 2.1 auth disabled — dev mode (HS256 fallback)")
+
+    auth_handler = AuthHandler(
+        auth_store,
+        private_key=private_key,
+        algorithm=algorithm,
+        base_url=base_url,
+    )
+
+    # Wire auth_store to handler for auto-creating OAuth clients on agent registration
+    handler.auth_store = auth_store
+    handler._auth_public_key = public_key
+    handler._auth_algorithm = algorithm
+    handler._auth_enabled = auth_enabled
+
     # V2 Dispatcher (background worker dispatch)
     disp_config = DispatcherConfig(
         poll_interval=dispatcher_interval,
@@ -791,9 +999,19 @@ def create_app(
     if dispatcher:
         handler._dispatched_ws_tasks = dispatcher._dispatched_ws_tasks
 
-    app = web.Application(middlewares=[_error_middleware])
+    app = web.Application(middlewares=[
+        _error_middleware,
+        _auth_middleware_factory(
+            auth_store,
+            enabled=auth_enabled,
+            public_key=public_key,
+            algorithm=algorithm,
+        ),
+    ])
     app["store"] = store
     app["handler"] = handler
+    app["auth_store"] = auth_store
+    app["auth_handler"] = auth_handler
     app["task_store"] = task_store
     app["orch_handler"] = orch_handler
     app["ws_mgr"] = ws_mgr
@@ -804,46 +1022,102 @@ def create_app(
     app.router.add_get("/.well-known/agent-card.json", handler.handle_well_known)
 
     # Agent CRUD
-    app.router.add_get("/v1/agents", handler.handle_list_agents)
-    app.router.add_get("/v1/agents/{agent_id}", handler.handle_get_agent)
+    # V1 GET /v1/agents — requires agent:read scope
+    app.router.add_get("/v1/agents", require_scope("agent:read")(handler.handle_list_agents))
+    # V1 GET /v1/agents/{agent_id} — requires agent:read scope
+    app.router.add_get(
+        "/v1/agents/{agent_id}",
+        require_scope("agent:read")(handler.handle_get_agent),
+    )
+    # V1 POST /v1/agents — public (bootstrap), handled by middleware allowlist
     app.router.add_post("/v1/agents", handler.handle_register)
-    app.router.add_delete("/v1/agents/{agent_id}", handler.handle_unregister)
-
-    # Heartbeat
-    app.router.add_post(
-        "/v1/agents/{agent_id}/heartbeat", handler.handle_heartbeat
+    # V1 DELETE /v1/agents/{agent_id} — requires agent:admin scope
+    app.router.add_delete(
+        "/v1/agents/{agent_id}",
+        require_scope("agent:admin")(handler.handle_unregister),
     )
 
-    # WebSocket — persistent agent connection
+    # Heartbeat — requires agent:read (agent must know its own ID to call this)
+    app.router.add_post(
+        "/v1/agents/{agent_id}/heartbeat",
+        require_scope("agent:read")(handler.handle_heartbeat),
+    )
+
+    # WebSocket — no scope check here (query param token validated in handler)
     app.router.add_get(
         "/v1/agents/{agent_id}/ws", handler.handle_ws
     )
 
-    # Task dispatch (via WS)
+    # Task dispatch (via WS) — requires task:write
     app.router.add_post(
-        "/v1/agents/{agent_id}/dispatch", handler.handle_dispatch
+        "/v1/agents/{agent_id}/dispatch",
+        require_scope("task:write")(handler.handle_dispatch),
     )
     app.router.add_get(
-        "/v1/tasks", handler.handle_list_tasks
+        "/v1/tasks",
+        require_scope("task:read")(handler.handle_list_tasks),
     )
     app.router.add_get(
-        "/v1/tasks/{task_id}", handler.handle_get_task
+        "/v1/tasks/{task_id}",
+        require_scope("task:read")(handler.handle_get_task),
     )
 
-    # Task proxy (fallback)
+    # Task proxy (fallback) — requires task:write
     app.router.add_post(
-        "/v1/agents/{agent_id}/task", handler.handle_proxy_task
+        "/v1/agents/{agent_id}/task",
+        require_scope("task:write")(handler.handle_proxy_task),
     )
 
     # Static dashboard
     static_dir = Path(__file__).parent / "static"
     if static_dir.is_dir():
         async def _dashboard(request: web.Request) -> web.StreamResponse:
-            return web.FileResponse(static_dir / "index.html")
+            html_path = static_dir / "index.html"
+            html = html_path.read_text(encoding="utf-8")
+            if auth_enabled:
+                # Generate a dashboard-specific token with all scopes
+                dash_token = create_token(
+                    sub="dashboard",
+                    private_key=private_key,
+                    algorithm=algorithm,
+                    scope=" ".join(SCOPES.keys()),
+                )
+                # Inject auth config before closing </head>
+                config_script = (
+                    "<script>\n"
+                    f"window.__AUTH_CONFIG = {{ enabled: true, token: {json.dumps(dash_token)} }};\n"
+                    "</script>\n</head>"
+                )
+                html = html.replace("</head>", config_script)
+            return web.Response(
+                text=html,
+                content_type="text/html",
+                charset="utf-8",
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
         app.router.add_get("/", _dashboard, name="dashboard")
 
     # V2 Orchestration routes
     register_v2_routes(app, orch_handler)
+
+    # OAuth 2.1 Token / Registration endpoints (always registered, public)
+    app.router.add_post("/auth/token", auth_handler.handle_token)
+    app.router.add_post("/auth/register", auth_handler.handle_register)
+    app.router.add_get(
+        "/.well-known/oauth-authorization-server",
+        auth_handler.handle_well_known_oauth,
+    )
+    if auth_enabled:
+        # JWKS endpoint only when RS256 keys are generated
+        try:
+            jwks_handler = make_jwks_endpoint(public_key)
+            app.router.add_get("/.well-known/jwks.json", jwks_handler)
+        except Exception as e:
+            logger.warning("Failed to create JWKS endpoint (non-fatal): %s", e)
 
     # Background cleanup + Dispatcher
     cleanup_task_ref: list[asyncio.Task] = []
@@ -884,6 +1158,7 @@ def run_server(
     host: str = "0.0.0.0",
     port: int = 8321,
     data_dir: str = "~/.simple-a2a-registry",
+    auth_enabled: bool = False,
     board_path: Optional[str] = None,
     dispatcher_enabled: bool = True,
     dispatcher_interval: int = 5,
@@ -897,6 +1172,7 @@ def run_server(
         host: Bind address.
         port: Bind port.
         data_dir: Persistent data directory.
+        auth_enabled: Enable OAuth 2.1 authentication middleware.
         board_path: SQLite database path for the V2 orchestration board.
         dispatcher_enabled: Whether to start the background Dispatcher.
         dispatcher_interval: Dispatcher poll interval in seconds.
@@ -906,6 +1182,7 @@ def run_server(
     """
     app = create_app(
         data_dir=data_dir,
+        auth_enabled=auth_enabled,
         board_path=board_path,
         dispatcher_enabled=dispatcher_enabled,
         dispatcher_interval=dispatcher_interval,
@@ -913,8 +1190,9 @@ def run_server(
         failure_limit=failure_limit,
         workspaces_root=workspaces_root,
     )
+    auth_status = "enabled" if auth_enabled else "disabled (dev)"
     logger.info(
-        "Simple A2A Registry starting on %s:%s (data: %s)",
-        host, port, data_dir,
+        "Simple A2A Registry starting on %s:%s (data: %s) auth=%s",
+        host, port, data_dir, auth_status,
     )
     web.run_app(app, host=host, port=port)

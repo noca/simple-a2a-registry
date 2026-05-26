@@ -12,6 +12,7 @@ authors = [
 dependencies = [
     "aiohttp>=3.9,<4",
     "aiohttp-cors>=0.7",
+    "pyjwt>=2.8,<3",
 ]
 
 [project.scripts]

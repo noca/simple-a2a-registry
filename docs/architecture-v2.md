@@ -298,20 +298,23 @@ PRAGMA foreign_keys=ON;            -- 外键约束
 
 所有 V2 端点统一以 `/v2/` 为前缀，与 V1 端点 `/v1/` 共存。
 
-| 方法 | 路径 | 说明 | 状态码 |
-|------|------|------|--------|
-| POST | `/v2/tasks` | 创建任务 | 201 |
-| GET | `/v2/tasks` | 列表查询 | 200 |
-| GET | `/v2/tasks/{id}` | 任务详情（含依赖链、评论、运行历史） | 200 |
-| POST | `/v2/tasks/{id}/claim` | Worker 认领任务 | 200/409 |
-| POST | `/v2/tasks/{id}/complete` | 完成任务 | 200 |
-| POST | `/v2/tasks/{id}/block` | 阻塞任务（HITL） | 200 |
-| POST | `/v2/tasks/{id}/unblock` | 解除阻塞 | 200 |
-| POST | `/v2/tasks/{id}/heartbeat` | 任务级心跳 | 200 |
-| POST | `/v2/tasks/{id}/comment` | 添加评论 | 201 |
-| DELETE | `/v2/tasks/{id}` | 归档任务 | 200 |
-| POST | `/v2/tasks/{id}/depend` | 添加依赖关系（双向） | 200 |
-| DELETE | `/v2/tasks/{id}/depend/{parent_id}` | 移除依赖关系 | 200 |
+> 🔒 **认证要求**：当 `--auth-enabled true` 时，所有 V2 端点需要 `Authorization: Bearer <token>` header。
+> 保护范围见下方 [认证与安全](#14-认证与安全) 章节。
+
+| 方法 | 路径 | 说明 | 状态码 | 认证 | Scope |
+|------|------|------|--------|------|-------|
+| POST | `/v2/tasks` | 创建任务 | 201 | ✅ | `task:write` |
+| GET | `/v2/tasks` | 列表查询 | 200 | ✅ | `task:read` |
+| GET | `/v2/tasks/{id}` | 任务详情（含依赖链、评论、运行历史） | 200 | ✅ | `task:read` |
+| POST | `/v2/tasks/{id}/claim` | Worker 认领任务 | 200/409 | ✅ | `task:write` |
+| POST | `/v2/tasks/{id}/complete` | 完成任务 | 200 | ✅ | `task:write` |
+| POST | `/v2/tasks/{id}/block` | 阻塞任务（HITL） | 200 | ✅ | `task:write` |
+| POST | `/v2/tasks/{id}/unblock` | 解除阻塞 | 200 | ✅ | `task:write` |
+| POST | `/v2/tasks/{id}/heartbeat` | 任务级心跳 | 200 | ✅ | `task:write` |
+| POST | `/v2/tasks/{id}/comment` | 添加评论 | 201 | ✅ | `task:write` |
+| DELETE | `/v2/tasks/{id}` | 归档任务 | 200 | ✅ | `task:write` |
+| POST | `/v2/tasks/{id}/depend` | 添加依赖关系（双向） | 200 | ✅ | `task:write` |
+| DELETE | `/v2/tasks/{id}/depend/{parent_id}` | 移除依赖关系 | 200 | ✅ | `task:write` |
 
 ### 4.2 端点详情
 
@@ -1384,6 +1387,53 @@ Week 3: ████████████  Phase 3 — Dispatcher + Workspace
 Week 4: ████████      Phase 4 — HITL + 审计
 Week 5: ████████      Phase 5 — 打磨与文档
 ```
+
+---
+
+## 14. 认证与安全
+
+### 14.1 概况
+
+> 本节描述 V2 Orchestration Engine 在 OAuth 2.1 认证环境下的行为。
+> 完整的认证架构设计请参见 [docs/architecture.md](architecture.md#oauth-21-认证架构)。
+
+当 `--auth-enabled true` 时，所有 V2 API 端点受 OAuth 2.1 中间件保护。Worker 进程在派发时通过环境变量获取认证上下文。
+
+### 14.2 认证中间件覆盖
+
+| 路径 | 认证 | 说明 |
+|------|------|------|
+| `/v2/tasks` 及子路径 | ✅ `task:read` / `task:write` | 所有 V2 编排端点 |
+| `/auth/*` | ❌ 公开 | Token 端点/注册 |
+| `/.well-known/*` | ❌ 公开 | Discovery 端点 |
+| `/health` | ❌ 公开 | 健康检查 |
+
+### 14.3 203 状态码与 Token 认证
+
+V1 心跳端点 `POST /v1/agents/{agent_id}/heartbeat` 在认证启用后：
+
+- **请求**：需携带 `Authorization: Bearer <token>`（scope: `agent:read`）
+- **响应**：成功时仍返回 `203 Non-Authoritative Information`
+- **语义**：203 表明 Registry 转发了 Agent 自身的状态声明（"alive"），而非 Registry 独立验证的结果。认证中间件验证的是调用方身份，不影响心跳的 203 语义。
+
+### 14.4 Dispatcher 的认证模式
+
+Dispatcher 作为内部组件，在认证启用时采用以下模式工作：
+
+1. **内部绕过**：Dispatcher 是 Registry 内部的 asyncio 任务，不经过 HTTP 认证中间件，直接调用 Store 方法
+2. **Worker 认证**：Dispatcher 生成的 Worker 子进程通过环境变量 `HERMES_AUTH_TOKEN` 获取预先签发的 JWT，在被调度调用 `/v2/` 端点时附带 `Authorization: Bearer` header
+3. **Token 发放**：Worker Token 由 Dispatcher 在 claim 时生成，包含该 Worker 所需的 scope
+
+### 14.5 安全边界
+
+| 安全关注点 | 措施 |
+|-----------|------|
+| **端点认证** | AuthMiddleware 拦截所有受保护端点 |
+| **Scope 隔离** | Worker Token 只含该 Worker 所需的最小 scope |
+| **Token 泄露** | JWT 自带过期时间，短生命周期（默认 1 小时） |
+| **Claim 锁定** | 同一 Worker 使用 claim_lock 防双重派发 |
+| **Workspace 隔离** | 每个任务独立目录，scratch 模式归档即删除 |
+| **配置开关** | `--auth-enabled` 一键切换，开发模式零认证开销 |
 
 ---
 

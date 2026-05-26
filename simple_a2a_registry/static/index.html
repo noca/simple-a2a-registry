@@ -204,9 +204,21 @@ function debouncedKanbanSearch() {
 }
 
 async function fetchData(url) {
-  const resp = await fetch(url);
+  const config = window.__AUTH_CONFIG || {};
+  const headers = {};
+  if (config.enabled && config.token) {
+    headers["Authorization"] = `Bearer ${config.token}`;
+  }
+  const resp = await fetch(url, { headers });
   if (!resp.ok) throw new Error(resp.statusText);
   return resp.json();
+}
+function authHeaders() {
+  const config = window.__AUTH_CONFIG || {};
+  if (config.enabled && config.token) {
+    return { "Authorization": `Bearer ${config.token}` };
+  }
+  return {};
 }
 
 function switchTab(name) {
@@ -214,8 +226,8 @@ function switchTab(name) {
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   document.getElementById(`tab-${name}`).classList.add('active');
   document.getElementById(`content-${name}`).classList.add('active');
-  if (name === 'tasks' && !document.getElementById('task-list').querySelector('table')) fetchTasks();
-  if (name === 'kanban' && !document.getElementById('kanban-board').dataset.loaded) fetchKanban();
+  if (name === 'tasks') fetchTasks();
+  if (name === 'kanban') fetchKanban();
 }
 
 // ======================== AGENTS (V1) ========================
@@ -248,7 +260,7 @@ function renderAgents(data) {
   let html = '<table><thead><tr><th>Status</th><th>Name</th><th>Skills</th><th>Tags</th><th>Last Heartbeat</th></tr></thead><tbody>';
   for (const agent of data.agents) {
     const statusClass = agent.status === "alive" ? "badge-alive" : "badge-stale";
-    const skills = (agent.capabilities?.skills || []).slice(0, 3);
+    const skills = (agent.skills || agent.capabilities?.skills || []).slice(0, 3);
     const skillNames = skills.map(s => s.name).join(", ") || "-";
     const tags = (agent.tags || []).map(t => `<span class="tag">${t}</span>`).join("") || "-";
     const hb = agent.lastHeartbeat ? new Date(agent.lastHeartbeat * 1000).toLocaleString() : "-";
@@ -265,7 +277,7 @@ function renderAgents(data) {
     if (agent.url) html += `<div class="detail-section"><h3>URL</h3><p>${agent.url}</p></div>`;
     if (skills.length > 0) {
       html += `<div class="detail-section"><h3>Skills</h3>`;
-      for (const sk of agent.capabilities.skills) {
+      for (const sk of (agent.skills || agent.capabilities?.skills || [])) {
         html += `<div class="skill-card"><span class="name">${escHtml(sk.name)}</span> <span class="desc">${escHtml(sk.description || "")}</span></div>`;
       }
       html += `</div>`;
@@ -557,7 +569,7 @@ async function createKanbanTask() {
   try {
     const resp = await fetch(`${API}/v2/tasks`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify(payload),
     });
     if (!resp.ok) {
@@ -576,7 +588,7 @@ async function handleDeleteTask(taskId) {
   if (!confirm(`确定归档任务 ${taskId}？\n仅 completed/failed/cancelled 状态可归档。`)) return;
 
   try {
-    const resp = await fetch(`${API}/v2/tasks/${taskId}`, { method: "DELETE" });
+    const resp = await fetch(`${API}/v2/tasks/${taskId}`, { method: "DELETE", headers: authHeaders() });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       alert("归档失败: " + (err.detail || resp.statusText));
@@ -626,7 +638,7 @@ async function handleStatusChange(taskId, newStatus) {
   try {
     const resp = await fetch(`${API}/v2/tasks/${taskId}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ status: newStatus }),
     });
     if (!resp.ok) {
@@ -650,7 +662,7 @@ function showEditTaskModal(taskId) {
   if (existing) existing.remove();
 
   // Fetch latest task data
-  fetch(`${API}/v2/tasks/${taskId}`).then(r => r.json()).then(data => {
+  fetch(`${API}/v2/tasks/${taskId}`, { headers: authHeaders() }).then(r => r.json()).then(data => {
     const task = data.task || data;
 
     const modal = document.createElement("div");
@@ -721,7 +733,7 @@ async function handleUpdateTask(taskId) {
   try {
     const resp = await fetch(`${API}/v2/tasks/${taskId}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify(payload),
     });
     if (!resp.ok) {
@@ -1001,8 +1013,6 @@ function renderTaskResult(result) {
 
 // Init
 fetchAgents();
-setInterval(() => { updateStats(); }, 30000);
-setInterval(() => { if (document.getElementById("tab-kanban").classList.contains("active")) fetchKanban(); }, 15000);
 </script>
 </body>
 </html>

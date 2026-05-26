@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 
 from aiohttp import web
 
+from simple_a2a_registry.auth import require_scope
 from simple_a2a_registry.orchestration.store import DEFAULT_CLAIM_TTL, TaskStore
 from simple_a2a_registry.orchestration.models import (
     TaskStatus,
@@ -186,6 +187,17 @@ class OrchestrationHandler:
                     assignee=body.get("assignee"),
                     priority=body.get("priority"),
                 )
+                # Auto-promote TODO → READY when assignee is set on a root task
+                if (
+                    "assignee" in body
+                    and task.assignee
+                    and task.status == TaskStatus.TODO.value
+                ):
+                    task_data = self.store.get_task(task_id)
+                    if task_data and not task_data.parents:
+                        task = self.store.update_task_status(
+                            task_id, TaskStatus.READY.value,
+                        )
         except ValueError as e:
             msg = str(e)
             if "not found" in msg.lower():
@@ -621,20 +633,34 @@ class OrchestrationHandler:
 
 def register_v2_routes(app: web.Application, handler: OrchestrationHandler) -> None:
     """Register all V2 orchestration routes on *app*."""
-    app.router.add_post("/v2/tasks", handler.handle_create_task)
-    app.router.add_patch("/v2/tasks/{id}", handler.handle_update_task)
-    app.router.add_get("/v2/tasks", handler.handle_list_tasks)
-    app.router.add_get("/v2/tasks/{id}", handler.handle_get_task)
-    app.router.add_post("/v2/tasks/{id}/claim", handler.handle_claim)
-    app.router.add_post("/v2/tasks/{id}/complete", handler.handle_complete)
-    app.router.add_post("/v2/tasks/{id}/block", handler.handle_block)
-    app.router.add_post("/v2/tasks/{id}/unblock", handler.handle_unblock)
-    app.router.add_post("/v2/tasks/{id}/heartbeat", handler.handle_heartbeat)
-    app.router.add_post("/v2/tasks/{id}/comment", handler.handle_add_comment)
-    app.router.add_delete("/v2/tasks/{id}", handler.handle_delete_task)
-    app.router.add_post("/v2/tasks/{id}/depend", handler.handle_add_dependency)
+    # POST /v2/tasks — create task (task:write)
+    app.router.add_post("/v2/tasks", require_scope("task:write")(handler.handle_create_task))
+    # PATCH /v2/tasks/{id} — update metadata (task:write)
+    app.router.add_patch("/v2/tasks/{id}", require_scope("task:write")(handler.handle_update_task))
+    # GET /v2/tasks — list tasks (task:read)
+    app.router.add_get("/v2/tasks", require_scope("task:read")(handler.handle_list_tasks))
+    # GET /v2/tasks/{id} — detail (task:read)
+    app.router.add_get("/v2/tasks/{id}", require_scope("task:read")(handler.handle_get_task))
+    # POST /v2/tasks/{id}/claim — claim (task:write)
+    app.router.add_post("/v2/tasks/{id}/claim", require_scope("task:write")(handler.handle_claim))
+    # POST /v2/tasks/{id}/complete — complete (task:write)
+    app.router.add_post("/v2/tasks/{id}/complete", require_scope("task:write")(handler.handle_complete))
+    # POST /v2/tasks/{id}/block — block (task:write)
+    app.router.add_post("/v2/tasks/{id}/block", require_scope("task:write")(handler.handle_block))
+    # POST /v2/tasks/{id}/unblock — unblock (task:write)
+    app.router.add_post("/v2/tasks/{id}/unblock", require_scope("task:write")(handler.handle_unblock))
+    # POST /v2/tasks/{id}/heartbeat — heartbeat (task:write)
+    app.router.add_post("/v2/tasks/{id}/heartbeat", require_scope("task:write")(handler.handle_heartbeat))
+    # POST /v2/tasks/{id}/comment — comment (task:write)
+    app.router.add_post("/v2/tasks/{id}/comment", require_scope("task:write")(handler.handle_add_comment))
+    # DELETE /v2/tasks/{id} — archive (task:write)
+    app.router.add_delete("/v2/tasks/{id}", require_scope("task:write")(handler.handle_delete_task))
+    # POST /v2/tasks/{id}/depend — add dependency (task:write)
+    app.router.add_post("/v2/tasks/{id}/depend", require_scope("task:write")(handler.handle_add_dependency))
+    # DELETE /v2/tasks/{id}/depend/{parent_id} — remove dependency (task:write)
     app.router.add_delete(
         "/v2/tasks/{id}/depend/{parent_id}",
-        handler.handle_remove_dependency,
+        require_scope("task:write")(handler.handle_remove_dependency),
     )
-    app.router.add_get("/v2/stats", handler.handle_stats)
+    # GET /v2/stats — registry statistics (registry:admin)
+    app.router.add_get("/v2/stats", require_scope("registry:admin")(handler.handle_stats))

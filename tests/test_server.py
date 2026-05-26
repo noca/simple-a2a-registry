@@ -97,18 +97,21 @@ class TestListAgents:
         async with await app_factory() as client:
             await client.post("/v1/agents", json={
                 "name": "Skilled",
-                "capabilities": {"skills": [{"id": "s1", "name": "Data Analysis"}]},
+                "description": "Has skills",
+                "skills": [{"id": "s1", "name": "Data Analysis", "description": "desc", "tags": ["data"]}],
             })
             resp = await client.get("/v1/agents?skill=Data Analysis")
             data = await resp.json()
             assert data["total"] == 1
 
     async def test_list_filter_by_tag(self, app_factory):
+        # AgentCard v1.0 no longer has tags — query param ignored
+        # (backward compat: tag filter still checks old dict field)
         async with await app_factory() as client:
-            await client.post("/v1/agents", json={"name": "Tagged", "tags": ["python"]})
+            await client.post("/v1/agents", json={"name": "Tagged", "description": "No tags in v1.0"})
             resp = await client.get("/v1/agents?tag=python")
             data = await resp.json()
-            assert data["total"] == 1
+            assert data["total"] == 0
 
     async def test_list_search(self, app_factory):
         async with await app_factory() as client:
@@ -145,13 +148,13 @@ class TestListAgents:
 class TestGetAgent:
     async def test_get_existing_agent(self, app_factory):
         async with await app_factory() as client:
-            post_resp = await client.post("/v1/agents", json={"name": "Find Me", "tags": ["findable"]})
+            post_resp = await client.post("/v1/agents", json={"name": "Find Me", "description": "Findable agent"})
             agent_id = (await post_resp.json())["id"]
             resp = await client.get(f"/v1/agents/{agent_id}")
             assert resp.status == 200
             data = await resp.json()
             assert data["name"] == "Find Me"
-            assert data["tags"] == ["findable"]
+            assert data["description"] == "Findable agent"
 
     async def test_get_nonexistent_agent_404(self, app_factory):
         async with await app_factory() as client:
@@ -197,11 +200,13 @@ class TestRegisterAgent:
         async with await app_factory() as client:
             resp = await client.post("/v1/agents", json={
                 "name": "Capable Agent",
-                "capabilities": {"skills": [{"id": "s1", "name": "Skill One"}, {"id": "s2", "name": "Skill Two"}]},
+                "description": "Has skills",
+                "skills": [{"id": "s1", "name": "Skill One", "description": "desc", "tags": []},
+                           {"id": "s2", "name": "Skill Two", "description": "desc", "tags": []}],
             })
             assert resp.status == 201
             data = await resp.json()
-            assert len(data["card"]["capabilities"]["skills"]) == 2
+            assert len(data["card"]["skills"]) == 2
 
 
 class TestHeartbeat:

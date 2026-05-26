@@ -138,5 +138,191 @@ Client                  Registry                Agent (WS 连接)
 | 持久化 | JSON 原子写入 | 简单可靠，适合单实例场景 |
 | 心跳模型 | 120s 超时 / 300s 清理 | 平衡网络波动容忍度和资源回收时效 |
 | 任务存储 | 内存 | 适合轻量级、临时性任务追踪 |
-| 认证 | 无 | 面向本地/可信网络设计 |
+| 认证 | OAuth 2.1 (JWT) | A2A v1.0 规范要求 SecurityScheme 集成 |
 | 任务分发 | WebSocket 推送 | 低延迟、双向通信，优于 HTTP 轮询 |
+
+---
+
+## Agent Card v1.0 数据模型变更
+
+### 变更概览
+
+Agent Card 数据结构从 v0.x 对齐至 A2A v1.0 protobuf 规范（[a2a.proto](https://github.com/a2aproject/A2A/blob/main/specification/a2a.proto)），字段映射如下：
+
+| v0.x 字段 | v1.0 字段 | 变更说明 |
+|-----------|-----------|----------|
+| `id` | — | 移除，Agent 通过 URL 标识 |
+| `name` | `name` (REQUIRED) | 保留 |
+| `description` | `description` (REQUIRED) | 保留 |
+| `url` | `supported_interfaces` (REQUIRED) | 替换为列表，支持多个接口 |
+| `version` | `version` (REQUIRED) | 保留 |
+| `capabilities.skills` | `skills` (REQUIRED) | 提升为顶级字段 |
+| `capabilities` | `capabilities` (REQUIRED) | 重构为 `streaming` / `pushNotifications` / `extensions` |
+| `provider` | `provider` | 字段对齐，保留 `organization` |
+| `authentication` | `security_schemes` + `security_requirements` | 完全重写 |
+| `notification` | — | 移除（通过 `capabilities.pushNotifications` 表达） |
+| `tags` | — | 移除 |
+| `metadata` | — | 移除 |
+| — | `documentation_url` | 新增 |
+| — | `default_input_modes` (REQUIRED) | 新增，如 `["text/plain"]` |
+| — | `default_output_modes` (REQUIRED) | 新增，如 `["text/plain"]` |
+| — | `signatures` | 新增，AgentCard JWS 签名 |
+| — | `icon_url` | 新增 |
+
+### 安全模型（新增）
+
+Agent Card 新增 `security_schemes` 和 `security_requirements` 字段，支持五种安全方案：
+
+| 方案 | 类型标识 | 说明 |
+|------|---------|------|
+| API Key | `apiKey` | 静态 API Key |
+| HTTP Auth | `http` | Basic / Digest / Bearer |
+| OAuth 2.1 | `oauth2` | OAuth 2.1 认证（本 Registry 主推方案） |
+| OpenID Connect | `openIdConnect` | OpenID Connect 认证 |
+| Mutual TLS | `mutualTls` | 双向 TLS 客户端证书 |
+
+OAuth 2.1 方案支持下述 flow：
+
+- `authorization_code` + PKCE — 面向用户 Agent
+- `client_credentials` — 面向服务间通信
+- `device_code` — 面向无用户交互设备
+
+> 注意：OAuth 2.1 移除了 Implicit 和 Resource Owner Password Credentials Grant。protobuf 中保留为 `deprecated = true` 以便向后兼容解析。
+
+---
+
+## OAuth 2.1 认证架构
+
+### 架构概览
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     A2A Registry                             │
+│                                                             │
+│  ┌──────────────────┐    ┌──────────────────────────────┐  │
+│  │ AuthMiddleware    │    │ AuthHandler                  │  │
+│  │ ───────────────── │    │ ─────────────────────       │  │
+│  │ 拦截受保护端点      │    │ POST /auth/token            │  │
+│  │ Bearer token 校验  │    │ POST /auth/register         │  │
+│  │ Scope 鉴权        │    │ GET /.well-known/oauth-*    │  │
+│  │ request['agent_id]│    │ GET /.well-known/jwks.json  │  │
+│  └────────┬─────────┘    └─────────────┬────────────────┘  │
+│           │                            │                    │
+│           ▼                            ▼                    │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │                   AuthStore                           │  │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │  │
+│  │  │ clients 表    │  │ tokens 表    │  │ 密钥存储    │ │  │
+│  │  │ (client_id)   │  │ (jti/exp)   │  │ (RS256)    │ │  │
+│  │  └──────────────┘  └──────────────┘  └────────────┘ │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 认证中间件（AuthMiddleware）
+
+```
+Request → AuthMiddleware
+  ├── /auth/* → 跳过认证（Token 端点公开）
+  ├── /.well-known/* → 跳过认证（Discovery 端点公开）
+  ├── /health → 跳过认证
+  ├── Authorization: Bearer *** → 验证 JWT
+  │     ├── 签名验证（RS256/HS256）
+  │     ├── 过期时间校验
+  │     ├── Scope 检查（装饰器级别）
+  │     └── 注入 request['agent_id']
+  ├── 无 Token → 401 Unauthorized + WWW-Authenticate
+  └── Token 无效/过期 → 401 + error 描述
+```
+
+### Token 结构（JWT）
+
+```json
+{
+  "iss": "simple-a2a-registry",
+  "sub": "agent-1",
+  "aud": ["simple-a2a-registry", "agent-2"],
+  "exp": 1712345678,
+  "iat": 1712342078,
+  "scope": "task:read task:write",
+  "jti": "unique-token-id"
+}
+```
+
+### 密钥管理
+
+| 阶段 | 算法 | 说明 |
+|------|------|------|
+| 开发/测试 | HS256 (HMAC) | 对称密钥，启动时自动生成 |
+| 生产 | RS256 (RSA) | 非对称密钥对，私钥签名 / 公钥验证 |
+
+RS256 模式下，JWKS 端点位于 `/.well-known/jwks.json`，供客户端验证 Token。
+
+---
+
+## 安全集成流程
+
+### Agent 注册 → Token → 认证请求
+
+```
+1. Agent 启动
+   │
+   ├── 生成 AgentCard（含 security_schemes OAuth2 定义）
+   │
+   ▼
+2. POST /v1/agents 注册
+   │
+   ├── Registry 解析 AgentCard.security_schemes
+   ├── 自动创建 OAuth client
+   └── 返回 agent_id + client_id + client_secret
+   │
+   ▼
+3. POST /auth/token (client_credentials)
+   │
+   ├── Registry 签发 JWT access_token
+   └── 返回 Bearer token（有效期 1 小时）
+   │
+   ▼
+4. GET /.well-known/agent-card.json
+   │
+   ├── 获取其他 Agent 的 AgentCard
+   └── 了解对方的 security_schemes（公开端点，无需认证）
+   │
+   ▼
+5. 调用受保护 API
+   │
+   ├── Authorization: Bearer <token>
+   ├── Registry 中间件验证 JWT + scope
+   └── 返回请求数据
+```
+
+### Scopes 设计
+
+| Scope | 描述 | 适用端点 |
+|-------|------|---------|
+| `task:read` | 读取任务列表和详情 | V1/V2 任务查询 |
+| `task:write` | 创建和修改任务 | 任务操作端点 |
+| `agent:read` | 读取 Agent 列表和详情 | Agent 查询 |
+| `agent:register` | 注册新 Agent | POST /v1/agents |
+| `agent:admin` | 管理 Agent（删除/禁用） | Agent 管理 |
+| `registry:admin` | Registry 管理操作 | 管理端点 |
+
+### 配置开关
+
+```bash
+# 开发模式（无认证）
+a2a-registry
+# 或显式关闭认证
+a2a-registry --auth-enabled false
+
+# 生产模式（OAuth 2.1 认证）
+a2a-registry --auth-enabled true
+```
+
+`--auth-enabled` 控制整个认证中间件的开关。关闭时所有端点行为与旧版一致（无需 Token），开启后受保护端点需要 Bearer Token。
+
+### 向下兼容
+
+1. 认证关闭（`--auth-enabled false` 默认）时，所有端点行为不变
+2. 认证开启后，受保护端点返回 `401` 而非旧版的 200/201
+3. `/health`、`/.well-known/`、`/auth/` 端点始终公开

@@ -58,6 +58,13 @@ def main(argv: list[str] | None = None) -> None:
         help="Show version and exit",
     )
 
+    parser.add_argument(
+        "--auth-enabled",
+        default=False,
+        action=argparse.BooleanOptionalAction,
+        help="Enable OAuth 2.1 authentication middleware (default: disabled — dev mode)",
+    )
+
     # --- V2 Orchestration Engine options ---
     parser.add_argument(
         "--board-path",
@@ -140,16 +147,18 @@ def main(argv: list[str] | None = None) -> None:
     if args.workspaces_root:
         v2_opts.append(f"workspaces={args.workspaces_root}")
 
+    auth_info = "🔐 auth enabled" if args.auth_enabled else "🔓 auth disabled (dev)"
     v2_info = f" | V2: {', '.join(v2_opts)}" if v2_opts else " | V2: defaults"
     logger.info(
-        "Simple A2A Registry starting on %s:%s (data: %s)%s",
-        args.host, args.port, args.data_dir, v2_info,
+        "Simple A2A Registry starting on %s:%s (data: %s) %s %s",
+        args.host, args.port, args.data_dir, auth_info, v2_info,
     )
 
     run_server(
         host=args.host,
         port=args.port,
         data_dir=args.data_dir,
+        auth_enabled=args.auth_enabled,
         board_path=args.board_path,
         dispatcher_enabled=args.dispatcher_enabled,
         dispatcher_interval=args.dispatcher_interval,

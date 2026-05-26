@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -33,6 +34,7 @@ class A2ARegistryStore:
         # In-memory state
         self._agents: Dict[str, AgentCard] = {}
         self._heartbeats: Dict[str, float] = {}
+        self._registered_at: Dict[str, str] = {}
 
         self._load()
 
@@ -56,6 +58,11 @@ class A2ARegistryStore:
                 for aid, ts in data.get("heartbeats", {}).items()
                 if isinstance(ts, (int, float))
             }
+            self._registered_at = {
+                aid: ts
+                for aid, ts in data.get("registered_at", {}).items()
+                if isinstance(ts, str)
+            }
             logger.info(
                 "Loaded %d external agent registrations",
                 len(self._agents),
@@ -70,11 +77,12 @@ class A2ARegistryStore:
             for aid, card in self._agents.items()
         }
         hb = {aid: ts for aid, ts in self._heartbeats.items()}
+        registered = {aid: ts for aid, ts in self._registered_at.items()}
         try:
             tmp = self._file.with_suffix(".json.tmp")
             tmp.write_text(
                 json.dumps(
-                    {"agents": external, "heartbeats": hb},
+                    {"agents": external, "heartbeats": hb, "registered_at": registered},
                     indent=2,
                     ensure_ascii=False,
                 ),
@@ -112,17 +120,20 @@ class A2ARegistryStore:
             elapsed = now - last_hb if last_hb else HEARTBEAT_TIMEOUT + 1
             is_alive = elapsed <= HEARTBEAT_TIMEOUT
             card_dict = card.to_dict()
+            card_dict["id"] = agent_id
             card_dict["status"] = "alive" if is_alive else "stale"
             card_dict["lastHeartbeat"] = last_hb
 
             if skill:
-                skills = card_dict.get("capabilities", {}).get("skills", [])
+                skills = card_dict.get("skills", [])
                 if not any(
                     skill in (s.get("name", "") or s.get("id", ""))
                     for s in skills
                 ):
                     continue
             if tag:
+                # AgentCard v1.0 no longer has tags at root level;
+                # check inside the card dict for backward compat
                 if tag not in card_dict.get("tags", []):
                     continue
             if q:
@@ -147,6 +158,7 @@ class A2ARegistryStore:
         last_hb = self._heartbeats.get(agent_id)
         elapsed = time.time() - last_hb if last_hb else HEARTBEAT_TIMEOUT + 1
         card_dict = card.to_dict()
+        card_dict["id"] = agent_id
         card_dict["status"] = "alive" if elapsed <= HEARTBEAT_TIMEOUT else "stale"
         card_dict["lastHeartbeat"] = last_hb
         return card_dict
@@ -166,11 +178,12 @@ class A2ARegistryStore:
             The assigned agent id.
         """
         card = AgentCard.from_dict(agent_card)
-        agent_id = card.ensure_id()
+        agent_id = str(uuid.uuid4())
 
         now_ts = time.time()
-        card.metadata = dict(card.metadata)
-        card.metadata["registeredAt"] = datetime.now(
+        # Store registration timestamp as a separate tracking field
+        # (AgentCard v1.0 no longer has a `metadata` dict)
+        self._registered_at[agent_id] = datetime.now(
             timezone.utc
         ).isoformat()
 
@@ -207,6 +220,7 @@ class A2ARegistryStore:
             return False
         del self._agents[agent_id]
         self._heartbeats.pop(agent_id, None)
+        self._registered_at.pop(agent_id, None)
         self._save()
         return True
 
@@ -226,6 +240,7 @@ class A2ARegistryStore:
         for aid in stale:
             self._agents.pop(aid, None)
             self._heartbeats.pop(aid, None)
+            self._registered_at.pop(aid, None)
         if stale:
             logger.info("Purged %d stale agents: %s", len(stale), stale)
             self._save()
