@@ -423,20 +423,21 @@ class TestV2BlockUnblock:
             assert (await resp.json())["error"] == "claim_mismatch"
 
     async def test_block_non_running_task(self, api_client):
-        """Blocking a task that is not running should be rejected (400)."""
+        """Blocking a ready task is allowed (state machine: READY→BLOCKED)."""
         async with await api_client() as client:
             # Task in ready state
             r1 = await client.post("/v2/tasks", json={
-                "title": "Not Running", "assignee": "w",
+                "title": "Ready Task", "assignee": "w",
             })
             task_id = (await r1.json())["task"]["id"]
 
             resp = await client.post(f"/v2/tasks/{task_id}/block", json={
                 "reason": "block ready",
             })
-            assert resp.status == 400
+            assert resp.status == 200
             data = await resp.json()
-            assert data["error"] == "invalid_status"
+            assert data["status"] == "blocked"
+            assert data["block_reason"] == "block ready"
 
     async def test_unblock_non_blocked_task(self, api_client):
         """Unblocking a task that is not blocked should be rejected (400)."""

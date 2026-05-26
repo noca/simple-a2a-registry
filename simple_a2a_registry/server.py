@@ -5,6 +5,8 @@ import asyncio
 import json
 import logging
 import os
+import signal
+import socket
 import time
 import uuid
 from datetime import datetime, timezone
@@ -12,8 +14,24 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from aiohttp import web, WSMsgType
+from aiohttp.web_middlewares import middleware
 
+from simple_a2a_registry.errors import (
+    json_error,
+    error_middleware as _unified_error_middleware,
+    timeout_middleware,
+)
+from simple_a2a_registry.log import log_key_event, request_id_middleware_factory
+from simple_a2a_registry.metrics import (
+    metrics_middleware_factory,
+    handle_metrics,
+    update_agent_gauges,
+    update_ws_connections,
+    update_db_pool_size,
+)
 from simple_a2a_registry.models import make_agent_card, make_agent_skill
+from simple_a2a_registry.config import Config
+from simple_a2a_registry.database import create_engine
 from simple_a2a_registry.store import Store, HEARTBEAT_TIMEOUT
 from simple_a2a_registry.auth import (
     AuthHandler,
@@ -26,6 +44,7 @@ from simple_a2a_registry.auth import (
     ISSUER,
     SCOPES,
 )
+from simple_a2a_registry.store import Store, HEARTBEAT_TIMEOUT, _maybe_create_schema as _maybe_create_registry_schema
 from simple_a2a_registry.orchestration import (
     TaskStore,
     TaskStatus,
@@ -34,6 +53,7 @@ from simple_a2a_registry.orchestration import (
     Dispatcher,
     DispatcherConfig,
     WorkspaceManager,
+    _maybe_create_schema as _maybe_create_board_schema,
 )
 
 logger = logging.getLogger("a2a_registry.server")
@@ -53,11 +73,8 @@ CLEANUP_INTERVAL = 60  # seconds between stale-agent purges
 # ---------------------------------------------------------------------------
 
 
-def _json_error(status: int, error_code: str, detail: str) -> web.Response:
-    return web.json_response(
-        {"error": error_code, "detail": detail},
-        status=status,
-    )
+# NOTE: ``json_error()`` is imported from ``errors.py`` — use that
+# instead of creating inline helpers.
 
 
 def _registry_card(base_url: str) -> Dict:
@@ -183,7 +200,7 @@ class RegistryHandler:
         agent_id = request.match_info["agent_id"]
         card = self.store.get_agent(agent_id)
         if card is None:
-            return _json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
+            return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
         if agent_id in self._ws_connections:
             card["connection"] = "websocket"
             card["status"] = "alive"
@@ -221,17 +238,17 @@ class RegistryHandler:
         try:
             body = await request.json()
         except json.JSONDecodeError:
-            return _json_error(400, "invalid_json", "Invalid JSON body")
+            return json_error(400, "invalid_json", "Invalid JSON body")
 
         name = body.get("name", "").strip()
         if not name:
-            return _json_error(400, "validation_error", "Agent requires a 'name'")
+            return json_error(400, "validation_error", "Agent requires a 'name'")
 
         # Check for duplicate name among external agents
         existing = self.store.list_agents()
         for agent in existing:
             if agent.get("name", "").strip().lower() == name.lower():
-                return _json_error(
+                return json_error(
                     409, "agent_exists", f"Agent '{name}' already exists"
                 )
 
@@ -264,7 +281,7 @@ class RegistryHandler:
 
         success = self.store.unregister(agent_id)
         if not success:
-            return _json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
+            return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
 
         return web.json_response({
             "message": "Agent unregistered successfully",
@@ -280,16 +297,16 @@ class RegistryHandler:
         agent_id = request.match_info["agent_id"]
         card = self.store.get_agent(agent_id)
         if card is None:
-            return _json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
+            return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
 
         if card["status"] == "stale":
-            return _json_error(
+            return json_error(
                 410, "agent_stale", f"Agent '{agent_id}' is stale and cannot heartbeat"
             )
 
         success = self.store.heartbeat(agent_id)
         if not success:
-            return _json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
+            return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
 
         now = time.time()
         return web.json_response(
@@ -391,6 +408,7 @@ class RegistryHandler:
                 pass
 
         self._ws_connections[agent_id] = ws
+        update_ws_connections(len(self._ws_connections))
         logger.info("Agent '%s' connected via WebSocket (%d active)",
                      agent_id, len(self._ws_connections))
 
@@ -495,6 +513,7 @@ class RegistryHandler:
                 self._ws_connections.pop(agent_id, None)
             if not ws.closed:
                 await ws.close()
+            update_ws_connections(len(self._ws_connections))
             logger.info("Agent '%s' disconnected via WebSocket (%d active)",
                          agent_id, len(self._ws_connections))
 
@@ -523,19 +542,19 @@ class RegistryHandler:
             # Check if agent exists but isn't connected
             card = self.store.get_agent(agent_id)
             if card is None:
-                return _json_error(404, "agent_not_found",
+                return json_error(404, "agent_not_found",
                                    f"Agent '{agent_id}' not found")
-            return _json_error(503, "agent_not_connected",
+            return json_error(503, "agent_not_connected",
                                f"Agent '{agent_id}' is not connected via WebSocket")
 
         try:
             body = await request.json()
         except json.JSONDecodeError:
-            return _json_error(400, "invalid_json", "Invalid JSON body")
+            return json_error(400, "invalid_json", "Invalid JSON body")
 
         query = (body.get("query") or "").strip()
         if not query:
-            return _json_error(400, "validation_error", "Missing 'query' field")
+            return json_error(400, "validation_error", "Missing 'query' field")
 
         task_id = str(uuid.uuid4())
         session_id = body.get("sessionId", "")
@@ -569,7 +588,7 @@ class RegistryHandler:
             task["state"] = "failed"
             task["error"] = f"Dispatch failed: {e}"
             logger.error("Dispatch to agent '%s' failed: %s", agent_id, e)
-            return _json_error(502, "dispatch_failed",
+            return json_error(502, "dispatch_failed",
                                f"Failed to dispatch task to agent '{agent_id}': {e}")
 
         return web.json_response({
@@ -585,7 +604,7 @@ class RegistryHandler:
         task_id = request.match_info["task_id"]
         task = self._tasks.get(task_id)
         if task is None:
-            return _json_error(404, "task_not_found",
+            return json_error(404, "task_not_found",
                                f"Task '{task_id}' not found")
         return web.json_response(task)
 
@@ -642,7 +661,7 @@ class RegistryHandler:
 
         card = self.store.get_agent(agent_id)
         if card is None:
-            return _json_error(404, "agent_not_found",
+            return json_error(404, "agent_not_found",
                                f"Agent '{agent_id}' not found")
 
         # v1.0 AgentCard: URL is in supported_interfaces (top-level `url` is removed)
@@ -650,7 +669,7 @@ class RegistryHandler:
             card.get("supported_interfaces", [{}])[0].get("url", "") if card.get("supported_interfaces") else ""
         )
         if not target_url:
-            return _json_error(
+            return json_error(
                 400, "agent_not_routable",
                 f"Agent '{agent_id}' has no URL configured",
             )
@@ -662,57 +681,13 @@ class RegistryHandler:
         })
 
 
-# ---------------------------------------------------------------------------
-# Error handling middleware
-# ---------------------------------------------------------------------------
-
-
-@web.middleware
-async def _error_middleware(
-    request: web.Request, handler: Any
-) -> web.StreamResponse:
-    """Catch unhandled exceptions and return a consistent JSON error response.
-
-    All API endpoints (V1 and V2) use ``{"error": str, "detail": str}`` as their
-    error envelope.  This middleware ensures even an unexpected 500 follows the
-    same shape.
-    """
-    try:
-        response = await handler(request)
-        return response
-    except web.HTTPException as exc:
-        # aiohttp-native HTTP exceptions (404, 405, etc.)
-        return web.json_response(
-            {
-                "error": _status_to_error_code(exc.status),
-                "detail": exc.reason or str(exc),
-            },
-            status=exc.status,
-        )
-    except json.JSONDecodeError:
-        return _json_error(400, "invalid_json", "Invalid JSON body")
-    except Exception:
-        logger.exception("Unhandled error handling %s %s", request.method, request.path)
-        return _json_error(500, "internal_error", "Internal server error")
-
-
-def _status_to_error_code(status: int) -> str:
-    """Map an HTTP status code to a canonical error code string."""
-    _MAP = {
-        400: "bad_request",
-        401: "unauthorized",
-        403: "forbidden",
-        404: "not_found",
-        405: "method_not_allowed",
-        409: "conflict",
-        410: "gone",
-        422: "unprocessable_entity",
-        429: "too_many_requests",
-        500: "internal_error",
-        502: "bad_gateway",
-        503: "service_unavailable",
-    }
-    return _MAP.get(status, f"http_{status}")
+# NOTE: Error handling middleware is imported from errors.py as
+# ``_unified_error_middleware``.  The ``timeout_middleware`` is also
+# available from the same module for request-level timeout control.
+#
+# The old inline ``_error_middleware`` and ``_json_error`` have been
+# replaced by the unified implementation in errors.py, which returns
+# the enhanced format ``{error, detail, request_id, timestamp, extra}``.
 
 
 # ---------------------------------------------------------------------------
@@ -843,7 +818,7 @@ class AdminHandler:
 
 
 async def _cleanup_task(app: web.Application) -> None:
-    """Background task to purge stale agents."""
+    """Background task to purge stale agents and update Prometheus gauges."""
     store: Store = app["store"]
     handler: RegistryHandler = app.get("handler")
     try:
@@ -853,6 +828,15 @@ async def _cleanup_task(app: web.Application) -> None:
                 purged = store.purge_stale()
                 if purged:
                     logger.info("Cleanup: purged %d stale agent(s)", purged)
+
+                # Update agent Prometheus gauges
+                stats = store.stats()
+                update_agent_gauges(stats["aliveAgents"], stats["staleAgents"])
+
+                # Update WS connection gauge
+                if handler:
+                    update_ws_connections(len(handler._ws_connections))
+
                 # Also clean up stale WS connections
                 if handler:
                     stale_ws = [
@@ -862,6 +846,9 @@ async def _cleanup_task(app: web.Application) -> None:
                     for aid in stale_ws:
                         handler._ws_connections.pop(aid, None)
                         logger.info("Cleaned up stale WS for '%s'", aid)
+                    # Re-update after cleanup
+                    if stale_ws:
+                        update_ws_connections(len(handler._ws_connections))
             except Exception:
                 logger.exception("Cleanup task error")
     except asyncio.CancelledError:
@@ -971,11 +958,62 @@ async def _maybe_dispatch_pending(
         logger.exception("Error checking pending tasks for agent '%s'", agent_id)
 
 
+# ---------------------------------------------------------------------------
+# CORS middleware
+# ---------------------------------------------------------------------------
+
+
+def cors_middleware_factory(allowed_origins: str = "*") -> callable:
+    """Create a CORS middleware that handles cross-origin requests.
+
+    Adds Access-Control-* headers to every response and short-circuits
+    OPTIONS preflight requests.
+
+    Args:
+        allowed_origins: Comma-separated list of origins, or ``"*"`` for all.
+    """
+    origins = [o.strip() for o in allowed_origins.split(",") if o.strip()]
+
+    @middleware
+    async def _cors_middleware(request: web.Request, handler: callable) -> web.StreamResponse:
+        # Determine origin for this request
+        request_origin = request.headers.get("Origin", "")
+        header_origin = "*" if "*" in origins or not request_origin else (
+            request_origin if request_origin in origins else origins[0] if origins else "*"
+        )
+
+        # Handle preflight
+        if request.method == "OPTIONS":
+            resp = web.Response(status=204, headers={
+                "Access-Control-Allow-Origin": header_origin,
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Request-ID",
+                "Access-Control-Max-Age": "86400",
+            })
+            return resp
+
+        try:
+            response = await handler(request)
+        except web.HTTPException as exc:
+            response = exc
+
+        # Add CORS headers to the response (only add_headers-capable responses)
+        if hasattr(response, "headers"):
+            response.headers["Access-Control-Allow-Origin"] = header_origin
+            response.headers["Access-Control-Expose-Headers"] = "X-Request-ID, Retry-After"
+            response.headers["Vary"] = "Origin"
+
+        return response
+
+    return _cors_middleware
+
+
 def create_app(
     data_dir: str = "~/.simple-a2a-registry",
     base_url: str = "http://localhost:8321",
     board_path: Optional[str] = None,
     *,
+    config: Optional[Config] = None,
     auth_enabled: bool = False,
     bootstrap_secret: Optional[str] = None,
     dispatcher_enabled: bool = True,
@@ -983,14 +1021,21 @@ def create_app(
     claim_ttl: int = 900,
     failure_limit: int = 3,
     workspaces_root: Optional[str] = None,
+    host: str = "0.0.0.0",
+    port: int = 8321,
 ) -> web.Application:
     """Create and configure the aiohttp web application.
 
     Args:
         data_dir: Path to persistent data directory.
         base_url: Public base URL for this registry.
-        board_path: SQLite path for the V2 orchestration board.
+        board_path: Database path for the V2 orchestration board.
             Defaults to ``<data_dir>/board.db``.
+        config: Optional :class:`Config` instance.  When provided, uses
+            ``create_engine(config.database)`` to initialise *both* the
+            registry ``Store`` and orchestration ``TaskStore`` with the
+            configured database engine (SQLite or MySQL).  When omitted,
+            the legacy ``data_dir`` path is used for both stores.
         dispatcher_enabled: Whether to start the background Dispatcher.
         dispatcher_interval: Dispatcher poll interval in seconds.
         claim_ttl: Claim lock TTL in seconds (default 900 / 15 min).
@@ -1001,13 +1046,34 @@ def create_app(
     Returns:
         Configured :class:`aiohttp.web.Application`.
     """
-    store = Store(data_dir, bootstrap_secret=bootstrap_secret)
+    # Create shared engine (Config-driven) or fall back to legacy data_dir
+    if config is not None:
+        engine = create_engine(config.database)
+        engine.connect()
+        _shared_engine = engine
+        logger.info(
+            "Using database engine: %s (driver=%s)",
+            config.database.sqlite_path if config.database.driver == "sqlite" else config.database.mysql_dsn,
+            config.database.driver,
+        )
+        update_db_pool_size(config.database.pool_size)
+
+        # Create schema tables
+        _maybe_create_registry_schema(_shared_engine)
+        _maybe_create_board_schema(_shared_engine)
+    else:
+        _shared_engine = None
+
+    store = Store(_shared_engine if _shared_engine is not None else data_dir, bootstrap_secret=bootstrap_secret)
     handler = RegistryHandler(store, base_url)
 
     # V2 Orchestration Engine
-    if board_path is None:
-        board_path = str(Path(data_dir).expanduser() / "board.db")
-    task_store = TaskStore(board_path)
+    if _shared_engine is not None:
+        task_store = TaskStore(_shared_engine)
+    else:
+        if board_path is None:
+            board_path = str(Path(data_dir).expanduser() / "board.db")
+        task_store = TaskStore(board_path)
     orch_handler = OrchestrationHandler(task_store)
 
     # V2 Workspace Manager
@@ -1054,13 +1120,19 @@ def create_app(
         handler._dispatched_ws_tasks = dispatcher._dispatched_ws_tasks
 
     app = web.Application(middlewares=[
-        _error_middleware,
+        cors_middleware_factory(
+            allowed_origins=config.server.cors_origins if config is not None else "*",
+        ),
+        request_id_middleware_factory(),
+        _unified_error_middleware,
+        timeout_middleware,
         _auth_middleware_factory(
             store,
             enabled=auth_enabled,
             public_key=public_key,
             algorithm=algorithm,
         ),
+        metrics_middleware_factory(),
     ])
     app["store"] = store
     app["handler"] = handler
@@ -1070,10 +1142,16 @@ def create_app(
     app["orch_handler"] = orch_handler
     app["ws_mgr"] = ws_mgr
     app["dispatcher"] = dispatcher
+    app["config"] = config
 
     # Health / well-known
     app.router.add_get("/health", handler.handle_health)
     app.router.add_get("/.well-known/agent-card.json", handler.handle_well_known)
+
+    # Prometheus metrics endpoint (conditional on config)
+    if config is not None and config.monitoring.metrics_enabled:
+        app.router.add_get(config.monitoring.metrics_path, handle_metrics)
+        logger.info("Metrics endpoint enabled at %s", config.monitoring.metrics_path)
 
     # Agent CRUD
     # V1 GET /v1/agents — requires agent:read scope
@@ -1186,7 +1264,53 @@ def create_app(
 
     # Background cleanup + Dispatcher
     cleanup_task_ref: list[asyncio.Task] = []
+
+    async def _startup_checks(app: web.Application) -> None:
+        """启动前置检查：DB连接、端口可用性、RSA密钥。
+
+        在 on_startup 中执行，确保启动前所有依赖就绪。
+        """
+        logger.info("Running startup preflight checks…")
+
+        # 1. DB connectivity — execute a simple query
+        store: Store = app.get("store")
+        if store:
+            try:
+                stats = store.stats()
+                logger.info("  [OK] DB connectivity — %d agent(s) registered", stats["totalAgents"])
+            except Exception as e:
+                logger.error("  [FAIL] DB connectivity check: %s", e)
+                raise RuntimeError(f"Startup check failed: DB unreachable — {e}") from e
+
+        # 2. Port availability (warning only — the actual bind will fail if taken)
+        host = app.get("_host", "0.0.0.0")
+        port = app.get("_port", 8321)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            if result == 0:
+                logger.warning("Port %s:%d is already in use — startup may fail", host, port)
+            else:
+                logger.info("  [OK] Port %s:%d is available", host, port)
+        except OSError:
+            logger.warning("  [?] Port check skipped (host=%s)", host)
+
+        # 3. Auth / RSA check
+        handler: RegistryHandler = app.get("handler")
+        if handler and handler._auth_enabled:
+            if handler._auth_public_key:
+                logger.info("  [OK] RSA key pair generated (%d bits)", 2048)
+            else:
+                logger.warning("  [?] Auth enabled but public key empty — may affect JWKS endpoint")
+
+        logger.info("Preflight checks complete — starting server.")
+
     async def _start_background(app: web.Application) -> None:
+        # Run preflight checks first
+        await _startup_checks(app)
+
         # V1 cleanup task
         task = asyncio.create_task(_cleanup_task(app))
         cleanup_task_ref.append(task)
@@ -1196,11 +1320,26 @@ def create_app(
             asyncio.create_task(disp.run())
 
     async def _stop_background(app: web.Application) -> None:
-        # Stop Dispatcher
-        disp: Optional[Dispatcher] = app.get("dispatcher")
-        if disp:
-            disp.stop()
-        # Cancel cleanup task
+        """优雅关闭：完成进行中的WS消息、关闭连接池、Flush日志。"""
+        logger.info("Initiating graceful shutdown…")
+
+        # 1. Notify all connected WebSocket agents
+        handler: RegistryHandler = app.get("handler")
+        ws_connections = getattr(handler, "_ws_connections", {})
+        close_tasks = []
+        for aid, ws in list(ws_connections.items()):
+            if ws and not ws.closed:
+                close_tasks.append(
+                    ws.send_json({"type": "close", "reason": "registry_shutdown"})
+                )
+        if close_tasks:
+            done, _ = await asyncio.wait(close_tasks, timeout=2.0)
+            logger.info(
+                "  Notified %d/%d WS agents (%d timed out)",
+                len(done), len(close_tasks), len(close_tasks) - len(done),
+            )
+
+        # 2. Cancel cleanup task
         if cleanup_task_ref:
             task = cleanup_task_ref[0]
             task.cancel()
@@ -1208,13 +1347,58 @@ def create_app(
                 await task
             except asyncio.CancelledError:
                 pass
-        # Close TaskStore
+            logger.info("  Cleanup task cancelled")
+
+        # 3. Stop Dispatcher
+        disp: Optional[Dispatcher] = app.get("dispatcher")
+        if disp:
+            disp.stop()
+            logger.info("  Dispatcher stopped")
+
+        # 4. Close TaskStore
         ts: TaskStore = app.get("task_store")
         if ts:
-            ts.close()
+            try:
+                ts.close()
+                logger.info("  TaskStore closed")
+            except Exception as e:
+                logger.warning("  TaskStore close error: %s", e)
+
+        # 5. Close Store (DB connection pool)
+        store: Store = app.get("store")
+        if store:
+            try:
+                store.close()
+                logger.info("  Store DB connection closed")
+            except Exception as e:
+                logger.warning("  Store close error: %s", e)
+
+        # 6. Close WS connections
+        for aid, ws in list(ws_connections.items()):
+            if ws and not ws.closed:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+        ws_connections.clear()
+
+        # 7. Flush log handlers
+        for h in logger.handlers:
+            try:
+                h.flush()
+            except Exception:
+                pass
+        import logging as _logging
+        _logging.shutdown()
+
+        logger.info("Graceful shutdown complete.")
 
     app.on_startup.append(_start_background)
     app.on_cleanup.append(_stop_background)
+
+    # Store host/port for startup check
+    app["_host"] = host
+    app["_port"] = port
 
     return app
 
@@ -1231,6 +1415,7 @@ def run_server(
     claim_ttl: int = 900,
     failure_limit: int = 3,
     workspaces_root: Optional[str] = None,
+    config: Optional[Config] = None,
 ) -> None:
     """Start the A2A Registry HTTP server.
 
@@ -1239,15 +1424,21 @@ def run_server(
         port: Bind port.
         data_dir: Persistent data directory.
         auth_enabled: Enable OAuth 2.1 authentication middleware.
-        board_path: SQLite database path for the V2 orchestration board.
+        board_path: Database path for the V2 orchestration board.
         dispatcher_enabled: Whether to start the background Dispatcher.
         dispatcher_interval: Dispatcher poll interval in seconds.
         claim_ttl: Claim lock TTL in seconds.
         failure_limit: Global default retry limit.
         workspaces_root: Root directory for scratch workspaces.
+        config: Optional :class:`Config` instance.  When provided, the
+            ``config.database`` section is used to initialise the engine
+            shared by ``Store`` and ``TaskStore``.
     """
     app = create_app(
         data_dir=data_dir,
+        host=host,
+        port=port,
+        config=config,
         auth_enabled=auth_enabled,
         bootstrap_secret=bootstrap_secret,
         board_path=board_path,

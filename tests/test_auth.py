@@ -409,26 +409,221 @@ class TestTokenEndpoint:
 # ---------------------------------------------------------------------------
 
 
-class TestRequireScope:
-    async def test_require_scope_passes_when_token_has_scope(self):
-        async def handler(request):
-            return web.json_response({"ok": True})
+class TestEndToEndScopeAuthorization:
+    """全链路 Scope 鉴权验证 — 逐个测试 6 个 scope 的保护效果。"""
 
-        wrapped = require_scope("task:read")(handler)
+    async def _make_app(self):
+        return await _make_app(auth_enabled=True)
 
-        request = MockRequest(token_scopes="task:read task:write")
-        resp = await _run_handler(wrapped, request)
-        assert resp.status == 200
+    async def _get_token(self, client, scope: str) -> str:
+        """Register + get token with specific scope, using bootstrap admin."""
+        reg = await client.post("/auth/register", json={
+            "description": "E2E Scope Test",
+            "allowed_scopes": scope.split(),
+        })
+        assert reg.status == 201, await reg.text()
+        creds = await reg.json()
 
-    async def test_require_scope_blocks_when_missing(self):
-        async def handler(request):
-            return web.json_response({"ok": True})
+        tok = await client.post("/auth/token", data={
+            "grant_type": "client_credentials",
+            "client_id": creds["client_id"],
+            "client_secret": creds["client_secret"],
+            "scope": scope,
+        })
+        assert tok.status == 200, await tok.text()
+        data = await tok.json()
+        return data["access_token"]
 
-        wrapped = require_scope("task:write")(handler)
+    async def test_agent_read_scope_allows_list_agents(self):
+        """agent:read scope → GET /v1/agents."""
+        async with await self._make_app() as client:
+            token = await self._get_token(client, "agent:read")
+            resp = await client.get(
+                "/v1/agents",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 200
 
-        request = MockRequest(token_scopes="task:read")
-        resp = await _run_handler(wrapped, request)
-        assert resp.status == 403
+    async def test_agent_read_scope_allows_get_agent(self):
+        """agent:read scope → GET /v1/agents/{id}."""
+        async with await self._make_app() as client:
+            # First register using bootstrap admin
+            token = await self._get_token(client, "agent:read agent:register")
+            reg_resp = await client.post(
+                "/v1/agents",
+                json={"name": "scope-test-agent"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            aid = (await reg_resp.json())["id"]
+
+            resp = await client.get(
+                f"/v1/agents/{aid}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 200
+
+    async def test_agent_register_scope_allows_register(self):
+        """agent:register scope → POST /v1/agents."""
+        async with await self._make_app() as client:
+            token = await self._get_token(client, "agent:register")
+            resp = await client.post(
+                "/v1/agents",
+                json={"name": "reg-test-agent"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 200 or resp.status == 201
+
+    async def test_agent_register_missing_returns_403(self):
+        """Without agent:register scope, registration returns 403."""
+        async with await self._make_app() as client:
+            token = await self._get_token(client, "task:read")
+            resp = await client.post(
+                "/v1/agents",
+                json={"name": "should-fail"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 403
+
+    async def test_agent_admin_scope_allows_delete(self):
+        """agent:admin scope → DELETE /v1/agents/{id}."""
+        async with await self._make_app() as client:
+            # Register first
+            reg_token = await self._get_token(client, "agent:read agent:register agent:admin")
+            reg_resp = await client.post(
+                "/v1/agents",
+                json={"name": "del-test-agent"},
+                headers={"Authorization": f"Bearer {reg_token}"},
+            )
+            aid = (await reg_resp.json())["id"]
+
+            resp = await client.delete(
+                f"/v1/agents/{aid}",
+                headers={"Authorization": f"Bearer {reg_token}"},
+            )
+            assert resp.status == 200
+
+    async def test_task_read_scope_allows_list_tasks(self):
+        """task:read scope → GET /v1/tasks."""
+        async with await self._make_app() as client:
+            token = await self._get_token(client, "task:read")
+            resp = await client.get(
+                "/v1/tasks",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 200
+
+    async def test_task_write_scope_allows_proxy(self):
+        """task:write scope → POST /v1/agents/{id}/task (proxy, no WS needed)."""
+        async with await self._make_app() as client:
+            token = await self._get_token(client, "agent:register agent:read task:write")
+            reg_resp = await client.post(
+                "/v1/agents",
+                json={"name": "proxy-test-agent"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            aid = (await reg_resp.json())["id"]
+
+            # Proxy endpoint requires task:write scope — should pass scope check
+            # and reach handler (which will try to proxy and may fail for other reasons)
+            resp = await client.post(
+                f"/v1/agents/{aid}/task",
+                json={"query": "scope test task"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            # Scope passes → handler runs (may return 400 if no URL configured, but not 403)
+            assert resp.status != 403, "Scope check should pass for task:write"
+
+    async def test_task_write_missing_returns_403(self):
+        """Without task:write scope, dispatch returns 403."""
+        async with await self._make_app() as client:
+            token = await self._get_token(client, "agent:read")
+            resp = await client.post(
+                "/v1/agents/nonexistent/dispatch",
+                json={"query": "should fail"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 403
+
+    async def test_registry_admin_scope_allows_admin(self):
+        """registry:admin scope → POST /admin/clients."""
+        async with await self._make_app() as client:
+            token = await self._get_token(client, "registry:admin")
+            resp = await client.post(
+                "/admin/clients",
+                json={"agent_card_id": "admin-test", "description": "Admin test"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 201
+
+    async def test_registry_admin_missing_returns_403(self):
+        """Without registry:admin scope, admin endpoints return 403."""
+        async with await self._make_app() as client:
+            token = await self._get_token(client, "task:read")
+            resp = await client.get(
+                "/admin/clients",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 403
+
+    async def test_token_revocation(self):
+        """After client deletion, new tokens cannot be issued for that client."""
+        async with await self._make_app() as client:
+            # Register client
+            reg = await client.post("/auth/register", json={"description": "Rev Test"})
+            creds = await reg.json()
+
+            # Get token — JWT is stateless, so existing tokens remain valid
+            # until expiry. But at the Store level, token is recorded.
+            # After deleting the client, new token requests should fail.
+            admin_token = await self._get_token(client, "registry:admin")
+            resp = await client.delete(
+                f"/admin/clients/{creds['client_id']}",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+            assert resp.status == 200
+
+            # New token request with deleted client should fail
+            resp = await client.post("/auth/token", data={
+                "grant_type": "client_credentials",
+                "client_id": creds["client_id"],
+                "client_secret": creds["client_secret"],
+                "scope": "task:read",
+            })
+            assert resp.status == 401
+
+    async def test_admin_list_clients(self):
+        """registry:admin scope → GET /admin/clients."""
+        async with await self._make_app() as client:
+            token = await self._get_token(client, "registry:admin")
+            resp = await client.get(
+                "/admin/clients",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert isinstance(data, list)
+
+    async def test_authorization_code_token_exchange(self):
+        """authorization_code grant validates PKCE-based code at token endpoint."""
+        async with await self._make_app() as client:
+            reg = await client.post("/auth/register", json={
+                "description": "PKCE Test",
+                "allowed_scopes": ["task:read"],
+            })
+            creds = await reg.json()
+
+            # Without a valid auth code, the exchange fails
+            resp = await client.post("/auth/token", data={
+                "grant_type": "authorization_code",
+                "client_id": creds["client_id"],
+                "client_secret": creds["client_secret"],
+                "code": "invalid-code",
+                "code_verifier": "x",
+                "redirect_uri": "https://agent/callback",
+            })
+            assert resp.status == 400
+            data = await resp.json()
+            assert data["error"] == "invalid_grant"
 
 
 # ---------------------------------------------------------------------------

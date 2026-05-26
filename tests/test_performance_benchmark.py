@@ -607,5 +607,144 @@ class TestLongRunning:
         finally:
             await client.close()
             await server.close()
-            import shutil
-            shutil.rmtree(data_dir, ignore_errors=True)
+
+
+# ===================================================================
+# 5. MySQL + High Concurrency Benchmarks
+# ===================================================================
+
+
+class TestMySqlHighConcurrency:
+    """Measure throughput with MySQL driver config + high concurrency.
+
+    Requires A2A_REGISTRY_TEST_MYSQL_DSN environment variable.
+    Skipped when no MySQL is available.
+    """
+
+    @staticmethod
+    def _have_mysql() -> bool:
+        dsn = os.environ.get("A2A_REGISTRY_TEST_MYSQL_DSN", "")
+        return bool(dsn)
+
+    async def test_mysql_create_1000_tasks(self) -> None:
+        """MySQL 下创建 1000 个任务的吞吐量。"""
+        if not self._have_mysql():
+            pytest.skip("No MySQL — set A2A_REGISTRY_TEST_MYSQL_DSN")
+
+        from simple_a2a_registry.config import Config
+
+        cfg = Config()
+        cfg.database.driver = "mysql"
+        cfg.database.mysql_dsn = os.environ["A2A_REGISTRY_TEST_MYSQL_DSN"]
+        cfg.database.pool_size = 20
+        cfg.database.max_overflow = 40
+
+        ctx = await _create_mysql_bench_context(cfg)
+        try:
+            n = 1000
+            start = time.perf_counter()
+            tids = await ctx.create_n_tasks(n)
+            elapsed = time.perf_counter() - start
+            _tps_report(f"mysql_create_{n}_tasks", n, elapsed)
+            assert len(tids) == n
+        finally:
+            await ctx.close()
+
+    async def test_mysql_claim_contention_20workers(self) -> None:
+        """MySQL 下 20 个 worker 并发 Claim 1000 个任务。"""
+        if not self._have_mysql():
+            pytest.skip("No MySQL — set A2A_REGISTRY_TEST_MYSQL_DSN")
+
+        from simple_a2a_registry.config import Config
+
+        cfg = Config()
+        cfg.database.driver = "mysql"
+        cfg.database.mysql_dsn = os.environ["A2A_REGISTRY_TEST_MYSQL_DSN"]
+        cfg.database.pool_size = 20
+        cfg.database.max_overflow = 40
+
+        ctx = await _create_mysql_bench_context(cfg)
+        try:
+            n_tasks = 1000
+            n_workers = 20
+            tids = await ctx.create_n_tasks(n_tasks)
+
+            claimed: List[str] = []
+            lock = asyncio.Lock()
+
+            async def _worker(wid: int) -> None:
+                for tid in tids:
+                    _, data = await ctx.claim_task(
+                        tid, worker_id=f"mysql-w-{wid}", pid=wid,
+                    )
+                    if "claim_lock" in data:
+                        async with lock:
+                            claimed.append(tid)
+
+            start = time.perf_counter()
+            workers = [asyncio.create_task(_worker(w)) for w in range(n_workers)]
+            await asyncio.gather(*workers)
+            elapsed = time.perf_counter() - start
+
+            _tps_report(f"mysql_claim_{n_workers}w_{n_tasks}t",
+                        len(claimed), elapsed)
+            assert len(claimed) == n_tasks
+            assert len(set(claimed)) == n_tasks
+        finally:
+            await ctx.close()
+
+    async def test_mysql_batch_claim_1000(self) -> None:
+        """MySQL 下批量 Claim 1000 任务的吞吐量。"""
+        if not self._have_mysql():
+            pytest.skip("No MySQL — set A2A_REGISTRY_TEST_MYSQL_DSN")
+
+        from simple_a2a_registry.config import Config
+
+        cfg = Config()
+        cfg.database.driver = "mysql"
+        cfg.database.mysql_dsn = os.environ["A2A_REGISTRY_TEST_MYSQL_DSN"]
+        cfg.database.pool_size = 20
+        cfg.database.max_overflow = 40
+
+        ctx = await _create_mysql_bench_context(cfg)
+        try:
+            n = 1000
+            tids = await ctx.create_n_tasks(n)
+
+            start = time.perf_counter()
+            for tid in tids:
+                _, data = await ctx.claim_task(tid, "batch-worker", 1)
+                _ = data.get("claim_lock", "")
+            elapsed = time.perf_counter() - start
+
+            _tps_report(f"mysql_batch_claim_{n}", n, elapsed)
+        finally:
+            await ctx.close()
+
+
+async def _create_mysql_bench_context(
+    cfg: Any,
+) -> BenchmarkContext:
+    """Create a BenchmarkContext using MySQL config.
+
+    Mirrors BenchmarkContext.create() but uses Config with MySQL driver.
+    """
+    self = BenchmarkContext()
+    self.data_dir = tempfile.mkdtemp(prefix="bench_mysql_")
+
+    app = create_app(
+        data_dir=self.data_dir,
+        base_url="http://bench-mysql:8321",
+        config=cfg,
+        dispatcher_enabled=False,
+        claim_ttl=900,
+        failure_limit=3,
+        dispatcher_interval=3600,
+    )
+
+    self._server = TestServer(app)
+    await self._server.start_server()
+    self.client = TestClient(self._server)
+    self.app = app
+    self.task_store = app["task_store"]
+    return self

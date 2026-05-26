@@ -99,12 +99,12 @@ def test_purge_stale() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         store = Store(tmpdir)
         aid = store.register_agent({"name": "Stale Agent", "description": "Will go stale"})
-        # Manually set a very old heartbeat via direct SQL
-        store._conn.execute(
+        # Manually set a very old heartbeat via the engine
+        store._engine.execute(
             "UPDATE agents SET heartbeat_at=? WHERE id=?",
             (time.time() - 9999, aid),
         )
-        store._conn.commit()
+        store._engine.commit()
         purged = store.purge_stale()
         assert purged >= 1
         assert store.get_agent(aid) is None

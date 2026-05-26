@@ -95,7 +95,7 @@ class Dispatcher:
         self.store = store
         self.ws_mgr = workspace_manager
         self.config = config or DispatcherConfig()
-        self.ws_connections = ws_connections if ws_connections is not None else {}
+        self.ws_connections = ws_connections
         self._running = False
         self._task: Optional[asyncio.Task] = None
         # Track kanban task_ids dispatched via WebSocket so we can reconcile

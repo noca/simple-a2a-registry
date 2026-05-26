@@ -230,12 +230,12 @@ class TestHeartbeat:
             post_resp = await client.post("/v1/agents", json={"name": "Stale Test"})
             agent_id = (await post_resp.json())["id"]
             app = client.server.app
-            # Manually set a stale heartbeat via direct SQL
-            app["store"]._conn.execute(
+            # Manually set a stale heartbeat via the engine
+            app["store"]._engine.execute(
                 "UPDATE agents SET heartbeat_at=? WHERE id=?",
                 (time.time() - HEARTBEAT_TIMEOUT - 10, agent_id),
             )
-            app["store"]._conn.commit()
+            app["store"]._engine.commit()
             resp = await client.post(f"/v1/agents/{agent_id}/heartbeat")
             assert resp.status == 410
 

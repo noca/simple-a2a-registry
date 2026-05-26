@@ -14,7 +14,7 @@ from simple_a2a_registry.orchestration.state_machine import (
     validate_transition,
     VALID_TRANSITIONS,
 )
-from simple_a2a_registry.orchestration.store import TaskStore
+from simple_a2a_registry.orchestration.store import TaskStore, _maybe_create_schema
 from simple_a2a_registry.orchestration.dependency import (
     detect_cycle,
     resolve_dependencies,

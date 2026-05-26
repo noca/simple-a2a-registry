@@ -28,6 +28,7 @@ from aiohttp import web
 from simple_a2a_registry.store import Store as AuthStore  # noqa: F401
 from simple_a2a_registry.store import ClientRecord, TokenRecord  # noqa: F401
 from simple_a2a_registry.store import SCOPES, AUTH_CODE_EXPIRY_SECONDS
+from simple_a2a_registry.metrics import record_auth_operation
 
 logger = logging.getLogger("a2a_registry.auth")
 
@@ -323,6 +324,7 @@ def _auth_middleware_factory(
             or path.startswith("/.well-known/")
             or path == "/health"
             or path == "/"
+            or path == "/metrics"
             # WebSocket upgrade — token passed via ?token=xxx query param
             or path.endswith("/ws")
             # JWKS endpoint — public key distribution
@@ -333,6 +335,7 @@ def _auth_middleware_factory(
         # Bearer token validation
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
+            record_auth_operation("token_validate", success=False)
             return web.json_response(
                 {"error": "unauthorized", "detail": "Missing or invalid Authorization header"},
                 status=401,
@@ -347,6 +350,7 @@ def _auth_middleware_factory(
             issuer=issuer,
         )
         if payload is None:
+            record_auth_operation("token_validate", success=False)
             return web.json_response(
                 {"error": "invalid_token", "detail": "Token expired or invalid"},
                 status=401,
@@ -358,6 +362,7 @@ def _auth_middleware_factory(
         request["token_scopes"] = payload.get("scope", "")
         request["token_payload"] = payload
 
+        record_auth_operation("token_validate", success=True)
         return await handler(request)
 
     return auth_middleware

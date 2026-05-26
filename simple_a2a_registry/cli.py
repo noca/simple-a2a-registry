@@ -2,6 +2,8 @@
 
 Usage:
     a2a-registry [--host HOST] [--port PORT] [--data-dir DIR]
+                 [--log-format {json,text}] [--log-level LEVEL]
+                 [--log-file PATH]
                  [--board-path PATH] [--dispatcher-enabled BOOL]
                  [--dispatcher-interval SEC] [--claim-ttl SEC]
                  [--failure-limit N] [--workspaces-root DIR]
@@ -11,9 +13,9 @@ from __future__ import annotations
 
 import argparse
 import logging
-from pathlib import Path
 import sys
 
+from simple_a2a_registry.log import setup_logging
 from simple_a2a_registry.server import create_app, run_server
 
 logger = logging.getLogger("a2a_registry")
@@ -40,6 +42,12 @@ def main(argv: list[str] | None = None) -> None:
         "--data-dir",
         default="~/.simple-a2a-registry",
         help="Persistent data directory (default: ~/.simple-a2a-registry)",
+    )
+    parser.add_argument(
+        "--log-format",
+        default="text",
+        choices=["json", "text"],
+        help="Log output format: json (production/ELK) or text (development) (default: text)",
     )
     parser.add_argument(
         "--log-level",
@@ -125,14 +133,13 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     log_file = args.log_file
-    log_kwargs = {
-        "level": getattr(logging, args.log_level),
-        "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        "datefmt": "%H:%M:%S",
-    }
-    if log_file:
-        log_kwargs["filename"] = str(Path(log_file).expanduser())
-    logging.basicConfig(**log_kwargs)
+    setup_logging(
+        log_format=args.log_format,
+        level=args.log_level.lower(),  # setup_logging accepts lowercase
+        output="stdout",
+        log_file=log_file,
+        suppress_noisy=True,
+    )
 
     # Deprecated alias handling
     if args.dispatcher_enabled_v1 is not None:
