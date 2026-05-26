@@ -1396,6 +1396,8 @@ Week 5: ████████      Phase 5 — 打磨与文档
 
 > 本节描述 V2 Orchestration Engine 在 OAuth 2.1 认证环境下的行为。
 > 完整的认证架构设计请参见 [docs/architecture.md](architecture.md#oauth-21-认证架构)。
+>
+> **方案C（Admin 预创建模式）**：Agent 不再通过注册自动获取 OAuth 客户端。Admin 通过 `/admin/clients` 端点或 Web UI 预创建客户端，再通过安全渠道将凭证分发给 Agent。Agent 凭预分配的 client_id/client_secret 获取 Token 后注册。`POST /v1/agents` 注册端点受 `agent:register` scope 保护。
 
 当 `--auth-enabled true` 时，所有 V2 API 端点受 OAuth 2.1 中间件保护。Worker 进程在派发时通过环境变量获取认证上下文。
 
@@ -1404,6 +1406,12 @@ Week 5: ████████      Phase 5 — 打磨与文档
 | 路径 | 认证 | 说明 |
 |------|------|------|
 | `/v2/tasks` 及子路径 | ✅ `task:read` / `task:write` | 所有 V2 编排端点 |
+| `/v1/agents` | ✅ `agent:read` / `agent:register` / `agent:admin` | V1 Agent 管理（方案C：注册端点受 `agent:register` 保护） |
+| `/v1/agents/{agent_id}/heartbeat` | ✅ `agent:read` | 心跳保活 |
+| `/v1/agents/{agent_id}/ws` | ✅ `agent:read` | WebSocket 长连接 |
+| `/v1/tasks` | ✅ `task:read` | V1 任务查询 |
+| `/v1/agents/{agent_id}/dispatch` | ✅ `task:write` | 任务分发 |
+| `/admin/clients` | ✅ `registry:admin` | Admin 客户端管理 |
 | `/auth/*` | ❌ 公开 | Token 端点/注册 |
 | `/.well-known/*` | ❌ 公开 | Discovery 端点 |
 | `/health` | ❌ 公开 | 健康检查 |

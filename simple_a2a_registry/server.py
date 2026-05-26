@@ -107,11 +107,8 @@ class RegistryHandler:
         self.task_store: Optional[TaskStore] = None
         self._dispatched_ws_tasks: Optional[Dict[str, str]] = None
 
-        # OAuth 2.1 Auth store for auto-creating clients on registration
+        # OAuth 2.1 Auth store for admin / WebSocket auth
         self.auth_store = auth_store
-
-        # Track registered client IDs for cleanup on unregister
-        self._agent_client_map: Dict[str, str] = {}
 
         # Auth state (wired up by create_app)
         self._auth_public_key: str = ""
@@ -242,86 +239,18 @@ class RegistryHandler:
         agent_id = self.store.register_agent(body)
         card = self.store.get_agent(agent_id)
 
-        # ── Auto-create OAuth 2.1 client if AgentCard declares OAuth2SecurityScheme ──
-        client_id = None
-        client_secret = None
-        auth_result = None
-        if self.auth_store is not None:
-            client_result = self._create_oauth_client_from_card(card, agent_id)
-            if client_result:
-                client_id = client_result["client_id"]
-                client_secret = client_result["client_secret"]
-                self._agent_client_map[agent_id] = client_id
-                auth_result = {
-                    "client_id": client_id,
-                    "client_secret": client_secret,
-                    "token_url": f"{self.base_url}/auth/token",
-                    "grant_type": "client_credentials",
-                }
-
         response = {
             "message": "Agent registered successfully",
             "id": agent_id,
             "card": card,
         }
-        if auth_result:
-            response["authentication"] = auth_result
 
         return web.json_response(response, status=201)
-
-    def _create_oauth_client_from_card(
-        self, card: Optional[Dict[str, Any]], agent_id: str,
-    ) -> Optional[Dict[str, str]]:
-        """Extract OAuth2SecurityScheme from *card* and auto-register a client.
-
-        Returns ``None`` if the card has no OAuth2SecurityScheme or if auth
-        is not configured.
-        """
-        if self.auth_store is None:
-            return None
-        if card is None:
-            return None
-
-        security_schemes = card.get("security_schemes", {})
-        if not security_schemes:
-            return None
-
-        # Find the first OAuth2 scheme
-        oauth_scheme = None
-        for name, scheme in security_schemes.items():
-            if isinstance(scheme, dict) and scheme.get("scheme_type") == "oauth2":
-                oauth_scheme = scheme
-                break
-
-        if oauth_scheme is None:
-            return None
-
-        # Determine scopes from the OAuth flow definition
-        allowed_scopes = None
-        oauth2 = oauth_scheme.get("oauth2", {})
-        flows = oauth2.get("flows", {})
-        cc_flow = flows.get("client_credentials", {})
-        if cc_flow and "scopes" in cc_flow:
-            allowed_scopes = list(cc_flow["scopes"].keys())
-
-        # Register the client with the auth store
-        client_card = self.store.get_agent(agent_id)
-        description = card.get("name", agent_id)
-        result = self.auth_store.register_client(
-            agent_card_id=agent_id,
-            allowed_scopes=allowed_scopes,
-            description=description,
-        )
-        logger.info(
-            "Auto-created OAuth client '%s' for agent '%s' (scopes=%s)",
-            result["client_id"], agent_id, allowed_scopes,
-        )
-        return result
 
     async def handle_unregister(self, request: web.Request) -> web.Response:
         """DELETE /v1/agents/{agent_id} — unregister an agent.
 
-        Cleans up associated OAuth client credentials and WebSocket connection.
+        Closes the agent's WebSocket connection and removes it from the registry.
         """
         agent_id = request.match_info["agent_id"]
 
@@ -333,17 +262,6 @@ class RegistryHandler:
                 await ws.close()
             except Exception:
                 pass
-
-        # Clean up OAuth client credentials
-        client_id = self._agent_client_map.pop(agent_id, None)
-        if client_id and self.auth_store:
-            self.auth_store.revoke_client_tokens(client_id)
-            self.auth_store._clients.pop(client_id, None)
-            self.auth_store._save()
-            logger.info(
-                "Revoked OAuth client '%s' for unregistered agent '%s'",
-                client_id, agent_id,
-            )
 
         success = self.store.unregister(agent_id)
         if not success:
@@ -786,6 +704,130 @@ def _status_to_error_code(status: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# AdminHandler — Admin REST API (requires registry:admin scope)
+# ---------------------------------------------------------------------------
+
+
+class AdminHandler:
+    """Handler for ``/admin/*`` endpoints — admin operations on OAuth clients.
+
+    All endpoints require ``registry:admin`` scope.
+    Only registered when ``auth_enabled=True``.
+    """
+
+    def __init__(self, auth_store: AuthStore) -> None:
+        self.auth_store = auth_store
+
+    async def handle_create_client(self, request: web.Request) -> web.Response:
+        """POST /admin/clients — create a new OAuth client.
+
+        Body (JSON)::
+
+            {
+                "agent_card_id": "...",
+                "description": "My client",
+                "allowed_scopes": ["task:read", "task:write"]
+            }
+
+        Returns::
+
+            {
+                "client_id": "client-abc123",
+                "client_secret": "secret-xyz...",
+                "agent_card_id": "...",
+                "scopes": ["task:read", "task:write"],
+                "created_at": 1234567890.0
+            }
+        """
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response(
+                {"error": "invalid_json", "detail": "Invalid JSON body"},
+                status=400,
+            )
+
+        agent_card_id = body.get("agent_card_id", "")
+        description = body.get("description", "")
+        allowed_scopes = body.get("allowed_scopes")
+
+        # Validate scopes if provided
+        if allowed_scopes is not None:
+            if not isinstance(allowed_scopes, list) or not allowed_scopes:
+                return web.json_response(
+                    {"error": "invalid_scope", "detail": "allowed_scopes must be a non-empty list"},
+                    status=400,
+                )
+            valid_scopes = set(SCOPES.keys())
+            for s in allowed_scopes:
+                if s not in valid_scopes:
+                    return web.json_response(
+                        {"error": "invalid_scope", "detail": f"Unknown scope: {s}"},
+                        status=400,
+                    )
+
+        result = self.auth_store.register_client(
+            agent_card_id=agent_card_id,
+            allowed_scopes=allowed_scopes,
+            description=description,
+        )
+
+        client = self.auth_store.get_client(result["client_id"])
+        return web.json_response(
+            {
+                "client_id": result["client_id"],
+                "client_secret": result["client_secret"],
+                "agent_card_id": client.agent_card_id if client else agent_card_id,
+                "scopes": client.allowed_scopes if client else (allowed_scopes or list(SCOPES.keys())),
+                "created_at": client.created_at if client else 0.0,
+            },
+            status=201,
+        )
+
+    async def handle_list_clients(self, request: web.Request) -> web.Response:
+        """GET /admin/clients — list all registered OAuth clients.
+
+        Returns::
+
+            [
+                {
+                    "client_id": "client-abc123",
+                    "agent_card_id": "...",
+                    "description": "My client",
+                    "scopes": ["task:read", "task:write"],
+                    "token_count": 3,
+                    "created_at": 1234567890.0
+                },
+                ...
+            ]
+        """
+        clients = self.auth_store.list_clients()
+        return web.json_response(clients)
+
+    async def handle_delete_client(self, request: web.Request) -> web.Response:
+        """DELETE /admin/clients/{client_id} — delete a client and revoke all its tokens."""
+        client_id = request.match_info["client_id"]
+
+        # Protect the bootstrap registry service account
+        if client_id == "simple-a2a-registry":
+            return web.json_response(
+                {"error": "protected", "detail": "Cannot delete the registry service account"},
+                status=403,
+            )
+
+        if not self.auth_store.delete_client(client_id):
+            return web.json_response(
+                {"error": "not_found", "detail": f"Client '{client_id}' not found"},
+                status=404,
+            )
+
+        return web.json_response({
+            "message": "Client deleted successfully",
+            "client_id": client_id,
+        })
+
+
+# ---------------------------------------------------------------------------
 
 
 async def _cleanup_task(app: web.Application) -> None:
@@ -979,7 +1021,7 @@ def create_app(
         base_url=base_url,
     )
 
-    # Wire auth_store to handler for auto-creating OAuth clients on agent registration
+    # Wire auth_store to handler for WebSocket client auth and admin endpoints
     handler.auth_store = auth_store
     handler._auth_public_key = public_key
     handler._auth_algorithm = algorithm
@@ -1029,8 +1071,11 @@ def create_app(
         "/v1/agents/{agent_id}",
         require_scope("agent:read")(handler.handle_get_agent),
     )
-    # V1 POST /v1/agents — public (bootstrap), handled by middleware allowlist
-    app.router.add_post("/v1/agents", handler.handle_register)
+    # V1 POST /v1/agents — requires agent:register scope
+    app.router.add_post(
+        "/v1/agents",
+        require_scope("agent:register")(handler.handle_register),
+    )
     # V1 DELETE /v1/agents/{agent_id} — requires agent:admin scope
     app.router.add_delete(
         "/v1/agents/{agent_id}",
@@ -1118,6 +1163,21 @@ def create_app(
             app.router.add_get("/.well-known/jwks.json", jwks_handler)
         except Exception as e:
             logger.warning("Failed to create JWKS endpoint (non-fatal): %s", e)
+
+        # Admin REST API — create/list/delete OAuth clients
+        admin_handler = AdminHandler(auth_store)
+        app.router.add_post(
+            "/admin/clients",
+            require_scope("registry:admin")(admin_handler.handle_create_client),
+        )
+        app.router.add_get(
+            "/admin/clients",
+            require_scope("registry:admin")(admin_handler.handle_list_clients),
+        )
+        app.router.add_delete(
+            "/admin/clients/{client_id}",
+            require_scope("registry:admin")(admin_handler.handle_delete_client),
+        )
 
     # Background cleanup + Dispatcher
     cleanup_task_ref: list[asyncio.Task] = []

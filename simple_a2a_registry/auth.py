@@ -430,6 +430,44 @@ class AuthStore:
         self._save()
         return {"client_id": client_id, "client_secret": client_secret}
 
+    def list_clients(self) -> List[Dict[str, Any]]:
+        """List all registered OAuth clients with token counts.
+
+        Returns:
+            List of dicts with client metadata + active token count.
+        """
+        now = time.time()
+        result: List[Dict[str, Any]] = []
+        for cid, rec in self._clients.items():
+            token_count = sum(
+                1 for t in self._tokens.values()
+                if t.client_id == cid and t.expires_at > now
+            )
+            result.append({
+                "client_id": rec.client_id,
+                "agent_card_id": rec.agent_card_id,
+                "description": rec.description,
+                "scopes": rec.allowed_scopes,
+                "token_count": token_count,
+                "created_at": rec.created_at,
+            })
+        return result
+
+    def delete_client(self, client_id: str) -> bool:
+        """Delete a client and revoke all its tokens.
+
+        Returns:
+            True if the client was found and deleted, False otherwise.
+        """
+        if client_id not in self._clients:
+            return False
+        # Revoke all tokens for this client first
+        self.revoke_client_tokens(client_id)
+        # Remove the client record
+        del self._clients[client_id]
+        self._save()
+        return True
+
     def get_client(self, client_id: str) -> Optional[ClientRecord]:
         return self._clients.get(client_id)
 
@@ -583,8 +621,7 @@ def _auth_middleware_factory(
             or path == "/"
             # WebSocket upgrade — token passed via ?token=xxx query param
             or path.endswith("/ws")
-            # Agent registration — public for bootstrap (design doc W5)
-            or (path == "/v1/agents" and request.method == "POST")
+            # Agent registration — now requires Bearer token
             # JWKS endpoint — public key distribution
             or path == "/.well-known/jwks.json"
         ):

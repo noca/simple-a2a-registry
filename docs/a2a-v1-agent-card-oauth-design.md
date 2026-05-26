@@ -134,7 +134,7 @@ Content-Type: application/x-www-form-urlencoded
 
 grant_type=client_credentials
 &client_id=agent-1
-&client_secret=secret-xxx
+&client_secret=***
 &scope=task:read task:write
 ```
 
@@ -180,17 +180,34 @@ Request → AuthMiddleware
 
 ## 5. 安全集成流程
 
-### 5.1 Agent 注册时的安全协商
+### 5.1 Agent 注册时的安全协商（方案C）
+
+**方案C 核心变更**：Operator 通过 Admin CLI/API/Web UI 预创建 OAuth client 凭据，分发到 Agent 配置文件。Agent 不再在注册时自动获取 client_id/secret。
 
 ```
-1. Agent 启动 → 生成/加载自己的 AgentCard（含 security_schemes）
-2. Agent → Registry: POST /v1/agents (AgentCard + client_credentials)
-   └── Registry 验证 Agent → 返回 client_id/client_secret
-3. Agent → Token: POST /auth/token (client_credentials)
-   └── Registry 返回 access_token (JWT)
-4. Agent → Registry: GET /.well-known/agent-card.json (公开)
-   └── 获取其他 Agent 的 AgentCard → 知道对方的 security_schemes
-5. Agent A → Agent B: 使用 Bearer token 调用 A2A 接口
+1. [Operator 预创建阶段]
+   Operator → Admin CLI: a2a-admin create-client --name agent-1 --scopes "task:* agent:register"
+  或
+   Operator → Web UI: Admin Tab → Create Client Form
+    └── Registry 生成 client_id/client_secret，写入 clients 表
+       ↓
+   Operator 将 client_id/client_secret 嵌入 Agent 配置文件（YAML/环境变量/挂载 Secret）
+
+2. [Agent 启动 & 认证阶段]
+   Agent 启动 → 从配置文件读取 client_id/client_secret
+   Agent → Registry: POST /auth/token (grant_type=client_credentials)
+    └── Registry 验证 credentials → 返回 access_token (JWT)
+
+3. [Agent 注册（受保护端点）]
+   Agent → Registry: POST /v2/agents (Authorization: Bearer <token>, AgentCard)
+    └── Registry 验证 JWT + scope → 写入 AgentCard → 返回 201 Created
+
+4. [Agent 发现]
+   Agent → Registry: GET /.well-known/agent-card.json (公开端点)
+    └── 获取其他 Agent 的 AgentCard → 知道对方的 security_schemes
+
+5. [Agent 间通信]
+   Agent A → Agent B: Bearer token → A2A 接口调用
 ```
 
 ### 5.2 Scopes 设计
@@ -209,7 +226,7 @@ Request → AuthMiddleware
 1. **V1 API**（无认证的旧端点）保留 `/v1/agents` 和 `/v2/tasks`，标记为 `deprecated`
 2. **V2 API**（带认证的新端点）新增 `/v2/auth/*` 和认证后的端点
 3. **配置开关**：`--auth-enabled false` 可禁用认证（开发/测试模式）
-4. **bootstrap agent**：Registry 自身的服务账号在首次启动时自动生成
+4. **预创建凭据**：Operator 通过 Admin CLI/API 为每个 Agent 预创建 client credentials，通过配置文件分发。不再需要 bootstrap agent 自举，方案C 已替代原自举方案。
 
 ## 7. 实现计划（工作分解）
 
@@ -445,14 +462,76 @@ message OAuthFlows {
 
 ---
 
-#### W5. 客户端注册的 Bootstrap 问题未解决
+#### W5. 客户端注册的 Bootstrap 问题 → 方案C（已采纳）
 
-**位置**：第 5.1 节步骤 2，第 6 节第 4 点
+**位置**：第 5.1 节（已按方案C重写）、第 6 节第 4 点，本附录
+
 **问题**：Agent 第一次注册需要 client_id/client_secret，但注册时还没有这些凭证。第 6 节的 "bootstrap agent" 概念混淆——Registry 的服务账号与外部 Agent 注册不是一回事。
-**建议**：
-- 方案 A：注册端点 `/v1/agents` 保持公开（无认证），注册成功后返回 client_id/client_secret
-- 方案 B：使用 pre-shared bootstrap token 进行初始注册
-- 方案 C：Operator 预创建 client credentials 并通过其他通道（配置文件、admin UI）分发给 Agent
+
+**方案评审与决策**：
+
+| 方案 | 描述 | 评估结论 |
+|------|------|---------|
+| A | 注册端点 `/v1/agents` 保持公开，注册后返回 client_id/secret | ❌ 已放弃。公开注册端点引入安全风险——任何人都可注册 Agent，无法控制访问。OAuth 2.1 的核心要求是保护客户端凭据，公开注册与其设计目标矛盾 |
+| B | 使用 pre-shared bootstrap token 进行初始注册 | ❌ 已放弃。bootstrap token 的分发、轮换、撤销与 client credentials 完全重叠，引入了额外的 token 管理复杂性而收益有限 |
+| **C** | **Operator 预创建 client credentials，通过配置文件/Admin UI 分发给 Agent** | **✅ 已采纳。** |
+
+**方案C 决策理由**：
+
+1. **最小攻击面**：Agent 注册端点是受保护的 `/v2/agents`，只有持有有效 JWT 的 Agent 可以注册。Operator 预创建的凭据完全在内部控制。
+2. **运维与安全职责分离**：Admin（运维人员）负责凭据生命周期管理，Agent 仅使用凭据获取 Token。符合最小权限原则。
+3. **与生产环境的 Share Responsibility 模型一致**：凭据管理属于 Operator 的职责范围，Agent 是"受管节点"，通过配置文件/Secrets 机制注入凭据。这与 K8s Secret、HashiCorp Vault 等基础设施标准一致。
+4. **支持多通道分发**：Operator 可通过 Admin CLI、REST API、Web UI 三种方式创建和分发，适配不同运维场景。
+
+**方案C Admin 工作流（三种通道）**：
+
+```mermaid
+flowchart LR
+    A[Admin CLI:<br>a2a-admin create-client] -->|POST /admin/clients| S(Registry Server)
+    B[REST API:<br>POST /admin/clients] --> S
+    C[Web UI:<br>Admin Tab → Create Client] --> S
+    S -->|存储到 clients 表| D[(clients DB)]
+    S -->|返回| E[client_id + client_secret]
+    E -->|分发到 Agent 配置文件| F[Agent YAML / Env / K8s Secret]
+```
+
+**Admin CLI 示例**：
+```bash
+# 创建客户端凭据
+a2a-admin create-client \
+  --name "my-agent" \
+  --scopes "task:read task:write agent:register" \
+  --output json
+
+# 输出
+# {"client_id": "cli_abc123", "client_secret": "***", "scopes": ["task:read", "task:write", "agent:register"]}
+```
+
+**REST API 示例**：
+```bash
+# 使用 Admin 凭据创建客户端
+curl -X POST http://registry:8080/admin/clients \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-agent", "scopes": ["task:read", "task:write", "agent:register"]}'
+```
+
+**Web UI（Admin Tab）**：
+- 功能：Client 列表查看 + 创建/查看/撤销操作
+- 创建表单：Agent Name、Scopes（多选复选框）、可选描述
+- 创建成功后弹窗显示 client_secret（仅显示一次，提醒保存）
+- 撤销操作会立即吊销对应客户端的全部 Token
+
+**Agent 配置分发示例**：
+```yaml
+# agent-config.yaml
+a2a:
+  registry_url: "http://registry:8080"
+  auth:
+    client_id: "cli_abc123"
+    client_secret: "***"
+    scopes: ["task:read", "task:write", "agent:register"]
+```
 
 ---
 
@@ -486,9 +565,9 @@ message OAuthFlows {
 | 类别 | 数量 | 处理 |
 |------|------|------|
 | 🔴 BLOCKING | 5 | 必须修复后方可开始开发 |
-| 🟡 WARNING | 5 | 建议在开发前达成共识 |
+| 🟡 WARNING | 4 | 建议在开发前达成共识（W5 已通过方案C解决） |
 | 🟢 INFO | 3 | 文档补充，不影响开发 |
 
-**总体评价**：设计方向正确，AgentCard 顶层字段对齐良好，OAuth 2.1 流程合理。主要问题集中在嵌套类型（AgentInterface、AgentCapabilities、AgentSkill）的字段准确度，以及 Bootstrap 认证流程的缺口。建议先解决 B1-B5，再针对 W4-W5 决定技术方案。
+**总体评价**：设计方向正确，AgentCard 顶层字段对齐良好，OAuth 2.1 流程合理。主要问题集中在嵌套类型（AgentInterface、AgentCapabilities、AgentSkill）的字段准确度。Bootstrap 认证流程缺口已通过方案C（Operator 预创建 client credentials）解决。建议先解决 B1-B5，再针对 W4（WebSocket 认证）决定技术方案。
 
 —— PM Review, 2026-05-25

@@ -36,7 +36,7 @@ Content-Type: application/x-www-form-urlencoded
 curl -s -X POST http://localhost:8321/auth/token \
   -d "grant_type=client_credentials" \
   -d "client_id=agent-1" \
-  -d "client_secret=secret-xxx" \
+  -d "client_secret=***" \
   -d "scope=task:read task:write"
 ```
 
@@ -82,14 +82,14 @@ Content-Type: application/json
 ```json
 {
   "client_id": "agent-uuid",
-  "client_secret": "generated-secret",
+  "client_secret": "***",
   "client_secret_expires_at": 0,
   "scopes": ["task:read", "task:write", "agent:read"],
   "token_endpoint": "http://localhost:8321/auth/token"
 }
 ```
 
-> **注意：** Agent 通过 POST `/v1/agents` 注册时，如果 AgentCard 包含 `OAuth2SecurityScheme`，Registry 会自动创建 OAuth 客户端并随注册响应返回 `client_id`/`client_secret`。Agent 无需手动调用此端点。
+> **注意：** Agent 注册流程已重构为 **Admin 预创建模式**（方案C）。Admin 通过 `/admin/clients` 预创建 OAuth 客户端，Agent 凭预分配的 client_id/client_secret 获取 Token 后注册。Agent 注册端点 `POST /v1/agents` 现在也需要 `agent:register` scope 的保护。不再支持通过 `POST /v1/agents` 自动创建 OAuth 客户端。
 
 ### OAuth Authorization Server 元数据
 
@@ -144,14 +144,118 @@ Authorization: Bearer <access_token>
 | `agent:read` | 读取 Agent 列表和详情 | `GET /v1/agents`, `GET /v1/agents/{id}` |
 | `agent:register` | 注册新 Agent | `POST /v1/agents` |
 | `agent:admin` | 管理 Agent（删除/禁用） | `DELETE /v1/agents/{id}` |
-| `registry:admin` | Registry 管理操作 | 管理端点 |
+| `registry:admin` | Registry 管理操作 | `POST/GET/DELETE /admin/clients` |
 
 > 认证启用后，以下端点保持 **公开（无需认证）**：
 > - `GET /health` — 健康检查
 > - `GET /.well-known/agent-card.json` — Agent Card 发现
 > - `GET /.well-known/oauth-authorization-server` — OAuth 元数据
 > - `POST /auth/token` — Token 获取
-> - `POST /auth/register` — 客户端注册
+> - `POST /auth/register` — 客户端注册（Admin 保留入口）
+>
+> **注意**：`POST /v1/agents` 注册端点当前公开仅用于向后兼容。方案C（Admin 预创建）落地后，它将受 `agent:register` scope 保护。管理员端点为 `/admin/clients`，需 `registry:admin` scope。
+
+---
+
+## Admin 管理端点
+
+> 以下端点需 `registry:admin` scope（Registry 管理员权限）。
+
+### 创建客户端
+
+```
+POST /admin/clients
+Authorization: Bearer *** (need registry:admin scope)
+Content-Type: application/json
+```
+
+**请求体：**
+
+```json
+{
+  "description": "My Agent",
+  "allowed_scopes": ["agent:register", "agent:read", "task:read", "task:write"]
+}
+```
+
+**字段说明：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `description` | string | 否 | 客户端描述 |
+| `allowed_scopes` | string[] | 否 | 允许的 scope 列表（默认全部） |
+
+**响应：** `201 Created`
+
+```json
+{
+  "client_id": "client-a1b2c3d4e5f6",
+  "client_secret": "***",
+  "client_secret_expires_at": 0,
+  "allowed_scopes": ["agent:register", "agent:read", "task:read", "task:write"]
+}
+```
+
+> **安全提示：** `client_secret` 仅在创建时返回一次，无法再次获取。Admin 应通过安全渠道将其分发给 Agent。
+
+**错误码：**
+
+| 状态码 | error | 说明 |
+|--------|-------|------|
+| 401 | `unauthorized` | 缺少或无效的 Bearer Token |
+| 403 | `insufficient_scope` | Token 缺少 `registry:admin` scope |
+
+### 列出客户端
+
+```
+GET /admin/clients
+Authorization: Bearer *** (need registry:admin scope)
+```
+
+**响应：** `200 OK`
+
+```json
+{
+  "total": 3,
+  "clients": [
+    {
+      "client_id": "client-a1b2c3d4e5f6",
+      "description": "My Agent",
+      "allowed_scopes": ["agent:register", "agent:read", "task:read"],
+      "created_at": 1712345678,
+      "agent_card_id": ""
+    }
+  ]
+}
+```
+
+> **注意：** 列表响应不包含 `client_secret`（机密信息不返回）。
+
+### 删除客户端
+
+```
+DELETE /admin/clients/{client_id}
+Authorization: Bearer *** (need registry:admin scope)
+```
+
+**行为：** 删除客户端时将自动吊销该客户端的所有 Token。
+
+**响应：** `200 OK`
+
+```json
+{
+  "client_id": "client-a1b2c3d4e5f6",
+  "status": "deleted",
+  "tokens_revoked": 5
+}
+```
+
+**错误码：**
+
+| 状态码 | error | 说明 |
+|--------|-------|------|
+| 404 | `client_not_found` | 客户端不存在 |
+| 403 | `insufficient_scope` | Token 缺少 `registry:admin` scope |
 
 ---
 
@@ -171,6 +275,9 @@ Authorization: Bearer <access_token>
 | **GET** | **`/v1/tasks`** | **查询 V1 任务列表** | ✅ | `task:read` |
 | **GET** | **`/v1/tasks/{task_id}`** | **查询 V1 任务状态和结果** | ✅ | `task:read` |
 | ~~POST~~ | ~~`/v1/agents/{agent_id}/task`~~ | ~~代理任务到 Agent URL（已废弃）~~ | — | — |
+| **POST** | **`/admin/clients`** | **创建 OAuth 客户端（Admin）** | ✅ | `registry:admin` |
+| **GET** | **`/admin/clients`** | **列出 OAuth 客户端（Admin）** | ✅ | `registry:admin` |
+| **DELETE** | **`/admin/clients/{client_id}`** | **删除 OAuth 客户端（Admin）** | ✅ | `registry:admin` |
 
 ---
 

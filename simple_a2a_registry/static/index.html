@@ -127,6 +127,7 @@
     <button id="tab-agents" class="active" onclick="switchTab('agents')">Agents</button>
     <button id="tab-tasks" onclick="switchTab('tasks')">Tasks</button>
     <button id="tab-kanban" onclick="switchTab('kanban')">Kanban</button>
+    <button id="tab-admin" onclick="switchTab('admin')">Admin</button>
   </div>
 
   <!-- Agents tab (V1) -->
@@ -180,6 +181,54 @@
     </div>
     <div id="kanban-board"><div class="loading">Loading orchestration tasks...</div></div>
   </div>
+
+  <!-- Admin tab -->
+  <div id="content-admin" class="tab-content">
+    <div class="filter-bar">
+      <input type="text" id="admin-search" placeholder="Filter by client_id or agent_card_id..." oninput="debouncedAdminSearch()">
+      <button onclick="fetchAdminClients()">Refresh</button>
+    </div>
+    <div id="admin-clients"><div class="loading">Loading OAuth clients...</div></div>
+    <div id="admin-create-section" style="margin-top:24px;">
+      <h3 style="font-size:15px;font-weight:600;margin-bottom:12px;color:#c9d1d9;">Create OAuth Client</h3>
+      <div id="admin-create-form" style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px;">
+        <div style="display:flex;gap:12px;margin-bottom:12px;">
+          <div style="flex:1;">
+            <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Agent Card ID</label>
+            <input id="ac-agent-card-id" type="text" placeholder="e.g. my-agent-v2" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
+          </div>
+          <div style="flex:2;">
+            <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Description</label>
+            <input id="ac-description" type="text" placeholder="A short description of this client" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
+          </div>
+        </div>
+        <div style="margin-bottom:16px;">
+          <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:8px;">Allowed Scopes</label>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#c9d1d9;cursor:pointer;">
+              <input type="checkbox" class="ac-scope" value="task:read" checked> task:read
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#c9d1d9;cursor:pointer;">
+              <input type="checkbox" class="ac-scope" value="task:write"> task:write
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#c9d1d9;cursor:pointer;">
+              <input type="checkbox" class="ac-scope" value="agent:read"> agent:read
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#c9d1d9;cursor:pointer;">
+              <input type="checkbox" class="ac-scope" value="agent:register"> agent:register
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#c9d1d9;cursor:pointer;">
+              <input type="checkbox" class="ac-scope" value="registry:admin"> registry:admin
+            </label>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button onclick="createAdminClient()" style="background:#238636;border:1px solid #2ea043;border-radius:6px;padding:8px 20px;color:#fff;cursor:pointer;font-weight:500;">Create Client</button>
+          <div id="ac-status" style="display:flex;align-items:center;font-size:13px;color:#8b949e;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 <script>
 const API = "";
@@ -228,6 +277,7 @@ function switchTab(name) {
   document.getElementById(`content-${name}`).classList.add('active');
   if (name === 'tasks') fetchTasks();
   if (name === 'kanban') fetchKanban();
+  if (name === 'admin') fetchAdminClients();
 }
 
 // ======================== AGENTS (V1) ========================
@@ -952,6 +1002,207 @@ function buildKbDetailHtml(task, parents, children, runs, comments, events) {
   html += `</div>`;
 
   return html;
+}
+
+// ======================== ADMIN — OAuth Client Management ========================
+
+let adminSearchTimeout = null;
+function debouncedAdminSearch() {
+  clearTimeout(adminSearchTimeout);
+  adminSearchTimeout = setTimeout(fetchAdminClients, 300);
+}
+
+async function fetchAdminClients() {
+  const container = document.getElementById("admin-clients");
+  const filter = document.getElementById("admin-search").value.trim().toLowerCase();
+  container.innerHTML = '<div class="loading">Loading OAuth clients...</div>';
+  try {
+    const data = await fetchData(`${API}/admin/clients`);
+    renderAdminClients(data, filter);
+  } catch (e) {
+    container.innerHTML = `<div class="error">Failed to load OAuth clients: ${e.message}</div>`;
+  }
+}
+
+function renderAdminClients(clients, filter) {
+  const container = document.getElementById("admin-clients");
+  if (!clients || clients.length === 0) {
+    container.innerHTML = '<div class="loading">No OAuth clients yet. Create one below.</div>';
+    return;
+  }
+
+  let filtered = clients;
+  if (filter) {
+    filtered = clients.filter(c =>
+      (c.client_id && c.client_id.toLowerCase().includes(filter)) ||
+      (c.agent_card_id && c.agent_card_id.toLowerCase().includes(filter))
+    );
+  }
+
+  if (filtered.length === 0) {
+    container.innerHTML = `<div class="loading">No clients match "${filter}"</div>`;
+    return;
+  }
+
+  let html = '<table><thead><tr><th>Client ID</th><th>Agent Card ID</th><th>Description</th><th>Scopes</th><th>Tokens</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+  for (const c of filtered) {
+    const created = c.created_at ? new Date(c.created_at * 1000).toLocaleString() : "-";
+    const scopes = (c.scopes || []).map(s => `<span class="tag">${escHtml(s)}</span>`).join("") || "-";
+    html += `<tr class="agent-row">`;
+    html += `<td><code>${escHtml(c.client_id).substring(0, 24)}...</code></td>`;
+    html += `<td>${escHtml(c.agent_card_id || "-")}</td>`;
+    html += `<td>${escHtml(c.description || "-")}</td>`;
+    html += `<td>${scopes}</td>`;
+    html += `<td>${c.token_count ?? 0}</td>`;
+    html += `<td>${created}</td>`;
+    html += `<td><button onclick="deleteAdminClient('${c.client_id}')" style="background:#f8514922;border:1px solid #f8514955;border-radius:6px;padding:4px 10px;color:#f85149;cursor:pointer;font-size:12px;">Delete</button></td>`;
+    html += `</tr>`;
+  }
+  html += '</tbody></table>';
+  if (filtered.length < clients.length) {
+    html += `<p style="color:#8b949e;margin-top:8px;font-size:12px;">Showing ${filtered.length} of ${clients.length} clients</p>`;
+  }
+  container.innerHTML = html;
+}
+
+async function deleteAdminClient(clientId) {
+  if (!confirm(`确定删除 OAuth client "${clientId}"？此操作不可撤销。`)) return;
+
+  const statusEl = document.getElementById("ac-status");
+  try {
+    const headers = authHeaders();
+    headers["Content-Type"] = "application/json";
+    const resp = await fetch(`${API}/admin/clients/${clientId}`, {
+      method: "DELETE",
+      headers,
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      statusEl.textContent = "❌ " + (err.detail || resp.statusText);
+      return;
+    }
+    statusEl.textContent = "✅ Client deleted";
+    fetchAdminClients();
+  } catch (e) {
+    statusEl.textContent = "❌ " + e.message;
+  }
+  setTimeout(() => { statusEl.textContent = ""; }, 4000);
+}
+
+async function createAdminClient() {
+  const agentCardId = document.getElementById("ac-agent-card-id").value.trim();
+  const description = document.getElementById("ac-description").value.trim();
+  const scopeCheckboxes = document.querySelectorAll(".ac-scope:checked");
+  const allowedScopes = Array.from(scopeCheckboxes).map(cb => cb.value);
+
+  if (!agentCardId) {
+    document.getElementById("ac-status").textContent = "⚠️ Agent Card ID is required";
+    return;
+  }
+  if (allowedScopes.length === 0) {
+    document.getElementById("ac-status").textContent = "⚠️ Select at least one scope";
+    return;
+  }
+
+  const statusEl = document.getElementById("ac-status");
+  statusEl.textContent = "⏳ Creating...";
+
+  try {
+    const headers = { "Content-Type": "application/json", ...authHeaders() };
+    const resp = await fetch(`${API}/admin/clients`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        agent_card_id: agentCardId,
+        description: description || undefined,
+        allowed_scopes: allowedScopes,
+      }),
+    });
+
+    const body = await resp.json();
+    if (!resp.ok) {
+      statusEl.textContent = "❌ " + (body.detail || resp.statusText);
+      return;
+    }
+
+    // Show client_secret in a modal (one-time display)
+    showClientSecretModal(body);
+
+    // Clear form and refresh
+    document.getElementById("ac-agent-card-id").value = "";
+    document.getElementById("ac-description").value = "";
+    document.querySelectorAll(".ac-scope").forEach(cb => { cb.checked = cb.value === "task:read"; });
+    statusEl.textContent = "✅ Client created!";
+    fetchAdminClients();
+  } catch (e) {
+    statusEl.textContent = "❌ " + e.message;
+  }
+  setTimeout(() => {
+    const el = document.getElementById("ac-status");
+    if (el && el.textContent && !el.textContent.startsWith("⏳")) el.textContent = "";
+  }, 5000);
+}
+
+function showClientSecretModal(clientData) {
+  const existing = document.getElementById("client-secret-modal");
+  if (existing) existing.remove();
+
+  const modal = document.createElement("div");
+  modal.id = "client-secret-modal";
+  modal.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;padding:24px;";
+  modal.onclick = function(e) { if (e.target === modal) modal.remove(); };
+
+  const content = document.createElement("div");
+  content.style.cssText = "background:#0d1117;border:1px solid #30363d;border-radius:12px;max-width:520px;width:100%;padding:24px;position:relative;";
+
+  content.innerHTML = `
+    <h2 style="font-size:18px;font-weight:600;margin-bottom:16px;color:#f0f6fc;">🔑 Client Created</h2>
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;color:#8b949e;margin-bottom:4px;">Client ID</div>
+      <code style="display:block;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;font-size:14px;word-break:break-all;">${escHtml(clientData.client_id)}</code>
+    </div>
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;color:#d29922;margin-bottom:4px;">⚠️ Client Secret (shown once — copy now!)</div>
+      <div style="display:flex;gap:8px;">
+        <code id="secret-text" style="flex:1;background:#161b22;border:1px solid #d29922;border-radius:6px;padding:10px;font-size:14px;word-break:break-all;">${escHtml(clientData.client_secret)}</code>
+        <button onclick="copyClientSecret()" style="background:#1f6feb;border:1px solid #1f6feb;border-radius:6px;padding:8px 12px;color:#fff;cursor:pointer;font-size:13px;">📋 Copy</button>
+      </div>
+    </div>
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;color:#8b949e;margin-bottom:4px;">Scopes</div>
+      <div>${(clientData.scopes || []).map(s => `<span class="tag">${escHtml(s)}</span>`).join("")}</div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;">
+      <button onclick="document.getElementById('client-secret-modal').remove()" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:8px 20px;color:#c9d1d9;cursor:pointer;font-weight:500;">Close</button>
+    </div>
+  `;
+
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "✕";
+  closeBtn.style.cssText = "position:absolute;top:12px;right:16px;background:transparent;border:none;color:#8b949e;cursor:pointer;font-size:18px;";
+  closeBtn.onclick = () => modal.remove();
+  content.prepend(closeBtn);
+
+  modal.appendChild(content);
+  document.body.appendChild(modal);
+}
+
+function copyClientSecret() {
+  const el = document.getElementById("secret-text");
+  if (!el) return;
+  const text = el.textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = el.nextElementSibling;
+    if (btn) btn.textContent = "✅ Copied!";
+    setTimeout(() => { if (btn) btn.textContent = "📋 Copy"; }, 2000);
+  }).catch(() => {
+    // Fallback: select the text
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  });
 }
 
 // ======================== STATS ========================

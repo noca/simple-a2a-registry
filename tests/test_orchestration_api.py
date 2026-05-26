@@ -1222,15 +1222,7 @@ class TestOAuthIntegration:
         client = TestClient(server)
 
         try:
-            # 1. Register an agent (public endpoint even with auth enabled)
-            reg = await client.post("/v1/agents", json={
-                "name": "Auth Enabled Agent",
-                "description": "Agent with full auth flow",
-            })
-            assert reg.status == 201
-            agent_id = (await reg.json())["id"]
-
-            # 2. Register OAuth client and get token
+            # 1. Get an OAuth client + token first (auth/register is public)
             reg_auth = await client.post("/auth/register", json={
                 "description": "Auth Flow Test",
             })
@@ -1240,24 +1232,47 @@ class TestOAuthIntegration:
                 "grant_type": "client_credentials",
                 "client_id": creds["client_id"],
                 "client_secret": creds["client_secret"],
-                "scope": "agent:read",
+                "scope": "agent:register",
             })
             assert tok.status == 200
             token_data = await tok.json()
-            assert "access_token" in token_data
+            reg_headers = {"Authorization": f"Bearer {token_data['access_token']}"}
 
-            # 3. Call protected endpoint with valid token
-            headers = {"Authorization": f"Bearer {token_data['access_token']}"}
+            # 2. Register an agent with agent:register token
+            reg = await client.post("/v1/agents", json={
+                "name": "Auth Enabled Agent",
+                "description": "Agent with full auth flow",
+            }, headers=reg_headers)
+            assert reg.status == 201
+            agent_id = (await reg.json())["id"]
+
+            # 3. Register another OAuth client and get a different token for read
+            reg_auth2 = await client.post("/auth/register", json={
+                "description": "Auth Flow Test (read)",
+            })
+            creds2 = await reg_auth2.json()
+
+            tok2 = await client.post("/auth/token", data={
+                "grant_type": "client_credentials",
+                "client_id": creds2["client_id"],
+                "client_secret": creds2["client_secret"],
+                "scope": "agent:read",
+            })
+            assert tok2.status == 200
+            token_data2 = await tok2.json()
+
+            # 4. Call protected endpoint with valid token
+            headers = {"Authorization": f"Bearer {token_data2['access_token']}"}
             resp = await client.get("/v1/agents", headers=headers)
             assert resp.status == 200
             data = await resp.json()
             assert data["total"] >= 1
 
-            # 4. Call protected endpoint WITHOUT token → 401
+            # 5. Call protected endpoint WITHOUT token → 401
             resp2 = await client.get("/v1/agents")
             assert resp2.status == 401
 
-            # 5. Call health (public) → still works without token
+            # 6. Call health (public) → still works without token
             health = await client.get("/health")
             assert health.status == 200
 
