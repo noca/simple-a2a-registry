@@ -103,8 +103,10 @@ def _run_to_dict(run) -> dict:
 class OrchestrationHandler:
     """HTTP handler for the V2 Orchestration Engine REST API."""
 
-    def __init__(self, store: TaskStore) -> None:
+    def __init__(self, store: TaskStore,
+                 registry_store: Any = None) -> None:
         self.store = store
+        self.registry_store = registry_store
 
     # ----------------------------------------------------------
     # POST /v2/tasks — Create
@@ -625,6 +627,26 @@ class OrchestrationHandler:
         stats = self.store.stats()
         return web.json_response(stats)
 
+    async def handle_stats_by_tenant(self, request: web.Request) -> web.Response:
+        """GET /v2/stats/tenants — return statistics grouped by tenant.
+
+        Returns both task stats and (if registry_store is available) agent stats.
+        """
+        result: dict = {
+            "task_stats": self.store.stats_by_tenant(),
+        }
+        if self.registry_store:
+            raw = self.registry_store.stats_by_tenant()
+            tenants: Dict[str, Dict[str, int]] = {}
+            total = 0
+            for tid, s in raw.items():
+                t = tid if tid else ""
+                cnt = s.get("totalAgents", 0)
+                tenants[t] = {"total": cnt}
+                total += cnt
+            result["agent_stats"] = {"total": total, "tenants": tenants}
+        return web.json_response(result)
+
 
 # ---------------------------------------------------------------------------
 # Route registration helper
@@ -664,3 +686,8 @@ def register_v2_routes(app: web.Application, handler: OrchestrationHandler) -> N
     )
     # GET /v2/stats — registry statistics (registry:admin)
     app.router.add_get("/v2/stats", require_scope("registry:admin")(handler.handle_stats))
+    # GET /v2/stats/tenants — per-tenant statistics (registry:admin)
+    app.router.add_get(
+        "/v2/stats/tenants",
+        require_scope("registry:admin")(handler.handle_stats_by_tenant),
+    )

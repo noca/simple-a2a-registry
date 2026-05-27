@@ -510,6 +510,9 @@ class Store:
             q: Case-insensitive full-text search across the entire card.
             tenant: Filter by tenant.  Pass ``None`` to see all (admin).
                 Pass ``''`` to query only agents with no tenant set.
+                When filtering by a non-empty tenant, agents with empty
+                tenant_id (pre-tenant-isolation legacy data) are also
+                returned for backward compatibility.
 
         Returns:
             List of Agent Card dicts with ``status`` and ``lastHeartbeat``.
@@ -519,8 +522,10 @@ class Store:
 
         with self._tx("DEFERRED") as engine:
             if tenant is not None and tenant != "":
+                # Backward compatibility: non-empty tenant filter also returns
+                # agents with empty tenant_id (pre-tenant-isolation legacy data).
                 result = engine.execute(
-                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE tenant_id=?", (tenant,),
+                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE (tenant_id=? OR tenant_id='')", (tenant,),
                 )
             else:
                 result = engine.execute("SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents")
@@ -563,6 +568,9 @@ class Store:
             agent_id: The agent's unique identifier.
             tenant: If set, only return the agent if it belongs to this tenant.
                 Pass ``None`` to skip tenant check (admin mode).
+                When filtering by a non-empty tenant, agents with empty
+                tenant_id (pre-tenant-isolation legacy data) are also
+                returned for backward compatibility.
 
         Returns:
             Agent Card dict with ``status`` and ``lastHeartbeat``,
@@ -571,7 +579,7 @@ class Store:
         with self._tx("DEFERRED") as engine:
             if tenant is not None and tenant != "":
                 result = engine.execute(
-                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE id=? AND tenant_id=?", (agent_id, tenant),
+                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE id=? AND (tenant_id=? OR tenant_id='')", (agent_id, tenant),
                 )
             else:
                 result = engine.execute(
