@@ -325,6 +325,7 @@ pre { background: var(--bg-card); border: 1px solid var(--border-light); border-
         <select id="tenant-select" onchange="switchTenant(this.value)">
           <option value="">所有租户</option>
         </select>
+        <span class="tenant-badge" id="tenant-current">所有租户</span>
       </div>
       <button id="btn-theme" class="theme-btn" onclick="toggleTheme()" title="切换主题">🌓</button>
       <button id="btn-logout" class="logout-btn" onclick="handleLogout()" style="display:none;">退出登录</button>
@@ -529,17 +530,13 @@ function getApiHeaders() { return {}; }
 function getTenantParam() {
   return _currentTenant ? `tenant=${encodeURIComponent(_currentTenant)}` : '';
 }
-function getTenantParamWithAmp() {
-  const p = getTenantParam();
-  return p ? '&' + p : '';
-}
 
 function switchTenant(value) {
   _currentTenant = value;
   localStorage.setItem('a2a-tenant', value);
-  // Update badge text
-  const badge = document.getElementById('tenant-badge');
-  if (badge) badge.textContent = value || '全部';
+  // Update header-right tenant indicator
+  const badge = document.getElementById('tenant-current');
+  if (badge) badge.textContent = value || '所有租户';
   // Re-fetch all data
   fetchAgents(); fetchTasks(); fetchStats();
   if (canOperator()) { fetchClients(); fetchAudit(); }
@@ -644,6 +641,11 @@ function updateNavVisibility() {
   // Also gate the create-client button
   const clBtn = document.getElementById('cl-create-btn');
   if (clBtn) clBtn.style.display = show ? '' : 'none';
+  // Tenant selector: show for operators/admins, hide for viewers
+  const tenantSelector = document.getElementById('tenant-selector');
+  if (tenantSelector) {
+    tenantSelector.style.display = show ? '' : 'none';
+  }
 }
 
 function handleLogout() { doLogout(); }
@@ -734,11 +736,13 @@ function switchTab(name) {
 
 // Bootstrap
 (async function() {
-  // Restore saved tenant selection in dropdown
+  // Restore saved tenant selection in dropdown and badge
   const savedTenant = _currentTenant;
   if (savedTenant) {
     const sel = document.getElementById('tenant-select');
     if (sel) sel.value = savedTenant;
+    const badge = document.getElementById('tenant-current');
+    if (badge) badge.textContent = savedTenant;
   }
   if (_authEnabled) {
     const user = await checkSession();
@@ -759,7 +763,13 @@ function switchTab(name) {
 // Data fetching helper with auth redirect
 // ═══════════════════════════════════════════════════════════════════════
 async function apiFetch(url) {
-  const r = await fetch(url);
+  // Auto-append ?tenant=xxx when a tenant is selected (P6-A4-2+3+3)
+  const tenantParam = getTenantParam();
+  let fullUrl = url;
+  if (tenantParam) {
+    fullUrl = url.includes('?') ? `${url}&${tenantParam}` : `${url}?${tenantParam}`;
+  }
+  const r = await fetch(fullUrl);
   if (r.status === 401 && _authEnabled) {
     _currentUser = null;
     document.getElementById("login-overlay").classList.remove("hidden");
@@ -909,7 +919,6 @@ async function fetchAgents() {
     let url = `${API}/v1/agents`;
     const params = [];
     if (q) params.push(`q=${encodeURIComponent(q)}`);
-    if (_currentTenant) params.push(getTenantParam());
     if (params.length) url += '?' + params.join('&');
     const data = await apiFetch(url);
     _agentsCache = data.agents || [];
@@ -1139,7 +1148,6 @@ async function fetchTasks() {
       let v2Url = `${API}/v2/tasks?limit=100`;
       if (state) v2Url += `&status=${encodeURIComponent(state)}`;
       if (q) v2Url += `&q=${encodeURIComponent(q)}`;
-      if (_currentTenant) v2Url += getTenantParamWithAmp();
       const data = await apiFetch(v2Url);
       renderTaskGantt(data);
     } else {
@@ -1441,7 +1449,6 @@ async function fetchClients() {
   tbody.innerHTML = '<tr><td colspan="5" class="loading">Loading clients...</td></tr>';
   try {
     let url = `${API}/admin/clients`;
-    if (_currentTenant) url += '?' + getTenantParam();
     const data = await apiFetch(url);
     _clientsCache = Array.isArray(data) ? data : (data.clients || []);
     _clientsPage = 0;
