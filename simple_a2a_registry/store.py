@@ -638,10 +638,14 @@ class Store:
 
         # Extract tenant from AgentInterface if not explicitly provided
         if not tenant:
-            for iface in card.supported_interfaces:
-                if iface.tenant:
-                    tenant = iface.tenant
-                    break
+            # First try the card dict's top-level "tenant" (server handler extracts
+            # from the same place, so store must be consistent).
+            tenant = agent_card.get("tenant", "")
+            if not tenant:
+                for iface in card.supported_interfaces:
+                    if iface.tenant:
+                        tenant = iface.tenant
+                        break
 
         with self._tx() as engine:
             engine.execute(

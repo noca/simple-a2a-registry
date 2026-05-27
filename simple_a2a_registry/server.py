@@ -197,9 +197,11 @@ class RegistryHandler:
         # the auth-injected tenant is empty (admin scope / backwards compat).
         # When a non-admin token has a bound tenant, the query param cannot
         # override it — this prevents ?tenant= spoofing.
+        # An empty ?tenant= value is treated as "no filter" (admin scope),
+        # consistent with list_agents(tenant=None) semantics.
         auth_tenant = request["tenant"] if "tenant" in request else None
         qp_tenant = request.query.get("tenant", None)
-        if qp_tenant is not None and (not auth_tenant):
+        if qp_tenant is not None and qp_tenant != "" and (not auth_tenant):
             tenant = qp_tenant
         else:
             # auth_tenant is None (no auth), "" (admin -> see all), or "tenant-a" (normal)

@@ -218,15 +218,20 @@ class TestStoreTenantListIsolation:
         store.register_agent(_agent_card("Pub"))
 
         a_agents = store.list_agents(tenant=TENANT_A)
-        assert len(a_agents) == 2
-        for a in a_agents:
-            assert a.get("tenant") == TENANT_A, (
-                f"Unexpected tenant in filtered list: {a.get('tenant')}"
-            )
+        # Backward compat: empty-tenant "Pub" is also visible
+        assert len(a_agents) == 3
+        names = [a.get("name") for a in a_agents]
+        assert "A1" in names
+        assert "A2" in names
+        assert "Pub" in names, "Legacy no-tenant agents should be visible (backward compat)"
+        assert "B1" not in names, "Other tenant's agents should NOT be visible"
 
         b_agents = store.list_agents(tenant=TENANT_B)
-        assert len(b_agents) == 1
-        assert b_agents[0].get("tenant") == TENANT_B
+        # Backward compat: empty-tenant "Pub" is also visible to other tenants
+        assert len(b_agents) == 2
+        b_names = [a.get("name") for a in b_agents]
+        assert "B1" in b_names
+        assert "Pub" in b_names, "Legacy no-tenant agents should be visible (backward compat)"
 
     def test_list_with_empty_tenant_shows_empty_agents(self, store_factory):
         """list_agents(tenant='') returns only empty-tenant agents (backward compat)."""

@@ -9,7 +9,7 @@ P6-A5-1: 不同租户注册 agent 互相不可见的隔离测试
   5. Toggle 隔离 — Tenant A 不能切换 Tenant B 的 agent 的禁用状态
   6. Unregister 隔离 — Tenant A 不能删除 Tenant B 的 agent
   7. 三租户互不可见 — N=3 的完全隔离
-  8. 空字符串租户向后兼容
+  8. 空字符串租户向后兼容 — 空 tenant 旧 agent 对所有租户 visible
   9. 租户+搜索组合过滤
 
 注意: 本测试覆盖现有 test_tenant_e2e.py 之外的隔离场景，
@@ -468,18 +468,18 @@ class TestBackwardCompatibility:
             assert "LegacyBot" in names
 
     async def test_tenant_a_cannot_see_no_tenant_agent(self, app_factory):
-        """Tenant A's list doesn't show no-tenant agents
-        (empty-string tenant is isolated from named tenants)."""
+        """Tenant A's list includes no-tenant agents (backward compatibility:
+        empty-string tenant agents are visible to all named tenants)."""
         async with await app_factory() as client:
             await _register(client, "Legacy")
             r = await _register(client, "Tenanted", tenant=TENANT_A)
 
-            # Tenant A sees only their agent
+            # Backward compat: Tenant A sees own agents + empty-tenant legacy agents
             agents = await _list(client, tenant=TENANT_A)
             names = [a["name"] for a in agents]
             assert "Tenanted" in names
-            assert "Legacy" not in names, (
-                "Tenant A should not see no-tenant agents"
+            assert "Legacy" in names, (
+                "Backward compat: Tenant A should see no-tenant legacy agents"
             )
 
             # Empty tenant filter is treated as admin scope (shows all)
