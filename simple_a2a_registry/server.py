@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from aiohttp import web, WSMsgType
 from aiohttp.web_middlewares import middleware
+import ssl
 
 from simple_a2a_registry.errors import (
     json_error,
@@ -29,6 +30,7 @@ from simple_a2a_registry.metrics import (
     update_ws_connections,
     update_db_pool_size,
 )
+from simple_a2a_registry.rate_limiter import rate_limit_middleware_factory
 from simple_a2a_registry.models import make_agent_card, make_agent_skill
 from simple_a2a_registry.config import Config
 from simple_a2a_registry.database import create_engine
@@ -43,6 +45,11 @@ from simple_a2a_registry.auth import (
     create_token,
     ISSUER,
     SCOPES,
+)
+from simple_a2a_registry.audit import (
+    AuditStore,
+    EventType,
+    _maybe_create_audit_schema,
 )
 from simple_a2a_registry.store import Store, HEARTBEAT_TIMEOUT, _maybe_create_schema as _maybe_create_registry_schema
 from simple_a2a_registry.orchestration import (
@@ -108,10 +115,12 @@ class RegistryHandler:
     """HTTP + WebSocket handler methods for the A2A Registry."""
 
     def __init__(self, store: Store, base_url: str,
-                 auth_store: Optional[Store] = None) -> None:
+                 auth_store: Optional[Store] = None,
+                 audit_store: Optional[AuditStore] = None) -> None:
         self.store = store
         self.base_url = base_url.rstrip("/")
         self._started_at = time.time()
+        self.audit_store = audit_store
 
         # WebSocket connections: agent_id -> WebSocketResponse
         self._ws_connections: Dict[str, web.WebSocketResponse] = {}
@@ -261,6 +270,15 @@ class RegistryHandler:
             "card": card,
         }
 
+        if self.audit_store is not None:
+            self.audit_store.log(
+                event_type=EventType.AGENT_REGISTER.value,
+                actor=request.remote or "unknown",
+                target=agent_id,
+                detail=f"name={name}",
+                success=True,
+            )
+
         return web.json_response(response, status=201)
 
     async def handle_unregister(self, request: web.Request) -> web.Response:
@@ -282,6 +300,15 @@ class RegistryHandler:
         success = self.store.unregister(agent_id)
         if not success:
             return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
+
+        if self.audit_store is not None:
+            self.audit_store.log(
+                event_type=EventType.AGENT_DEREGISTER.value,
+                actor=request.remote or "unknown",
+                target=agent_id,
+                detail=f"unregistered via {'WebSocket disconnect' if request.path.endswith('/ws') else 'DELETE endpoint'}",
+                success=True,
+            )
 
         return web.json_response({
             "message": "Agent unregistered successfully",
@@ -584,6 +611,15 @@ class RegistryHandler:
             })
             task["state"] = "forwarded"
             logger.info("Dispatched task %s to agent '%s'", task_id, agent_id)
+
+            if self.audit_store is not None:
+                self.audit_store.log(
+                    event_type=EventType.TASK_DISPATCH.value,
+                    actor=request.remote or "unknown",
+                    target=task_id,
+                    detail=f"agent_id={agent_id} query_len={len(query)}",
+                    success=True,
+                )
         except Exception as e:
             task["state"] = "failed"
             task["error"] = f"Dispatch failed: {e}"
@@ -696,14 +732,16 @@ class RegistryHandler:
 
 
 class AdminHandler:
-    """Handler for ``/admin/*`` endpoints — admin operations on OAuth clients.
+    """Handler for ``/admin/*`` endpoints — admin operations on OAuth clients and audit log.
 
     All endpoints require ``registry:admin`` scope.
     Only registered when ``auth_enabled=True``.
     """
 
-    def __init__(self, auth_store: Store) -> None:
+    def __init__(self, auth_store: Store,
+                 audit_store: Optional[AuditStore] = None) -> None:
         self.auth_store = auth_store
+        self.audit_store = audit_store
 
     async def handle_create_client(self, request: web.Request) -> web.Response:
         """POST /admin/clients — create a new OAuth client.
@@ -759,6 +797,15 @@ class AdminHandler:
             description=description,
         )
 
+        if self.audit_store is not None:
+            self.audit_store.log(
+                event_type=EventType.CLIENT_CREATE.value,
+                actor=request.remote or "unknown",
+                target=result["client_id"],
+                detail=f"agent_card_id={agent_card_id} description={description}",
+                success=True,
+            )
+
         client = self.auth_store.get_client(result["client_id"])
         return web.json_response(
             {
@@ -791,6 +838,87 @@ class AdminHandler:
         clients = self.auth_store.list_clients()
         return web.json_response(clients)
 
+    async def handle_list_audit(self, request: web.Request) -> web.Response:
+        """GET /admin/audit — query audit log with optional filters.
+
+        Query params:
+            event_type: Filter by event type (CLIENT_CREATE, AGENT_REGISTER, etc.)
+            actor:      Filter by actor (substring match, case-insensitive)
+            since:      Unix timestamp — only events at or after this time
+            until:      Unix timestamp — only events before this time
+            limit:      Max results (default 100, max 1000)
+            offset:     Pagination offset (default 0)
+
+        Returns::
+
+            {
+                "total": 42,
+                "limit": 100,
+                "offset": 0,
+                "events": [...],
+                "stats": {...}
+            }
+        """
+        if self.audit_store is None:
+            return web.json_response(
+                {"error": "audit_disabled", "detail": "Audit logging is not configured"},
+                status=404,
+            )
+
+        try:
+            limit = min(int(request.query.get("limit", 100)), 1000)
+        except (ValueError, TypeError):
+            limit = 100
+        try:
+            offset = max(int(request.query.get("offset", 0)), 0)
+        except (ValueError, TypeError):
+            offset = 0
+
+        event_type = request.query.get("event_type") or None
+        actor = request.query.get("actor") or None
+
+        since = None
+        raw_since = request.query.get("since")
+        if raw_since:
+            try:
+                since = float(raw_since)
+            except (ValueError, TypeError):
+                pass
+
+        until = None
+        raw_until = request.query.get("until")
+        if raw_until:
+            try:
+                until = float(raw_until)
+            except (ValueError, TypeError):
+                pass
+
+        events = self.audit_store.query(
+            event_type=event_type,
+            actor=actor,
+            since=since,
+            until=until,
+            limit=limit,
+            offset=offset,
+        )
+
+        total = self.audit_store.count(
+            event_type=event_type,
+            actor=actor,
+            since=since,
+            until=until,
+        )
+
+        stats = self.audit_store.stats() if not (event_type or actor or since or until) else {}
+
+        return web.json_response({
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "events": [e.to_dict() for e in events],
+            "stats": stats,
+        })
+
     async def handle_delete_client(self, request: web.Request) -> web.Response:
         """DELETE /admin/clients/{client_id} — delete a client and revoke all its tokens."""
         client_id = request.match_info["client_id"]
@@ -808,6 +936,15 @@ class AdminHandler:
                 status=404,
             )
 
+        if self.audit_store is not None:
+            self.audit_store.log(
+                event_type=EventType.CLIENT_DELETE.value,
+                actor=request.remote or "unknown",
+                target=client_id,
+                detail="Deleted by admin",
+                success=True,
+            )
+
         return web.json_response({
             "message": "Client deleted successfully",
             "client_id": client_id,
@@ -818,9 +955,10 @@ class AdminHandler:
 
 
 async def _cleanup_task(app: web.Application) -> None:
-    """Background task to purge stale agents and update Prometheus gauges."""
+    """Background task to purge stale agents, audit events, and update Prometheus gauges."""
     store: Store = app["store"]
     handler: RegistryHandler = app.get("handler")
+    audit_store: Optional[AuditStore] = app.get("audit_store")
     try:
         while True:
             await asyncio.sleep(CLEANUP_INTERVAL)
@@ -828,6 +966,12 @@ async def _cleanup_task(app: web.Application) -> None:
                 purged = store.purge_stale()
                 if purged:
                     logger.info("Cleanup: purged %d stale agent(s)", purged)
+
+                # Purge old audit events
+                if audit_store:
+                    audit_purged = audit_store.purge_old()
+                    if audit_purged:
+                        logger.info("Cleanup: purged %d old audit event(s)", audit_purged)
 
                 # Update agent Prometheus gauges
                 stats = store.stats()
@@ -1061,11 +1205,18 @@ def create_app(
         # Create schema tables
         _maybe_create_registry_schema(_shared_engine)
         _maybe_create_board_schema(_shared_engine)
+
+        # Audit logging schema and store
+        retention_days = config.audit.retention_days if config is not None else 90
+        _maybe_create_audit_schema(_shared_engine, retention_days)
+        audit_store = AuditStore(_shared_engine, retention_days=retention_days)
+        logger.info("Audit store initialised (retention=%d days)", retention_days)
     else:
         _shared_engine = None
+        audit_store = None
 
     store = Store(_shared_engine if _shared_engine is not None else data_dir, bootstrap_secret=bootstrap_secret)
-    handler = RegistryHandler(store, base_url)
+    handler = RegistryHandler(store, base_url, audit_store=audit_store)
 
     # V2 Orchestration Engine
     if _shared_engine is not None:
@@ -1097,6 +1248,7 @@ def create_app(
         private_key=private_key,
         algorithm=algorithm,
         base_url=base_url,
+        audit_store=audit_store,
     )
 
     # Wire store to handler for WebSocket client auth and admin endpoints
@@ -1131,8 +1283,17 @@ def create_app(
             enabled=auth_enabled,
             public_key=public_key,
             algorithm=algorithm,
+            audit_store=audit_store,
         ),
         metrics_middleware_factory(),
+        rate_limit_middleware_factory(
+            enabled=config.rate_limit.enabled if config is not None else False,
+            default_unauthenticated=config.rate_limit.default_unauthenticated if config is not None else 60,
+            default_authenticated=config.rate_limit.default_authenticated if config is not None else 300,
+            storage=config.rate_limit.storage if config is not None else "memory",
+            whitelist=config.rate_limit.whitelist if config is not None else [],
+            engine=_shared_engine,
+        ),
     ])
     app["store"] = store
     app["handler"] = handler
@@ -1143,6 +1304,7 @@ def create_app(
     app["ws_mgr"] = ws_mgr
     app["dispatcher"] = dispatcher
     app["config"] = config
+    app["audit_store"] = audit_store
 
     # Health / well-known
     app.router.add_get("/health", handler.handle_health)
@@ -1248,7 +1410,7 @@ def create_app(
             logger.warning("Failed to create JWKS endpoint (non-fatal): %s", e)
 
         # Admin REST API — create/list/delete OAuth clients
-        admin_handler = AdminHandler(store)
+        admin_handler = AdminHandler(store, audit_store=audit_store)
         app.router.add_post(
             "/admin/clients",
             require_scope("registry:admin")(admin_handler.handle_create_client),
@@ -1256,6 +1418,10 @@ def create_app(
         app.router.add_get(
             "/admin/clients",
             require_scope("registry:admin")(admin_handler.handle_list_clients),
+        )
+        app.router.add_get(
+            "/admin/audit",
+            require_scope("registry:admin")(admin_handler.handle_list_audit),
         )
         app.router.add_delete(
             "/admin/clients/{client_id}",
@@ -1403,6 +1569,138 @@ def create_app(
     return app
 
 
+# ---------------------------------------------------------------------------
+# TLS / HTTPS Helpers
+# ---------------------------------------------------------------------------
+
+
+def _validate_tls_pair(tls_cert: str | None, tls_key: str | None) -> None:
+    """Validate TLS cert/key pair completeness — both or neither.
+
+    Raises:
+        ValueError: If exactly one of *tls_cert* or *tls_key* is provided.
+    """
+    if bool(tls_cert) != bool(tls_key):
+        if tls_cert:
+            msg = "--tls-cert requires --tls-key (both or neither)"
+        else:
+            msg = "--tls-key requires --tls-cert (both or neither)"
+        raise ValueError(msg)
+
+
+def _resolve_tls_path(path: str) -> str:
+    """Expand ``~``/``$HOME`` in a TLS certificate/key path."""
+    return str(Path(path).expanduser().resolve())
+
+
+def _create_redirect_app(host: str, tls_port: int) -> web.Application:
+    """Create a minimal aiohttp app that redirects all HTTP to HTTPS.
+
+    Every request receives a 301 redirect to ``https://<host>:<tls_port><path>``.
+    """
+    async def _redirect_handler(request: web.Request) -> web.Response:
+        location = f"https://{host}:{tls_port}{request.rel_url.path_qs}"
+        return web.Response(
+            status=301,
+            headers={"Location": location},
+        )
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", _redirect_handler)
+    return app
+
+
+def _build_ssl_context(cert_path: str, key_path: str) -> ssl.SSLContext:
+    """Build a hardened SSL context for the HTTPS server.
+
+    Enforces:
+    - TLS 1.2 minimum (TLS 1.3 allowed)
+    - Secure cipher suites only (no NULL/MD5/DES/RC4)
+    """
+    ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ctx.load_cert_chain(cert_path, key_path)
+
+    # Enforce TLS 1.2 minimum
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+
+    # Restrict to secure cipher suites
+    ctx.set_ciphers(
+        "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20"
+        ":!aNULL:!eNULL:!MD5:!DES:!RC4:!3DES:!PSK:!SRP"
+    )
+
+    # Enable modern TLS options
+    ctx.options |= ssl.OP_NO_COMPRESSION
+    if hasattr(ssl, "OP_NO_TICKET"):
+        ctx.options |= ssl.OP_NO_TICKET
+
+    return ctx
+
+
+def _run_with_tls(
+    app: web.Application,
+    host: str,
+    http_port: int,
+    tls_port: int,
+    tls_cert: str,
+    tls_key: str,
+) -> None:
+    """Run aiohttp app with dual listeners:
+
+    - HTTP on *http_port* (redirects 301 → HTTPS)
+    - HTTPS on *tls_port* (serves the real app)
+    """
+    import asyncio
+
+    ssl_ctx = _build_ssl_context(tls_cert, tls_key)
+    redirect_app = _create_redirect_app(host, tls_port)
+
+    async def _start() -> None:
+        loop = asyncio.get_running_loop()
+
+        # Main app runner (HTTPS)
+        app_runner = web.AppRunner(app)
+        await app_runner.setup()
+        https_site = web.TCPSite(app_runner, host, tls_port, ssl_context=ssl_ctx)
+        await https_site.start()
+        logger.info("HTTPS server started on https://%s:%d", host, tls_port)
+
+        # Redirect app runner (HTTP)
+        redirect_runner = web.AppRunner(redirect_app)
+        await redirect_runner.setup()
+        http_site = web.TCPSite(redirect_runner, host, http_port)
+        await http_site.start()
+        logger.info(
+            "HTTP redirect server started on http://%s:%d → https://%s:%d",
+            host, http_port, host, tls_port,
+        )
+
+        # Handle graceful shutdown on SIGINT/SIGTERM
+        stop = asyncio.Future()
+
+        def _signal_handler() -> None:
+            if not stop.done():
+                logger.info("Shutdown signal received — stopping servers…")
+                stop.set_result(None)
+
+        try:
+            loop.add_signal_handler(signal.SIGINT, _signal_handler)
+            loop.add_signal_handler(signal.SIGTERM, _signal_handler)
+        except NotImplementedError:
+            pass  # Windows / some environments
+
+        await stop
+
+        # Graceful shutdown
+        await app_runner.cleanup()
+        await redirect_runner.cleanup()
+
+    try:
+        asyncio.run(_start())
+    except KeyboardInterrupt:
+        pass
+
+
 def run_server(
     host: str = "0.0.0.0",
     port: int = 8321,
@@ -1416,12 +1714,16 @@ def run_server(
     failure_limit: int = 3,
     workspaces_root: Optional[str] = None,
     config: Optional[Config] = None,
+    tls_cert: Optional[str] = None,
+    tls_key: Optional[str] = None,
 ) -> None:
     """Start the A2A Registry HTTP server.
 
     Args:
         host: Bind address.
-        port: Bind port.
+        port: Bind port for HTTPS when TLS is enabled, or
+            direct HTTP when TLS is disabled.
+            HTTP redirects (301 → HTTPS) on *port+1* when TLS is active.
         data_dir: Persistent data directory.
         auth_enabled: Enable OAuth 2.1 authentication middleware.
         board_path: Database path for the V2 orchestration board.
@@ -1433,6 +1735,10 @@ def run_server(
         config: Optional :class:`Config` instance.  When provided, the
             ``config.database`` section is used to initialise the engine
             shared by ``Store`` and ``TaskStore``.
+        tls_cert: Path to TLS certificate file (PEM).  When provided
+            with *tls_key*, enables HTTPS on a separate port (port+1).
+            HTTP on *port* redirects (301) to HTTPS.
+        tls_key: Path to TLS private key file (PEM).
     """
     app = create_app(
         data_dir=data_dir,
@@ -1448,9 +1754,25 @@ def run_server(
         failure_limit=failure_limit,
         workspaces_root=workspaces_root,
     )
-    auth_status = "enabled" if auth_enabled else "disabled (dev)"
-    logger.info(
-        "Simple A2A Registry starting on %s:%s (data: %s) auth=%s",
-        host, port, data_dir, auth_status,
-    )
-    web.run_app(app, host=host, port=port)
+
+    # Validate TLS pair completeness — both or neither
+    _validate_tls_pair(tls_cert, tls_key)
+
+    if tls_cert and tls_key:
+        tls_port = port
+        http_redirect_port = port + 1
+        tls_cert_path = _resolve_tls_path(tls_cert)
+        tls_key_path = _resolve_tls_path(tls_key)
+
+        logger.info(
+            "TLS/HTTPS enabled — HTTP redirect on %s:%d → HTTPS on %s:%d",
+            host, http_redirect_port, host, tls_port,
+        )
+        _run_with_tls(app, host, http_redirect_port, tls_port, tls_cert_path, tls_key_path)
+    else:
+        auth_status = "enabled" if auth_enabled else "disabled (dev)"
+        logger.info(
+            "Simple A2A Registry starting on %s:%s (data: %s) auth=%s",
+            host, port, data_dir, auth_status,
+        )
+        web.run_app(app, host=host, port=port)
