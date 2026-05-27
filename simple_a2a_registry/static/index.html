@@ -13,6 +13,15 @@
   --accent: #58a6ff; --green: #3fb950; --yellow: #d29922;
   --orange: #f0883e; --red: #f85149; --purple: #d2a8ff;
   --radius: 8px; --radius-lg: 12px;
+  --hover-bg: #1c2128;
+}
+[data-theme="light"] {
+  --bg: #f6f8fa; --bg-card: #ffffff; --bg-input: #ffffff;
+  --border: #d0d7de; --border-light: #e1e4e8;
+  --text: #24292f; --text-muted: #57606a; --text-dim: #8c959f;
+  --accent: #0969da; --green: #1a7f37; --yellow: #9a6700;
+  --orange: #cf5d00; --red: #cf222e; --purple: #8250df;
+  --hover-bg: #f3f4f6;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); }
@@ -213,6 +222,50 @@ pre { background: var(--bg-card); border: 1px solid var(--border-light); border-
 .toggle-thumb { width: 14px; height: 14px; background: #fff; border-radius: 50%; position: absolute; top: 2px; left: 2px; transition: left .2s; }
 .toggle-track.active .toggle-thumb { left: 16px; }
 
+/* Theme toggler */
+.theme-btn { background: transparent; border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; color: var(--text-muted); font-size: 13px; cursor: pointer; }
+.theme-btn:hover { background: var(--hover-bg); color: var(--text); }
+
+/* Agents Grid View */
+.ag-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.agent-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px; cursor: pointer; transition: border-color .15s,box-shadow .15s; }
+.agent-card:hover { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.agent-card .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+.agent-card .card-name { font-size: 14px; font-weight: 600; color: #f0f6fc; }
+[data-theme="light"] .agent-card .card-name { color: var(--text); }
+.agent-card .card-id { font-size: 11px; color: var(--text-dim); word-break: break-all; margin-bottom: 6px; }
+.agent-card .card-skills { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.agent-card .card-actions { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-light); display: flex; gap: 8px; }
+
+/* Gantt Chart */
+.gantt-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; }
+.gantt-header { display: flex; border-bottom: 1px solid var(--border-light); position: sticky; top: 0; background: var(--bg-card); z-index: 1; }
+.gantt-label-col { min-width: 200px; padding: 10px 12px; font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; border-right: 1px solid var(--border-light); }
+.gantt-timeline-col { flex: 1; padding: 10px 8px; position: relative; }
+.gantt-timeline-header { display: flex; font-size: 10px; color: var(--text-dim); }
+.gantt-timeline-header span { flex: 1; text-align: center; }
+.gantt-row { display: flex; border-bottom: 1px solid var(--border-light); min-height: 44px; }
+.gantt-row:hover { background: var(--hover-bg); }
+.gantt-row-label { min-width: 200px; padding: 8px 12px; font-size: 12px; border-right: 1px solid var(--border-light); display: flex; flex-direction: column; justify-content: center; }
+.gantt-row-label small { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+.gantt-row-bar { flex: 1; padding: 8px; position: relative; min-height: 44px; }
+.gantt-bar { position: absolute; height: 24px; border-radius: 4px; top: 10px; display: flex; align-items: center; padding: 0 8px; font-size: 10px; color: #fff; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: opacity .2s; }
+.gantt-bar:hover { opacity: 0.85; }
+.gantt-today { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--red); z-index: 2; pointer-events: none; }
+.gantt-legend { display: flex; gap: 16px; padding: 10px 12px; font-size: 11px; color: var(--text-muted); flex-wrap: wrap; }
+.gantt-legend span { display: flex; align-items: center; gap: 4px; }
+.gantt-legend .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+/* Dashboard enhanced */
+.dash-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; padding: 8px 0; font-size: 11px; color: var(--text-dim); border-top: 1px solid var(--border-light); }
+.dash-footer .endpoint-status { display: flex; gap: 12px; }
+.dash-footer .endpoint-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+.endpoint-up { background: var(--green); }
+.endpoint-down { background: var(--red); }
+
+/* Task detail enhancement */
+.v2-detail-section { background: var(--bg-card); border: 1px solid var(--border-light); border-radius: 6px; padding: 8px 12px; margin-bottom: 6px; font-size: 12px; }
+
 /* Duration bar for heartbeat viz */
 .hb-bar { display: flex; gap: 2px; align-items: flex-end; height: 28px; padding: 4px 0; }
 .hb-seg { width: 6px; border-radius: 2px; min-height: 4px; transition: height .3s; }
@@ -253,6 +306,7 @@ pre { background: var(--bg-card); border: 1px solid var(--border-light); border-
     <h1>A2A Registry <small>Agent-to-Agent 管理后台</small></h1>
     <div class="header-right" id="header-right">
       <span id="user-badge" class="auth-badge" style="display:none;"></span>
+      <button id="btn-theme" class="theme-btn" onclick="toggleTheme()" title="切换主题">🌓</button>
       <button id="btn-logout" class="logout-btn" onclick="handleLogout()" style="display:none;">退出登录</button>
     </div>
   </div>
@@ -294,8 +348,11 @@ pre { background: var(--bg-card); border: 1px solid var(--border-light); border-
         <option value="http">HTTP</option>
       </select>
       <button class="btn" onclick="fetchAgents()">🔄 Refresh</button>
+      <button class="btn btn-accent" id="ag-view-table" onclick="switchAgentView('table')">📋 Table</button>
+      <button class="btn" id="ag-view-grid" onclick="switchAgentView('grid')">📇 Grid</button>
     </div>
-    <div class="table-wrap"><table><thead><tr>
+    <div id="ag-content">
+    <div class="table-wrap" id="ag-table-wrap"><table><thead><tr>
       <th onclick="sortBy('ag','status')">Status <span class="sort-arrow">▲</span></th>
       <th onclick="sortBy('ag','name')">Name <span class="sort-arrow">▲</span></th>
       <th onclick="sortBy('ag','skills')">Skills <span class="sort-arrow">▲</span></th>
@@ -304,6 +361,8 @@ pre { background: var(--bg-card); border: 1px solid var(--border-light); border-
       <th>Actions</th>
     </tr></thead><tbody id="ag-tbody"></tbody></table></div>
     <div class="pagination" id="ag-pagination"></div>
+    <div id="ag-grid-wrap" class="ag-grid" style="display:none;"></div>
+  </div>
   </div>
 
   <!-- ═══ TASKS ═══ -->
@@ -319,8 +378,9 @@ pre { background: var(--bg-card); border: 1px solid var(--border-light); border-
         <option value="failed">failed</option>
       </select>
       <button class="btn" onclick="fetchTasks()">🔄 Refresh</button>
-      <button class="btn btn-accent" id="tk-view-board" onclick="switchTaskView('board')">📋 Board View</button>
-      <button class="btn" id="tk-view-list" onclick="switchTaskView('list')">📄 List View</button>
+      <button class="btn btn-accent" id="tk-view-board" onclick="switchTaskView('board')">📋 Board</button>
+      <button class="btn" id="tk-view-list" onclick="switchTaskView('list')">📄 List</button>
+      <button class="btn" id="tk-view-gantt" onclick="switchTaskView('gantt')">📊 Gantt</button>
     </div>
     <div id="tk-content"></div>
   </div>
@@ -526,6 +586,20 @@ function handleLogout() { doLogout(); }
 function canAdmin() { return _currentUser && _currentUser.role === 'admin'; }
 function canOperator() { const w={admin:100,operator:50,viewer:10}; return _currentUser && (w[_currentUser.role]||0) >= 50; }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Theme
+// ═══════════════════════════════════════════════════════════════════════
+function getTheme() { return localStorage.getItem('a2a-theme') || 'dark'; }
+function setTheme(t) {
+  localStorage.setItem('a2a-theme', t);
+  document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : '');
+  const btn = document.getElementById('btn-theme');
+  if (btn) btn.textContent = t === 'light' ? '☀️' : '🌓';
+}
+function toggleTheme() { setTheme(getTheme() === 'light' ? 'dark' : 'light'); }
+// Apply saved theme on load
+setTheme(getTheme());
+
 // RBAC: viewer 不能访问 admin 管理页面
 function applyRBAC() {
   const canViewAdmin = canOperator();
@@ -656,6 +730,24 @@ function renderStats(health, kbStats) {
     `<div class="stat-card blocked"><div class="stat-label">Blocked</div><div class="stat-value">${kb.blocked||0}</div></div>` +
     `<div class="stat-card done"><div class="stat-label">Done</div><div class="stat-value">${kb.completed||0}</div></div>` +
     `<div class="stat-card failed"><div class="stat-label">Failed</div><div class="stat-value">${kb.failed||0}</div></div>`;
+
+  // Dashboard footer
+  let footer = document.getElementById('dash-footer');
+  if (!footer) {
+    const statsEl = document.getElementById('dash-stats');
+    footer = document.createElement('div');
+    footer.id = 'dash-footer';
+    footer.className = 'dash-footer';
+    statsEl.parentNode.insertBefore(footer, statsEl.nextSibling);
+  }
+  const healthOk = health !== null;
+  const kbOk = kbStats !== null;
+  footer.innerHTML =
+    `<div class="endpoint-status">
+      <span><span class="endpoint-dot ${healthOk?'endpoint-up':'endpoint-down'}"></span>/health</span>
+      <span><span class="endpoint-dot ${kbOk?'endpoint-up':'endpoint-down'}"></span>/v2/stats</span>
+    </div>
+    <span>🔄 ${new Date().toLocaleTimeString()}</span>`;
 }
 
 function renderCharts(health, kbStats) {
@@ -863,6 +955,88 @@ async function toggleAgentEnable(id) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Agent View Switching (Table / Grid)
+// ═══════════════════════════════════════════════════════════════════════
+let _activeAgentView = 'table';
+
+function switchAgentView(view) {
+  _activeAgentView = view;
+  document.getElementById('ag-view-table').className = view==='table' ? 'btn btn-accent' : 'btn';
+  document.getElementById('ag-view-grid').className = view==='grid' ? 'btn btn-accent' : 'btn';
+  const tableWrap = document.getElementById('ag-table-wrap');
+  const gridWrap = document.getElementById('ag-grid-wrap');
+  if (tableWrap) tableWrap.style.display = view==='table' ? '' : 'none';
+  if (gridWrap) gridWrap.style.display = view==='grid' ? '' : 'none';
+  document.getElementById('ag-pagination').style.display = view==='table' ? '' : 'none';
+  if (view === 'grid') renderAgentsGrid();
+}
+
+function renderAgentsGrid() {
+  const grid = document.getElementById('ag-grid-wrap');
+  if (!grid) return;
+  const sortKey = _sort.ag && _sort.ag.key;
+  const sortDir = _sort.ag && _sort.ag.dir;
+  let items = [..._agentsCache];
+
+  const status = document.getElementById("ag-status-filter").value;
+  const conn = document.getElementById("ag-connection-filter").value;
+  if (status) items = items.filter(a => a.status === status);
+  if (conn) items = items.filter(a => (a.connection||'http') === conn);
+
+  if (sortKey) {
+    items.sort((a,b) => {
+      let va='', vb='';
+      if (sortKey==='status') { va=a.status||''; vb=b.status||''; }
+      else if (sortKey==='name') { va=(a.name||'').toLowerCase(); vb=(b.name||'').toLowerCase(); }
+      else if (sortKey==='heartbeat') { va=a.lastHeartbeat||0; vb=b.lastHeartbeat||0; return sortDir*(va-vb); }
+      return sortDir * (va > vb ? 1 : va < vb ? -1 : 0);
+    });
+  }
+
+  if (items.length === 0) { grid.innerHTML = '<div class="empty">No agents found.</div>'; return; }
+
+  let html = '';
+  for (const a of items) {
+    const alive = a.status === 'alive';
+    const sc = a.status === 'alive' ? 'badge-alive' : a.status === 'disabled' ? 'badge-disabled' : 'badge-stale';
+    const skills = (a.skills || a.capabilities?.skills || []);
+    const skillTags = skills.slice(0,5).map(s => `<span class="tag">${esc(s.name)}</span>`).join('');
+    const tags = (a.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('');
+    const hb = a.lastHeartbeat ? new Date(a.lastHeartbeat*1000).toLocaleString() : '无';
+    const isEnabled = a.status !== 'disabled';
+    const safeId = (a.id||'').replace(/[^a-zA-Z0-9_-]/g,'_');
+    const connBadge = a.connection === 'websocket' ? '<span class="ws-badge">WS</span>' : '';
+
+    // Heartbeat mini-bar
+    const now = Math.floor(Date.now()/1000);
+    const elapsed = now - (a.lastHeartbeat||0);
+    const aliveStatus = alive ? (elapsed < 120 ? 'healthy' : 'warning') : 'dead';
+
+    html += `<div class="agent-card" onclick="toggleAgentDetail('${safeId}')">
+      <div class="card-top">
+        <div><span class="badge ${sc}">${a.status}</span>${connBadge}</div>
+        ${canOperator()
+          ? `<button class="action-btn" onclick="event.stopPropagation();toggleAgentEnable('${safeId}')">${isEnabled?'⏸':'▶'}</button>`
+          : ''}
+      </div>
+      <div class="card-name">${esc(a.name)}</div>
+      <div class="card-id">${esc(a.id||'')}</div>
+      ${skillTags ? `<div class="card-skills">${skillTags}</div>` : ''}
+      <div style="font-size:11px;color:var(--text-muted);">
+        ${tags ? `${tags} · ` : ''}❤️ ${hb}
+      </div>
+      <div class="hb-bar" style="height:12px;">
+        ${['#3fb950','#3fb950','#3fb950','#d29922','#d29922','#30363d','#30363d','#30363d','#30363d','#30363d'].map((c,i)=>{
+          const h = aliveStatus==='dead' ? 4 : Math.max(4, 12 - i);
+          return `<div class="hb-seg" style="height:${h}px;background:${c};"></div>`;
+        }).join('')}
+      </div>
+    </div>`;
+  }
+  grid.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // TASKS
 // ═══════════════════════════════════════════════════════════════════════
 let _activeTaskView = 'list';
@@ -871,6 +1045,7 @@ function switchTaskView(view) {
   _activeTaskView = view;
   document.getElementById('tk-view-board').className = view==='board' ? 'btn btn-accent' : 'btn';
   document.getElementById('tk-view-list').className = view==='list' ? 'btn btn-accent' : 'btn';
+  document.getElementById('tk-view-gantt').className = view==='gantt' ? 'btn btn-accent' : 'btn';
   fetchTasks();
 }
 
@@ -880,14 +1055,24 @@ async function fetchTasks() {
   try {
     const q = document.getElementById("tk-search").value.trim();
     const state = document.getElementById("tk-state-filter").value;
-    let url = `${API}/v1/tasks`;
-    const params = [];
-    if (q) params.push(`agent_id=${encodeURIComponent(q)}`);
-    if (state) params.push(`state=${encodeURIComponent(state)}`);
-    if (params.length) url += '?' + params.join('&');
-    const data = await apiFetch(url);
-    if (_activeTaskView === 'list') renderTaskList(data);
-    else renderTaskBoard(data);
+    // Fetch both v1 (with v2 fallback) for different views
+    if (_activeTaskView === 'gantt') {
+      // Gantt view uses v2 tasks (has timestamps, statuses, assignees)
+      let v2Url = `${API}/v2/tasks?limit=100`;
+      if (state) v2Url += `&status=${encodeURIComponent(state)}`;
+      if (q) v2Url += `&q=${encodeURIComponent(q)}`;
+      const data = await apiFetch(v2Url);
+      renderTaskGantt(data);
+    } else {
+      let url = `${API}/v1/tasks`;
+      const params = [];
+      if (q) params.push(`agent_id=${encodeURIComponent(q)}`);
+      if (state) params.push(`state=${encodeURIComponent(state)}`);
+      if (params.length) url += '?' + params.join('&');
+      const data = await apiFetch(url);
+      if (_activeTaskView === 'list') renderTaskList(data);
+      else renderTaskBoard(data);
+    }
   } catch(e) {
     el.innerHTML = `<div class="error-state">Failed: ${esc(e.message)}</div>`;
   }
@@ -946,6 +1131,189 @@ function renderTaskBoard(data) {
   }
   html += '</div>';
   el.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// GANTT CHART
+// ═══════════════════════════════════════════════════════════════════════
+function renderTaskGantt(data) {
+  const el = document.getElementById("tk-content");
+  const tasks = data.tasks || [];
+  if (tasks.length === 0) { el.innerHTML = '<div class="empty">No tasks for Gantt chart.</div>'; return; }
+
+  // Status color mapping
+  const STATUS_COLORS = {
+    todo: '#8b949e', ready: '#58a6ff', running: '#d2a8ff',
+    blocked: '#f0883e', done: '#3fb950', failed: '#f85149',
+    cancelled: '#484f58', archived: '#484f58',
+  };
+  const STATUS_LABELS = {
+    todo: 'Todo', ready: 'Ready', running: 'Running',
+    blocked: 'Blocked', done: 'Done', failed: 'Failed',
+    cancelled: 'Cancelled', archived: 'Archived',
+  };
+
+  // Find time range
+  let minTime = Infinity, maxTime = 0;
+  const now = Math.floor(Date.now() / 1000);
+  for (const t of tasks) {
+    const start = t.created_at || t.started_at || now;
+    const end = t.completed_at || now + 86400;
+    if (start < minTime) minTime = start;
+    if (end > maxTime) maxTime = end;
+  }
+  // Pad time range
+  minTime = minTime - 3600;
+  maxTime = Math.max(maxTime + 3600, minTime + 86400);
+  const range = maxTime - minTime;
+  if (range < 3600) { maxTime = minTime + 86400; }
+
+  // Generate time columns (every 3 hours if < 48h, else daily)
+  const totalHours = range / 3600;
+  const useDaily = totalHours > 48;
+  const numCols = useDaily ? Math.ceil(totalHours / 24) : Math.ceil(totalHours / 3);
+  const colWidth = useDaily ? 60 : 40;
+  const totalWidth = Math.max(numCols * colWidth, 400);
+
+  // Today marker
+  const todayPos = ((now - minTime) / range) * 100;
+
+  // Build header
+  let headerHtml = '';
+  for (let i = 0; i < numCols; i++) {
+    const t = minTime + (i * (useDaily ? 86400 : 10800));
+    const d = new Date(t * 1000);
+    headerHtml += `<span>${useDaily ? d.getMonth()+1+'/'+d.getDate() : d.getHours()+':00'}</span>`;
+  }
+
+  // Build rows
+  let rowsHtml = '';
+  for (const t of tasks) {
+    const start = t.created_at || t.started_at || now;
+    const end = t.completed_at || now + (useDaily ? 86400 : 3600);
+    const leftPct = Math.max(0, ((start - minTime) / range) * 100);
+    const widthPct = Math.max(2, Math.min(100 - leftPct, ((end - start) / range) * 100));
+    const color = STATUS_COLORS[t.status] || '#8b949e';
+    const statusLabel = STATUS_LABELS[t.status] || t.status;
+    const title = (t.title || 'Untitled').substring(0, 40);
+    const assignee = t.assignee || '-';
+
+    rowsHtml += `<div class="gantt-row">
+      <div class="gantt-row-label">
+        ${esc(title)}
+        <small>${esc(assignee)} · ${statusLabel}</small>
+      </div>
+      <div class="gantt-row-bar">
+        <div class="gantt-bar" style="left:${leftPct}%;width:${widthPct}%;background:${color};"
+             onclick="showGanttTaskDetail('${esc(t.id)}')"
+             title="${esc(title)} [${statusLabel}] ${assignee}">
+          ${widthPct > 8 ? esc(title.substring(0, Math.floor(widthPct/2))) : ''}
+        </div>
+        <div class="gantt-today" style="left:${todayPos}%;"></div>
+      </div>
+    </div>`;
+  }
+
+  // Legend
+  const legendHtml = Object.entries(STATUS_COLORS)
+    .filter(([k]) => tasks.some(t => t.status === k))
+    .map(([k,v]) => `<span><span class="dot" style="background:${v}"></span>${STATUS_LABELS[k]||k}</span>`)
+    .join('');
+
+  el.innerHTML = `<div class="gantt-wrap">
+    <div class="gantt-header">
+      <div class="gantt-label-col">Task</div>
+      <div class="gantt-timeline-col">
+        <div class="gantt-timeline-header" style="width:${totalWidth}px">${headerHtml}</div>
+      </div>
+    </div>
+    <div style="min-width:${totalWidth + 200}px">${rowsHtml}</div>
+    <div class="gantt-legend">${legendHtml}</div>
+  </div>`;
+}
+
+function showGanttTaskDetail(taskId) {
+  apiFetch(`${API}/v2/tasks/${taskId}`).then(data => {
+    openModal('gantt-task-detail', buildV2TaskDetailHtml(data));
+  }).catch(e => alert('Failed: ' + e.message));
+}
+
+function buildV2TaskDetailHtml(data) {
+  const t = data.task || data;
+  const parents = data.parents || [];
+  const children = data.children || [];
+  const runs = data.runs || [];
+  const comments = data.comments || [];
+  const events = data.events || [];
+
+  let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+    <h2>${esc(t.title||'Task')}</h2>
+    <span class="badge badge-${t.status||'unknown'}">${t.status||'unknown'}</span>
+  </div>
+  <div style="display:flex;gap:12px;margin-bottom:10px;font-size:12px;color:var(--text-muted);flex-wrap:wrap;">
+    <span>ID: <code>${esc(t.id||'')}</code></span>
+    <span>Assignee: <code>${esc(t.assignee||'-')}</code></span>
+    <span>Priority: ${t.priority||0}</span>
+    <span>Tenant: <code>${esc(t.tenant||'-')}</code></span>
+  </div>`;
+
+  if (t.body) html += `<div class="v2-detail-section">${esc(t.body)}</div>`;
+
+  // Timeline
+  html += `<div class="detail-section"><h3>Timeline</h3><table style="width:100%;font-size:11px;"><tr>`;
+  if (t.created_at) html += `<td style="padding:4px 8px;">Created: ${new Date(t.created_at*1000).toLocaleString()}</td>`;
+  if (t.started_at) html += `<td style="padding:4px 8px;">Started: ${new Date(t.started_at*1000).toLocaleString()}</td>`;
+  if (t.completed_at) html += `<td style="padding:4px 8px;">Completed: ${new Date(t.completed_at*1000).toLocaleString()}</td>`;
+  html += `</tr></table></div>`;
+
+  // Parent / Child deps
+  if (parents.length > 0) {
+    html += `<div class="detail-section"><h3>Parents (${parents.length})</h3>`;
+    for (const p of parents) html += `<div class="comment-bubble">${esc(p.title||p.id)} <small style="color:var(--text-dim)">${p.status||''}</small></div>`;
+    html += `</div>`;
+  }
+  if (children.length > 0) {
+    html += `<div class="detail-section"><h3>Children (${children.length})</h3>`;
+    for (const c of children) html += `<div class="comment-bubble">${esc(c.title||c.id)} <small style="color:var(--text-dim)">${c.status||''}</small></div>`;
+    html += `</div>`;
+  }
+
+  // Runs
+  if (runs.length > 0) {
+    html += `<div class="detail-section"><h3>Runs (${runs.length})</h3>`;
+    for (const r of runs) {
+      const meta = r.metadata ? JSON.stringify(r.metadata).substring(0,80) : '';
+      html += `<div class="run-item">
+        <strong>#${r.run_id||'?'}</strong> ${r.outcome||'running'}
+        <span style="color:var(--text-dim);font-size:10px;">${meta}</span>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Comments
+  if (comments.length > 0) {
+    html += `<div class="detail-section"><h3>Comments</h3>`;
+    for (const c of comments) {
+      html += `<div class="comment-bubble"><span class="author">${esc(c.author||'user')}</span>
+        <span class="time">${c.created_at ? new Date(c.created_at*1000).toLocaleString() : ''}</span>
+        <div class="body">${esc(c.body||'')}</div></div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Events
+  if (events.length > 0) {
+    html += `<div class="detail-section"><h3>Events (last 10)</h3>`;
+    for (const e of events.slice(-10)) {
+      html += `<div class="event-item"><span class="kind">${e.kind}</span>
+        <span style="font-size:10px;color:var(--text-dim);">${e.created_at ? new Date(e.created_at*1000).toLocaleString() : ''}</span></div>`;
+    }
+    html += `</div>`;
+  }
+
+  html += `<div style="margin-top:14px;text-align:right;"><button class="btn" onclick="closeModal('gantt-task-detail')">Close</button></div>`;
+  return html;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

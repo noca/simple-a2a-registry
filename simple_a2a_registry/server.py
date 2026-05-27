@@ -33,7 +33,7 @@ from simple_a2a_registry.metrics import (
 from simple_a2a_registry.rate_limiter import rate_limit_middleware_factory
 from simple_a2a_registry.models import make_agent_card, make_agent_skill
 from simple_a2a_registry.config import Config
-from simple_a2a_registry.database import create_engine
+from simple_a2a_registry.database import create_engine, SQLiteEngine
 from simple_a2a_registry.store import Store, HEARTBEAT_TIMEOUT
 from simple_a2a_registry.auth import (
     AuthHandler,
@@ -50,6 +50,13 @@ from simple_a2a_registry.audit import (
     AuditStore,
     EventType,
     _maybe_create_audit_schema,
+)
+from simple_a2a_registry.users import (
+    UserStore,
+    SessionManager,
+    UserHandler,
+    user_session_middleware_factory,
+    require_role,
 )
 from simple_a2a_registry.store import Store, HEARTBEAT_TIMEOUT, _maybe_create_schema as _maybe_create_registry_schema
 from simple_a2a_registry.orchestration import (
@@ -186,7 +193,8 @@ class RegistryHandler:
         except (ValueError, TypeError):
             offset = 0
 
-        all_agents = self.store.list_agents(skill=skill, tag=tag, q=q)
+        tenant = request.query.get("tenant", None)
+        all_agents = self.store.list_agents(skill=skill, tag=tag, q=q, tenant=tenant)
         total = len(all_agents)
         page = all_agents[offset:offset + limit]
 
@@ -207,7 +215,8 @@ class RegistryHandler:
     async def handle_get_agent(self, request: web.Request) -> web.Response:
         """GET /v1/agents/{agent_id}"""
         agent_id = request.match_info["agent_id"]
-        card = self.store.get_agent(agent_id)
+        tenant = request.headers.get("X-Tenant-ID", None)
+        card = self.store.get_agent(agent_id, tenant=tenant)
         if card is None:
             return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
         if agent_id in self._ws_connections:
@@ -253,15 +262,16 @@ class RegistryHandler:
         if not name:
             return json_error(400, "validation_error", "Agent requires a 'name'")
 
-        # Check for duplicate name among external agents
-        existing = self.store.list_agents()
+        # Check for duplicate name among external agents (scoped to tenant)
+        tenant = body.get("tenant", "")
+        existing = self.store.list_agents(tenant=tenant if tenant else None)
         for agent in existing:
             if agent.get("name", "").strip().lower() == name.lower():
                 return json_error(
                     409, "agent_exists", f"Agent '{name}' already exists"
                 )
-
-        agent_id = self.store.register_agent(body)
+        tenant = body.get("tenant", "")
+        agent_id = self.store.register_agent(body, tenant=tenant)
         card = self.store.get_agent(agent_id)
 
         response = {
@@ -853,7 +863,8 @@ class AdminHandler:
                 ...
             ]
         """
-        clients = self.auth_store.list_clients()
+        tenant = request.query.get("tenant", None)
+        clients = self.auth_store.list_clients(tenant=tenant)
         return web.json_response(clients)
 
     async def handle_list_audit(self, request: web.Request) -> web.Response:
@@ -1236,6 +1247,18 @@ def create_app(
     store = Store(_shared_engine if _shared_engine is not None else data_dir, bootstrap_secret=bootstrap_secret)
     handler = RegistryHandler(store, base_url, audit_store=audit_store)
 
+    # User authentication — password login, session management, user CRUD
+    if _shared_engine is not None:
+        user_store = UserStore(_shared_engine)
+    else:
+        # Share the same SQLite database file as the main Store
+        resolved = Path(data_dir).expanduser().resolve()
+        _user_engine = SQLiteEngine(str(resolved / "registry.db"))
+        _user_engine.connect()
+        user_store = UserStore(_user_engine)
+    session_manager = SessionManager()
+    user_handler = UserHandler(user_store, session_manager, audit_store=audit_store)
+
     # V2 Orchestration Engine
     if _shared_engine is not None:
         task_store = TaskStore(_shared_engine)
@@ -1312,11 +1335,15 @@ def create_app(
             whitelist=config.rate_limit.whitelist if config is not None else [],
             engine=_shared_engine,
         ),
+        user_session_middleware_factory(session_manager, enabled=True),
     ])
     app["store"] = store
     app["handler"] = handler
     app["auth_store"] = store
     app["auth_handler"] = auth_handler
+    app["user_store"] = user_store
+    app["session_manager"] = session_manager
+    app["user_handler"] = user_handler
     app["task_store"] = task_store
     app["orch_handler"] = orch_handler
     app["ws_mgr"] = ws_mgr
@@ -1452,6 +1479,28 @@ def create_app(
             require_scope("registry:admin")(admin_handler.handle_delete_client),
         )
 
+    # User authentication routes — login/logout + user management
+    app.router.add_get("/login", user_handler.handle_login_page)
+    app.router.add_post("/api/login", user_handler.handle_login)
+    app.router.add_post("/api/logout", user_handler.handle_logout)
+    app.router.add_get("/api/me", user_handler.handle_get_current_user)
+    app.router.add_get(
+        "/admin/users",
+        require_role("admin")(user_handler.handle_list_users),
+    )
+    app.router.add_post(
+        "/admin/users",
+        require_role("admin")(user_handler.handle_create_user),
+    )
+    app.router.add_put(
+        "/admin/users/{username}",
+        require_role("admin")(user_handler.handle_update_user),
+    )
+    app.router.add_delete(
+        "/admin/users/{username}",
+        require_role("admin")(user_handler.handle_delete_user),
+    )
+
     # Background cleanup + Dispatcher
     cleanup_task_ref: list[asyncio.Task] = []
 
@@ -1494,6 +1543,15 @@ def create_app(
                 logger.info("  [OK] RSA key pair generated (%d bits)", 2048)
             else:
                 logger.warning("  [?] Auth enabled but public key empty — may affect JWKS endpoint")
+
+        # 4. Bootstrap default admin account on first start
+        user_store: UserStore = app.get("user_store")
+        if user_store:
+            admin_pw = user_store.bootstrap_admin()
+            if admin_pw:
+                logger.info("  [BOOTSTRAP] Default admin account initialised — password logged above")
+            else:
+                logger.info("  [OK] Users already bootstrapped — skipping default admin creation")
 
         logger.info("Preflight checks complete — starting server.")
 

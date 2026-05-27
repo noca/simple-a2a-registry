@@ -89,6 +89,7 @@ def create_token(
     scope: Optional[str] = None,
     expiry: int = TOKEN_EXPIRY_SECONDS,
     issuer: str = ISSUER,
+    tenant: Optional[str] = None,
 ) -> str:
     """Create a signed JWT access token.
 
@@ -100,6 +101,7 @@ def create_token(
         scope: Space-separated scope string.
         expiry: Token lifetime in seconds.
         issuer: Token issuer claim.
+        tenant: Optional tenant namespace for multi-tenant isolation.
 
     Returns:
         Encoded JWT string.
@@ -116,6 +118,8 @@ def create_token(
         payload["aud"] = audience
     if scope:
         payload["scope"] = scope
+    if tenant:
+        payload["tenant"] = tenant
 
     if algorithm == "RS256":
         return _rsa_sign_jwt(payload, private_key)
@@ -387,10 +391,11 @@ def _auth_middleware_factory(
                 headers={"WWW-Authenticate": 'Bearer realm="simple-a2a-registry", error="invalid_token"'},
             )
 
-        # Inject agent_id into request for downstream handlers
+        # Inject agent_id, scopes, and tenant into request for downstream handlers
         request["agent_id"] = payload.get("sub", "")
         request["token_scopes"] = payload.get("scope", "")
         request["token_payload"] = payload
+        request["tenant"] = payload.get("tenant", "")
 
         record_auth_operation("token_validate", success=True)
         return await handler(request)
@@ -488,6 +493,7 @@ class AuthHandler:
         agent_card_id = body.get("agent_card_id", "")
         allowed_scopes = body.get("allowed_scopes")
         description = body.get("description", "")
+        tenant = body.get("tenant", "")
 
         # Validate scopes
         if allowed_scopes is not None:
@@ -502,6 +508,7 @@ class AuthHandler:
             agent_card_id=agent_card_id,
             allowed_scopes=allowed_scopes,
             description=description,
+            tenant=tenant,
         )
 
         if self.audit_store is not None:
@@ -518,6 +525,7 @@ class AuthHandler:
                 "client_id": result["client_id"],
                 "client_secret": result["client_secret"],
                 "allowed_scopes": allowed_scopes or list(SCOPES.keys()),
+                "tenant": tenant,
             },
             status=201,
         )
@@ -587,17 +595,18 @@ class AuthHandler:
                  "detail": "Requested scope(s) not allowed for this client"},
                 status=400,
             )
-        if not scope:
-            # Default to all allowed scopes
-            client = self.auth_store.get_client(client_id)
-            if client:
-                scope = " ".join(client.allowed_scopes)
+        # Fetch client for tenant info and default scopes
+        client = self.auth_store.get_client(client_id)
+        tenant = client.tenant if client else ""
+        if not scope and client:
+            scope = " ".join(client.allowed_scopes)
 
         token = create_token(
             client_id,
             private_key=self.private_key,
             algorithm=self.algorithm,
             scope=scope,
+            tenant=tenant,
         )
 
         # Decode to get jti for storage
@@ -621,6 +630,7 @@ class AuthHandler:
                 "token_type": "Bearer",
                 "expires_in": TOKEN_EXPIRY_SECONDS,
                 "scope": scope,
+                "tenant": tenant,
             },
             status=200,
         )
@@ -653,11 +663,15 @@ class AuthHandler:
             )
 
         scope = auth_data.get("scope", "")
+        client = self.auth_store.get_client(client_id)
+        tenant = client.tenant if client else ""
+
         token = create_token(
             client_id,
             private_key=self.private_key,
             algorithm=self.algorithm,
             scope=scope,
+            tenant=tenant,
         )
 
         payload = jwt.decode(token, options={"verify_signature": False})
@@ -678,6 +692,7 @@ class AuthHandler:
                 "token_type": "Bearer",
                 "expires_in": TOKEN_EXPIRY_SECONDS,
                 "scope": scope,
+                "tenant": tenant,
             },
             status=200,
         )
@@ -704,7 +719,7 @@ class AuthHandler:
                 ],
                 "scopes_supported": list(SCOPES.keys()),
                 "claims_supported": [
-                    "iss", "sub", "aud", "exp", "iat", "scope", "jti",
+                    "iss", "sub", "aud", "exp", "iat", "scope", "jti", "tenant",
                 ],
             },
             headers={"Cache-Control": "public, max-age=86400"},

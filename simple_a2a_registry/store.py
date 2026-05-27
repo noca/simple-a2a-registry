@@ -63,6 +63,7 @@ class ClientRecord:
     agent_card_id: str = ""
     created_at: float = 0.0
     description: str = ""
+    tenant: str = ""
 
 
 @dataclass
@@ -89,7 +90,8 @@ CREATE TABLE IF NOT EXISTS agents (
     heartbeat_at    REAL NOT NULL DEFAULT 0,
     disabled        INTEGER NOT NULL DEFAULT 0,
     registered_at   TEXT NOT NULL,
-    created_at      REAL NOT NULL
+    created_at      REAL NOT NULL,
+    tenant_id       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS oauth_clients (
@@ -98,14 +100,16 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
     allowed_scopes      TEXT NOT NULL,
     agent_card_id       TEXT NOT NULL DEFAULT '',
     created_at          REAL NOT NULL,
-    description         TEXT NOT NULL DEFAULT ''
+    description         TEXT NOT NULL DEFAULT '',
+    tenant_id           TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS oauth_tokens (
     jti         TEXT PRIMARY KEY,
     client_id   TEXT NOT NULL,
     scope       TEXT NOT NULL,
-    expires_at  REAL NOT NULL
+    expires_at  REAL NOT NULL,
+    tenant_id   TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS auth_codes (
@@ -115,7 +119,8 @@ CREATE TABLE IF NOT EXISTS auth_codes (
     code_challenge_method   TEXT NOT NULL,
     redirect_uri            TEXT NOT NULL,
     scope                   TEXT NOT NULL,
-    created_at              REAL NOT NULL
+    created_at              REAL NOT NULL,
+    tenant_id               TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_client_id ON oauth_tokens(client_id);
@@ -133,7 +138,8 @@ CREATE TABLE IF NOT EXISTS agents (
     heartbeat_at    DOUBLE NOT NULL DEFAULT 0,
     disabled        TINYINT(1) NOT NULL DEFAULT 0,
     registered_at   VARCHAR(255) NOT NULL,
-    created_at      DOUBLE NOT NULL
+    created_at      DOUBLE NOT NULL,
+    tenant_id       VARCHAR(255) NOT NULL DEFAULT ''
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS oauth_clients (
@@ -142,14 +148,16 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
     allowed_scopes      TEXT NOT NULL,
     agent_card_id       VARCHAR(255) NOT NULL DEFAULT '',
     created_at          DOUBLE NOT NULL,
-    description         TEXT NOT NULL
+    description         TEXT NOT NULL,
+    tenant_id           VARCHAR(255) NOT NULL DEFAULT ''
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS oauth_tokens (
     jti         VARCHAR(255) PRIMARY KEY,
     client_id   VARCHAR(255) NOT NULL,
     scope       TEXT NOT NULL,
-    expires_at  DOUBLE NOT NULL
+    expires_at  DOUBLE NOT NULL,
+    tenant_id   VARCHAR(255) NOT NULL DEFAULT ''
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS auth_codes (
@@ -159,7 +167,8 @@ CREATE TABLE IF NOT EXISTS auth_codes (
     code_challenge_method   VARCHAR(255) NOT NULL,
     redirect_uri            TEXT NOT NULL,
     scope                   TEXT NOT NULL,
-    created_at              DOUBLE NOT NULL
+    created_at              DOUBLE NOT NULL,
+    tenant_id               VARCHAR(255) NOT NULL DEFAULT ''
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE INDEX idx_oauth_tokens_client_id ON oauth_tokens(client_id);
@@ -184,6 +193,15 @@ def _maybe_create_schema(engine: DatabaseEngine) -> None:
             engine.commit()
         except Exception:
             pass  # column already exists
+        # Migrate existing databases — add tenant_id to all tables
+        for tbl in ("agents", "oauth_clients", "oauth_tokens", "auth_codes"):
+            try:
+                engine.execute(
+                    f"ALTER TABLE {tbl} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''"
+                )
+                engine.commit()
+            except Exception:
+                pass  # column already exists
     elif engine.driver == "mysql":
         for statement in _SCHEMA_SQL_MYSQL.split(";"):
             stripped = statement.strip()
@@ -200,6 +218,15 @@ def _maybe_create_schema(engine: DatabaseEngine) -> None:
             engine.commit()
         except Exception:
             pass  # column already exists
+        # Migrate existing databases — add tenant_id to all tables
+        for tbl in ("agents", "oauth_clients", "oauth_tokens", "auth_codes"):
+            try:
+                engine.execute(
+                    f"ALTER TABLE {tbl} ADD COLUMN tenant_id VARCHAR(255) NOT NULL DEFAULT ''"
+                )
+                engine.commit()
+            except Exception:
+                pass  # column already exists
 
 
 # ======================================================================
@@ -370,14 +397,15 @@ class Store:
                         self._engine.execute(
                             "INSERT OR IGNORE INTO oauth_clients "
                             "(client_id, client_secret_hash, allowed_scopes, "
-                            " agent_card_id, created_at, description) "
-                            "VALUES (?,?,?,?,?,?)",
+                            " agent_card_id, created_at, description, tenant_id) "
+                            "VALUES (?,?,?,?,?,?,?)",
                             (cid,
                              rec["client_secret_hash"],
                              ",".join(rec.get("allowed_scopes", [])),
                              rec.get("agent_card_id", ""),
                              rec.get("created_at", 0),
-                             rec.get("description", "")),
+                             rec.get("description", ""),
+                             rec.get("tenant", "")),
                         )
                     for jti, rec in tokens.items():
                         self._engine.execute(
@@ -448,12 +476,12 @@ class Store:
             self._engine.execute(
                 "INSERT INTO oauth_clients "
                 "(client_id, client_secret_hash, allowed_scopes, "
-                " agent_card_id, created_at, description) "
-                "VALUES (?,?,?,?,?,?)",
+                " agent_card_id, created_at, description, tenant_id) "
+                "VALUES (?,?,?,?,?,?,?)",
                 ("simple-a2a-registry", secret_hash,
                  ",".join(SCOPES.keys()),
                  "simple-a2a-registry", time.time(),
-                 "Registry service account (auto-bootstrapped)"),
+                 "Registry service account (auto-bootstrapped)", ""),
             )
             self._engine.commit()
             logger.info(
@@ -472,6 +500,7 @@ class Store:
         skill: Optional[str] = None,
         tag: Optional[str] = None,
         q: Optional[str] = None,
+        tenant: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """List all agents, optionally filtered.
 
@@ -479,6 +508,8 @@ class Store:
             skill: Substring match against skill name or id.
             tag: Exact match against agent tags.
             q: Case-insensitive full-text search across the entire card.
+            tenant: Filter by tenant.  Pass ``None`` to see all (admin).
+                Pass ``''`` to query only agents with no tenant set.
 
         Returns:
             List of Agent Card dicts with ``status`` and ``lastHeartbeat``.
@@ -487,9 +518,14 @@ class Store:
         results: List[Dict[str, Any]] = []
 
         with self._tx("DEFERRED") as engine:
-            result = engine.execute("SELECT id, card_json, heartbeat_at, disabled FROM agents")
+            result = engine.execute("SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents")
             for row in result.fetchall():
                 agent_id = row["id"]
+                # Tenant filter
+                if tenant is not None:
+                    row_tenant = row["tenant_id"] or ""
+                    if row_tenant != tenant:
+                        continue
                 card = json.loads(row["card_json"])
                 last_hb = row["heartbeat_at"]
                 elapsed = now - last_hb if last_hb else HEARTBEAT_TIMEOUT + 1
@@ -519,21 +555,31 @@ class Store:
 
         return results
 
-    def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+    def get_agent(self, agent_id: str, tenant: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get a single agent's card with live status.
+
+        Args:
+            agent_id: The agent's unique identifier.
+            tenant: If set, only return the agent if it belongs to this tenant.
+                Pass ``None`` to skip tenant check (admin mode).
 
         Returns:
             Agent Card dict with ``status`` and ``lastHeartbeat``,
-            or ``None`` if the agent doesn't exist.
+            or ``None`` if the agent doesn't exist or tenant doesn't match.
         """
         with self._tx("DEFERRED") as engine:
             result = engine.execute(
-                "SELECT id, card_json, heartbeat_at, disabled FROM agents WHERE id=?",
+                "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE id=?",
                 (agent_id,),
             )
             row = result.fetchone()
             if row is None:
                 return None
+            # Tenant check
+            if tenant is not None:
+                row_tenant = row["tenant_id"] or ""
+                if row_tenant != tenant:
+                    return None
             card = json.loads(row["card_json"])
             card["id"] = row["id"]
             last_hb = row["heartbeat_at"]
@@ -547,11 +593,12 @@ class Store:
 
     # -- Mutations ------------------------------------------------------------
 
-    def register_agent(self, agent_card: Dict) -> str:
+    def register_agent(self, agent_card: Dict, tenant: str = "") -> str:
         """Register an external agent and set its first heartbeat.
 
         Args:
             agent_card: Agent Card dict (as per A2A spec).
+            tenant: Tenant namespace.  Pass ``''`` for no tenant.
 
         Returns:
             The assigned agent id.
@@ -562,11 +609,18 @@ class Store:
         registered_at = datetime.now(timezone.utc).isoformat()
         card_json = json.dumps(card.to_dict(), ensure_ascii=False)
 
+        # Extract tenant from AgentInterface if not explicitly provided
+        if not tenant:
+            for iface in card.supported_interfaces:
+                if iface.tenant:
+                    tenant = iface.tenant
+                    break
+
         with self._tx() as engine:
             engine.execute(
-                "INSERT INTO agents (id, card_json, heartbeat_at, registered_at, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (agent_id, card_json, now_ts, registered_at, now_ts),
+                "INSERT INTO agents (id, card_json, heartbeat_at, registered_at, created_at, tenant_id) "
+                "VALUES (?,?,?,?,?,?)",
+                (agent_id, card_json, now_ts, registered_at, now_ts, tenant),
             )
 
         return agent_id
@@ -666,6 +720,7 @@ class Store:
         agent_card_id: str = "",
         allowed_scopes: Optional[List[str]] = None,
         description: str = "",
+        tenant: str = "",
     ) -> Dict[str, str]:
         """Register a new OAuth 2.1 client.
 
@@ -680,26 +735,35 @@ class Store:
             engine.execute(
                 "INSERT INTO oauth_clients "
                 "(client_id, client_secret_hash, allowed_scopes, "
-                " agent_card_id, created_at, description) "
-                "VALUES (?,?,?,?,?,?)",
+                " agent_card_id, created_at, description, tenant_id) "
+                "VALUES (?,?,?,?,?,?,?)",
                 (client_id, secret_hash,
                  ",".join(allowed_scopes or list(SCOPES.keys())),
-                 agent_card_id, time.time(), description),
+                 agent_card_id, time.time(), description, tenant),
             )
 
         return {"client_id": client_id, "client_secret": client_secret}
 
-    def list_clients(self) -> List[Dict[str, Any]]:
+    def list_clients(self, tenant: Optional[str] = None) -> List[Dict[str, Any]]:
         """List all registered OAuth clients with token counts.
+
+        Args:
+            tenant: Filter by tenant.  Pass ``None`` to see all (admin).
 
         Returns:
             List of dicts with client metadata + active token count.
         """
         now = time.time()
         with self._tx("DEFERRED") as engine:
-            result = engine.execute(
-                "SELECT * FROM oauth_clients ORDER BY client_id"
-            )
+            if tenant is not None:
+                result = engine.execute(
+                    "SELECT * FROM oauth_clients WHERE tenant=? ORDER BY client_id",
+                    (tenant,),
+                )
+            else:
+                result = engine.execute(
+                    "SELECT * FROM oauth_clients ORDER BY client_id"
+                )
             rows = result.fetchall()
             result_list = []
             for row in rows:
@@ -714,6 +778,7 @@ class Store:
                     "client_id": cid,
                     "agent_card_id": row["agent_card_id"],
                     "description": row["description"],
+                    "tenant_id": row.get("tenant_id", ""),
                     "scopes": row["allowed_scopes"].split(",") if row["allowed_scopes"] else [],
                     "token_count": token_count,
                     "created_at": row["created_at"],
@@ -749,6 +814,7 @@ class Store:
                 agent_card_id=row["agent_card_id"],
                 created_at=row["created_at"],
                 description=row["description"],
+                tenant_id=row.get("tenant_id", ""),
             )
 
     def verify_client_secret(self, client_id: str, secret: str) -> bool:
