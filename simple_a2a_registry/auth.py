@@ -28,6 +28,7 @@ from aiohttp import web
 from simple_a2a_registry.store import Store as AuthStore  # noqa: F401
 from simple_a2a_registry.store import ClientRecord, TokenRecord  # noqa: F401
 from simple_a2a_registry.store import SCOPES, AUTH_CODE_EXPIRY_SECONDS
+from simple_a2a_registry.audit import AuditStore, EventType
 from simple_a2a_registry.metrics import record_auth_operation
 
 logger = logging.getLogger("a2a_registry.auth")
@@ -293,6 +294,7 @@ def _auth_middleware_factory(
     public_key: str,
     algorithm: str = "RS256",
     issuer: str = ISSUER,
+    audit_store: Optional[AuditStore] = None,
 ) -> Callable:
     """Create an aiohttp auth middleware.
 
@@ -300,9 +302,15 @@ def _auth_middleware_factory(
     - ``/auth/*`` — token endpoint is public
     - ``/.well-known/*`` — discovery endpoints are public
     - ``/health`` — health check is public
+    - ``/login``, ``/api/login``, ``/api/logout`` — user login is public
+    - ``/api/me`` — current user info
+    - ``/favicon.ico``, ``/static/login.html`` — static assets
     - ``/`` — dashboard is public
 
     When ``enabled=False``, the middleware is a no-op pass-through.
+
+    Args:
+        audit_store: Optional :class:`AuditStore` for logging AUTH_FAILURE events.
     """
 
     @web.middleware
@@ -325,6 +333,12 @@ def _auth_middleware_factory(
             or path == "/health"
             or path == "/"
             or path == "/metrics"
+            or path == "/login"
+            or path == "/api/login"
+            or path == "/api/logout"
+            or path == "/api/me"
+            or path == "/favicon.ico"
+            or path == "/static/login.html"
             # WebSocket upgrade — token passed via ?token=xxx query param
             or path.endswith("/ws")
             # JWKS endpoint — public key distribution
@@ -336,6 +350,14 @@ def _auth_middleware_factory(
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             record_auth_operation("token_validate", success=False)
+            if audit_store is not None:
+                audit_store.log(
+                    event_type=EventType.AUTH_FAILURE.value,
+                    actor=request.remote or "unknown",
+                    target=request.path,
+                    detail="Missing or invalid Authorization header",
+                    success=False,
+                )
             return web.json_response(
                 {"error": "unauthorized", "detail": "Missing or invalid Authorization header"},
                 status=401,
@@ -351,6 +373,14 @@ def _auth_middleware_factory(
         )
         if payload is None:
             record_auth_operation("token_validate", success=False)
+            if audit_store is not None:
+                audit_store.log(
+                    event_type=EventType.AUTH_FAILURE.value,
+                    actor=request.remote or "unknown",
+                    target=request.path,
+                    detail="Token expired or invalid",
+                    success=False,
+                )
             return web.json_response(
                 {"error": "invalid_token", "detail": "Token expired or invalid"},
                 status=401,
@@ -420,11 +450,13 @@ class AuthHandler:
         private_key: str,
         algorithm: str = "RS256",
         base_url: str = "http://localhost:8321",
+        audit_store: Optional[AuditStore] = None,
     ) -> None:
         self.auth_store = auth_store
         self.private_key = private_key
         self.algorithm = algorithm
         self.base_url = base_url.rstrip("/")
+        self.audit_store = audit_store
 
     async def handle_register(self, request: web.Request) -> web.Response:
         """POST /auth/register — register a new OAuth 2.1 client.
@@ -466,12 +498,21 @@ class AuthHandler:
                         {"error": "invalid_scope", "detail": f"Unknown scope: {s}"},
                         status=400,
                     )
-
         result = self.auth_store.register_client(
             agent_card_id=agent_card_id,
             allowed_scopes=allowed_scopes,
             description=description,
         )
+
+        if self.audit_store is not None:
+            self.audit_store.log(
+                event_type=EventType.CLIENT_CREATE.value,
+                actor=request.remote or "unknown",
+                target=result.get("client_id", "unknown"),
+                detail=f"agent_card_id={agent_card_id} scopes={allowed_scopes or list(SCOPES.keys())}",
+                success=True,
+            )
+
         return web.json_response(
             {
                 "client_id": result["client_id"],
@@ -565,6 +606,15 @@ class AuthHandler:
         )
         self.auth_store.record_token(payload)
 
+        if self.audit_store is not None:
+            self.audit_store.log(
+                event_type=EventType.TOKEN_ISSUE.value,
+                actor=client_id,
+                target=scope or "all",
+                detail=f"grant_type=client_credentials jti={payload.get('jti', '')}",
+                success=True,
+            )
+
         return web.json_response(
             {
                 "access_token": token,
@@ -612,6 +662,15 @@ class AuthHandler:
 
         payload = jwt.decode(token, options={"verify_signature": False})
         self.auth_store.record_token(payload)
+
+        if self.audit_store is not None:
+            self.audit_store.log(
+                event_type=EventType.TOKEN_ISSUE.value,
+                actor=client_id,
+                target=scope or "all",
+                detail=f"grant_type=authorization_code jti={payload.get('jti', '')}",
+                success=True,
+            )
 
         return web.json_response(
             {
