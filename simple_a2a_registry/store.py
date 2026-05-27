@@ -508,11 +508,10 @@ class Store:
             skill: Substring match against skill name or id.
             tag: Exact match against agent tags.
             q: Case-insensitive full-text search across the entire card.
-            tenant: Filter by tenant.  Pass ``None`` to see all (admin).
-                Pass ``''`` to query only agents with no tenant set.
-                When filtering by a non-empty tenant, agents with empty
-                tenant_id (pre-tenant-isolation legacy data) are also
-                returned for backward compatibility.
+            tenant: Filter by tenant.  Pass ``None`` or ``''`` to see all (admin).
+                Pass a non-empty tenant string to filter; empty-tenant agents
+                (pre-tenant-isolation legacy data) are also returned for
+                backward compatibility.
 
         Returns:
             List of Agent Card dicts with ``status`` and ``lastHeartbeat``.
@@ -527,7 +526,13 @@ class Store:
                 result = engine.execute(
                     "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE (tenant_id=? OR tenant_id='')", (tenant,),
                 )
+            elif tenant == "":
+                # Empty string = backward compat: only empty-tenant agents
+                result = engine.execute(
+                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE (tenant_id='' OR tenant_id IS NULL)"
+                )
             else:
+                # None = no tenant filter = all agents (admin scope)
                 result = engine.execute("SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents")
             for row in result.fetchall():
                 agent_id = row["id"]
@@ -537,8 +542,10 @@ class Store:
                 card["id"] = agent_id
                 if row.get("disabled"):
                     card["status"] = "disabled"
+                    card["disabled"] = True
                 else:
                     card["status"] = "alive" if elapsed <= HEARTBEAT_TIMEOUT else "stale"
+                    card["disabled"] = False
                 card["lastHeartbeat"] = last_hb
                 card["tenant"] = row.get("tenant_id", "") or ""
 
@@ -581,6 +588,10 @@ class Store:
                 result = engine.execute(
                     "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE id=? AND (tenant_id=? OR tenant_id='')", (agent_id, tenant),
                 )
+            elif tenant == "":
+                result = engine.execute(
+                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE id=? AND (tenant_id='' OR tenant_id IS NULL)", (agent_id,),
+                )
             else:
                 result = engine.execute(
                     "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE id=?", (agent_id,),
@@ -600,9 +611,11 @@ class Store:
             elapsed = time.time() - last_hb if last_hb else HEARTBEAT_TIMEOUT + 1
             if row.get("disabled"):
                 card["status"] = "disabled"
+                card["disabled"] = True
             else:
                 is_alive = elapsed <= HEARTBEAT_TIMEOUT
                 card["status"] = "alive" if is_alive else "stale"
+                card["disabled"] = False
             return card
 
     # -- Mutations ------------------------------------------------------------
@@ -810,6 +823,143 @@ class Store:
             }
         return stats
 
+    def list_tenants(self) -> List[str]:
+        """Return a list of all distinct tenant IDs across the agents table.
+
+        Returns:
+            List of tenant ID strings.  Empty string represents agents
+            that were registered without a tenant.
+        """
+        with self._tx("DEFERRED") as engine:
+            result = engine.execute(
+                "SELECT DISTINCT tenant_id FROM agents ORDER BY tenant_id"
+            )
+            return [row["tenant_id"] or "" for row in result.fetchall()]
+
+    def tenant_stats(self) -> Dict[str, Any]:
+        """Return registry statistics grouped by domain (agents, oauth).
+
+        Returns:
+            Dict with keys ``agents`` and ``oauth``::
+
+                {
+                    "agents": {
+                        "by_tenant": {
+                            "tenant1": {"totalAgents": 5, "aliveAgents": 3, ...},
+                            ...
+                        },
+                        "summary": {"total": N, "alive": M, "stale": K},
+                    },
+                    "oauth": {
+                        "by_tenant": {...},
+                        "summary": {"totalClients": N, "totalTokens": M, "activeTokens": K},
+                    },
+                }
+        """
+        now = time.time()
+        with self._tx("DEFERRED") as engine:
+            # --- Agent stats by tenant ---
+            result = engine.execute(
+                "SELECT tenant_id, COUNT(*) AS cnt FROM agents GROUP BY tenant_id"
+            )
+            total_by_tenant: Dict[str, int] = {}
+            for row in result.fetchall():
+                tid = row["tenant_id"] or ""
+                total_by_tenant[tid] = row["cnt"]
+
+            result = engine.execute(
+                "SELECT tenant_id, COUNT(*) AS cnt FROM agents "
+                "WHERE ? - heartbeat_at <= ? GROUP BY tenant_id",
+                (now, HEARTBEAT_TIMEOUT),
+            )
+            alive_by_tenant: Dict[str, int] = {}
+            for row in result.fetchall():
+                tid = row["tenant_id"] or ""
+                alive_by_tenant[tid] = row["cnt"]
+
+            all_tenants = set(total_by_tenant.keys()) | set(alive_by_tenant.keys())
+            agents_by_tenant: Dict[str, Dict[str, int]] = {}
+            total_agents = 0
+            total_alive = 0
+            for tid in all_tenants:
+                total = total_by_tenant.get(tid, 0)
+                alive = alive_by_tenant.get(tid, 0)
+                agents_by_tenant[tid] = {
+                    "totalAgents": total,
+                    "aliveAgents": alive,
+                    "staleAgents": total - alive,
+                }
+                total_agents += total
+                total_alive += alive
+
+            # --- OAuth stats by tenant ---
+            result = engine.execute(
+                "SELECT tenant_id, COUNT(*) AS cnt FROM oauth_clients GROUP BY tenant_id"
+            )
+            clients_by_tenant: Dict[str, int] = {}
+            for row in result.fetchall():
+                tid = row["tenant_id"] or ""
+                clients_by_tenant[tid] = row["cnt"]
+
+            result = engine.execute(
+                "SELECT tenant_id, COUNT(*) AS cnt FROM oauth_tokens GROUP BY tenant_id"
+            )
+            tokens_by_tenant: Dict[str, int] = {}
+            for row in result.fetchall():
+                tid = row["tenant_id"] or ""
+                tokens_by_tenant[tid] = row["cnt"]
+
+            result = engine.execute(
+                "SELECT tenant_id, COUNT(*) AS cnt FROM oauth_tokens "
+                "WHERE expires_at > ? GROUP BY tenant_id",
+                (now,),
+            )
+            active_tokens_by_tenant: Dict[str, int] = {}
+            for row in result.fetchall():
+                tid = row["tenant_id"] or ""
+                active_tokens_by_tenant[tid] = row["cnt"]
+
+            all_oauth_tenants = (
+                set(clients_by_tenant.keys())
+                | set(tokens_by_tenant.keys())
+                | set(active_tokens_by_tenant.keys())
+            )
+            oauth_by_tenant: Dict[str, Dict[str, int]] = {}
+            total_clients = 0
+            total_tokens = 0
+            total_active = 0
+            for tid in all_oauth_tenants:
+                tc = clients_by_tenant.get(tid, 0)
+                tt = tokens_by_tenant.get(tid, 0)
+                ta = active_tokens_by_tenant.get(tid, 0)
+                oauth_by_tenant[tid] = {
+                    "totalClients": tc,
+                    "totalTokens": tt,
+                    "activeTokens": ta,
+                }
+                total_clients += tc
+                total_tokens += tt
+                total_active += ta
+
+        return {
+            "agents": {
+                "by_tenant": agents_by_tenant,
+                "summary": {
+                    "total": total_agents,
+                    "alive": total_alive,
+                    "stale": total_agents - total_alive,
+                },
+            },
+            "oauth": {
+                "by_tenant": oauth_by_tenant,
+                "summary": {
+                    "totalClients": total_clients,
+                    "totalTokens": total_tokens,
+                    "activeTokens": total_active,
+                },
+            },
+        }
+
     # ======================================================================
     # OAuth — client & token management
     # ======================================================================
@@ -859,7 +1009,7 @@ class Store:
         with self._tx("DEFERRED") as engine:
             if tenant is not None:
                 result = engine.execute(
-                    "SELECT * FROM oauth_clients WHERE tenant=? ORDER BY client_id",
+                    "SELECT * FROM oauth_clients WHERE tenant_id=? ORDER BY client_id",
                     (tenant,),
                 )
             else:
@@ -880,7 +1030,7 @@ class Store:
                     "client_id": cid,
                     "agent_card_id": row["agent_card_id"],
                     "description": row["description"],
-                    "tenant_id": row.get("tenant_id", ""),
+                    "tenant": row.get("tenant_id", ""),
                     "scopes": row["allowed_scopes"].split(",") if row["allowed_scopes"] else [],
                     "token_count": token_count,
                     "created_at": row["created_at"],

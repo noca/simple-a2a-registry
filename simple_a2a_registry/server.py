@@ -202,7 +202,8 @@ class RegistryHandler:
         if qp_tenant is not None and (not auth_tenant):
             tenant = qp_tenant
         else:
-            tenant = auth_tenant
+            # auth_tenant is None (no auth), "" (admin -> see all), or "tenant-a" (normal)
+            tenant = auth_tenant or None
         all_agents = self.store.list_agents(skill=skill, tag=tag, q=q, tenant=tenant)
         total = len(all_agents)
         page = all_agents[offset:offset + limit]
@@ -231,8 +232,10 @@ class RegistryHandler:
         qp_tenant = request.query.get("tenant", None)
         if qp_tenant is not None and (not auth_tenant):
             tenant = qp_tenant
-        elif auth_tenant is not None:
+        elif auth_tenant:
             tenant = auth_tenant
+        elif auth_tenant is not None:  # auth is empty string (admin scope)
+            tenant = None
         else:
             tenant = request.headers.get("X-Tenant-ID", None)
         card = self.store.get_agent(agent_id, tenant=tenant)
@@ -304,6 +307,34 @@ class RegistryHandler:
             "card": card,
         }
 
+        # Auto-create OAuth client if the agent card includes security_schemes
+        security_schemes = body.get("security_schemes", {})
+        if security_schemes and self.auth_store:
+            # Determine scopes from all OAuth flows
+            oauth_scopes = set()
+            for _scheme_name, scheme in security_schemes.items():
+                if isinstance(scheme, dict) and scheme.get("scheme_type") == "oauth2":
+                    oauth_flows = scheme.get("oauth2", {}).get("flows", {})
+                    for _flow_name, flow in oauth_flows.items():
+                        if isinstance(flow, dict):
+                            oauth_scopes.update(flow.get("scopes", {}).keys())
+            allowed_scopes = list(oauth_scopes) if oauth_scopes else None
+
+            client_result = self.auth_store.register_client(
+                agent_card_id=agent_id,
+                allowed_scopes=allowed_scopes,
+                description=f"Auto-created client for agent '{name}'",
+                tenant=tenant if tenant else "",
+            )
+
+            client = self.auth_store.get_client(client_result["client_id"])
+            response["client"] = {
+                "client_id": client_result["client_id"],
+                "client_secret": client_result["client_secret"],
+                "scopes": client.allowed_scopes if client else (allowed_scopes or list(SCOPES.keys())),
+                "tenant": client.tenant if client else (tenant or ""),
+            }
+
         if self.audit_store is not None:
             self.audit_store.log(
                 event_type=EventType.AGENT_REGISTER.value,
@@ -370,7 +401,14 @@ class RegistryHandler:
         The heartbeat only succeeds if the agent belongs to the caller's tenant.
         """
         agent_id = request.match_info["agent_id"]
-        tenant = request["tenant"] if "tenant" in request else request.query.get("tenant", None)
+        # Auth middleware sets request['tenant']='' for admin scope;
+        # convert '' to None so get_agent doesn't filter by empty tenant.
+        auth_tenant = request["tenant"] if "tenant" in request else None
+        qp_tenant = request.query.get("tenant", None)
+        if qp_tenant is not None and (not auth_tenant):
+            tenant = qp_tenant
+        else:
+            tenant = auth_tenant or None  # "" (admin) → None (all tenants)
         card = self.store.get_agent(agent_id, tenant=tenant)
         if card is None:
             return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
@@ -915,6 +953,7 @@ class AdminHandler:
                 "client_secret": result["client_secret"],
                 "agent_card_id": client.agent_card_id if client else agent_card_id,
                 "scopes": client.allowed_scopes if client else (allowed_scopes or list(SCOPES.keys())),
+                "tenant": client.tenant if client else "",
                 "created_at": client.created_at if client else 0.0,
             },
             status=201,
@@ -1345,7 +1384,12 @@ def create_app(
         logger.info("Audit store initialised (retention=%d days)", retention_days)
     else:
         _shared_engine = None
-        audit_store = None
+        resolved = Path(data_dir).expanduser().resolve()
+        _legacy_engine = SQLiteEngine(str(resolved / "registry.db"))
+        _legacy_engine.connect()
+        _maybe_create_audit_schema(_legacy_engine, 90)
+        audit_store = AuditStore(_legacy_engine, retention_days=90)
+        logger.info("Audit store initialised (retention=90 days, legacy path)")
 
     store = Store(_shared_engine if _shared_engine is not None else data_dir, bootstrap_secret=bootstrap_secret)
     handler = RegistryHandler(store, base_url, audit_store=audit_store)

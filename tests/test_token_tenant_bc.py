@@ -15,7 +15,7 @@ import shutil
 from typing import AsyncGenerator, Generator
 
 from aiohttp.test_utils import TestClient, TestServer
-from simple_a2a_registry.app import create_app
+from simple_a2a_registry.server import create_app
 from simple_a2a_registry.store import Store, SCOPES, AUTH_CODE_EXPIRY_SECONDS
 
 
@@ -32,11 +32,34 @@ async def app_with_client(tmpdir_obj) -> AsyncGenerator:
     """Create an app fixture with a test client for backwards compatibility tests."""
     data_dir = tmpdir_obj
 
-    # Start app with auth enabled
+    # Start app with auth disabled for backward compat E2E tests
+    app = create_app(
+        data_dir=data_dir,
+        base_url="http://localhost:8321",
+        auth_enabled=False,
+        user_session_enabled=False,
+    )
+    auth_handler = None
+
+    server = TestServer(app)
+    await server.start_server()
+    client = TestClient(server)
+
+    yield app, client, auth_handler, data_dir
+
+    await server.close()
+
+
+@pytest.fixture
+async def app_with_client_auth(tmpdir_obj) -> AsyncGenerator:
+    """Create an app fixture with auth enabled for token scope tests."""
+    data_dir = tmpdir_obj
+
     app = create_app(
         data_dir=data_dir,
         base_url="http://localhost:8321",
         auth_enabled=True,
+        bootstrap_secret="test-bootstrap-secret",
         user_session_enabled=False,
     )
     auth_handler = app["auth_handler"]
@@ -232,7 +255,7 @@ class TestTenantE2E:
             },
         )
         assert resp.status == 201
-        agent_id = (await resp.json())["agent_id"]
+        agent_id = (await resp.json())["id"]
 
         resp = await client.post(f"/agents/{agent_id}/heartbeat")
         assert resp.status == 200
@@ -261,7 +284,7 @@ class TestTenantE2E:
             },
         )
         assert resp.status == 201
-        agent_id = (await resp.json())["agent_id"]
+        agent_id = (await resp.json())["id"]
 
         resp = await client.delete(f"/agents/{agent_id}")
         assert resp.status == 200
@@ -302,9 +325,9 @@ class TestTokenScopeTenant:
     """Token with scope and tenant integration tests."""
 
     @pytest.mark.asyncio
-    async def test_token_with_scope(self, app_with_client):
+    async def test_token_with_scope(self, app_with_client_auth):
         """Issuing tokens with specific scopes."""
-        app, client, auth_handler, data_dir = app_with_client
+        app, client, auth_handler, data_dir = app_with_client_auth
 
         resp = await client.post(
             "/auth/token",
@@ -320,9 +343,9 @@ class TestTokenScopeTenant:
         assert "access_token" in data
 
     @pytest.mark.asyncio
-    async def test_invalid_scope_rejected(self, app_with_client):
+    async def test_invalid_scope_rejected(self, app_with_client_auth):
         """Requesting unauthorized scopes should be rejected."""
-        app, client, auth_handler, data_dir = app_with_client
+        app, client, auth_handler, data_dir = app_with_client_auth
 
         resp = await client.post(
             "/auth/token",

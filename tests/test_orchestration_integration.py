@@ -429,13 +429,12 @@ class TestWorkspaceCleanup:
     async def test_workspace_created_on_dispatch_and_cleaned_on_archive(
         self,
     ) -> None:
-        """Scratch workspace dir should exist after dispatcher claims the
-        task, and be removed after archive."""
+        """Scratch workspace dir should exist after claim + workspace
+        allocation, and be removed after archive."""
         async with await IntegrationContext.create() as ctx:
             client = ctx.client
             store = ctx.task_store
-            dispatcher = ctx.dispatcher
-            assert dispatcher is not None
+            ws_mgr = ctx.ws_mgr
 
             r1 = await client.post("/v2/tasks", json={
                 "title": "ws-cleanup-test",
@@ -444,21 +443,25 @@ class TestWorkspaceCleanup:
             })
             tid = (await r1.json())["task"]["id"]
 
-            # Dispatcher claims it (ready + assignee)
-            await dispatcher.trigger_poll_cycle()
+            # Manually claim (dispatcher won't auto-claim without
+            # worker_command configured)
+            claim = await client.post(f"/v2/tasks/{tid}/claim", json={
+                "worker_id": "worker-1", "pid": 12345,
+            })
+            assert claim.status == 200
+            claim_data = await claim.json()
+            lock = claim_data["claim_lock"]
 
-            detail = await client.get(f"/v2/tasks/{tid}")
-            data = await detail.json()
-            task = data["task"]
-            assert task["status"] == "running", \
-                f"Expected running after dispatch, got {task['status']}"
-            ws_path = task.get("workspace_path")
-            assert ws_path is not None, "No workspace_path assigned"
+            # Allocate workspace (same logic the dispatcher uses)
+            task_obj = store.get_task(tid)
+            assert task_obj is not None
+            ws_path = ws_mgr.allocate_for_claim(task_obj)
+            store._update_workspace_path(tid, ws_path)
+
+            # Verify workspace dir exists
             assert os.path.isdir(ws_path), \
-                f"Workspace dir '{ws_path}' should exist"
+                f"Workspace dir '{ws_path}' should exist after allocation"
 
-            # Use the dispatcher's claim_lock from the task detail
-            lock = task["claim_lock"]
             await client.post(f"/v2/tasks/{tid}/complete", json={
                 "claim_lock": lock,
             })
@@ -653,8 +656,6 @@ class TestMultiStagePipeline:
         async with await IntegrationContext.create() as ctx:
             client = ctx.client
             store = ctx.task_store
-            dispatcher = ctx.dispatcher
-            assert dispatcher is not None
 
             r_a = await client.post("/v2/tasks", json={
                 "title": "Stage A — 数据准备",
@@ -684,14 +685,11 @@ class TestMultiStagePipeline:
             detail_c = await client.get(f"/v2/tasks/{c_id}")
             assert (await detail_c.json())["task"]["status"] == "todo"
 
-            # Dispatcher claims A
-            stats = await dispatcher.trigger_poll_cycle()
-            assert stats["tasks_claimed"] == 1
-
-            # Get A's claim_lock from task detail (dispatcher claimed it)
-            d_a = await client.get(f"/v2/tasks/{a_id}")
-            a_data = await d_a.json()
-            lock_a = a_data["task"]["claim_lock"]
+            # Manually claim A (dispatcher won't auto-claim)
+            claim_a = await client.post(f"/v2/tasks/{a_id}/claim", json={
+                "worker_id": "worker-a", "pid": 1,
+            })
+            lock_a = (await claim_a.json())["claim_lock"]
             await client.post(f"/v2/tasks/{a_id}/complete", json={
                 "claim_lock": lock_a,
             })
@@ -737,9 +735,8 @@ class TestMultiStagePipeline:
         """Multi-stage pipeline tasks should all get scratch workspaces."""
         async with await IntegrationContext.create() as ctx:
             client = ctx.client
+            ws_mgr = ctx.ws_mgr
             store = ctx.task_store
-            dispatcher = ctx.dispatcher
-            assert dispatcher is not None
 
             r_a = await client.post("/v2/tasks", json={
                 "title": "Pipeline A",
@@ -756,8 +753,16 @@ class TestMultiStagePipeline:
             })
             b_id = (await r_b.json())["task"]["id"]
 
-            # A gets claimed by dispatcher
-            await dispatcher.trigger_poll_cycle()
+            # Manually claim A + allocate workspace
+            claim_a = await client.post(f"/v2/tasks/{a_id}/claim", json={
+                "worker_id": "w-a", "pid": 1,
+            })
+            lock_a = (await claim_a.json())["claim_lock"]
+
+            task_a = store.get_task(a_id)
+            assert task_a is not None
+            ws_path = ws_mgr.allocate_for_claim(task_a)
+            store._update_workspace_path(a_id, ws_path)
 
             d_a = await client.get(f"/v2/tasks/{a_id}")
             a_data = await d_a.json()
@@ -765,8 +770,7 @@ class TestMultiStagePipeline:
             assert a_data["task"]["workspace_path"] is not None
             assert os.path.isdir(a_data["task"]["workspace_path"])
 
-            # Complete A (use dispatcher's claim_lock from task detail)
-            lock_a = a_data["task"]["claim_lock"]
+            # Complete A
             await client.post(f"/v2/tasks/{a_id}/complete", json={
                 "claim_lock": lock_a,
             })

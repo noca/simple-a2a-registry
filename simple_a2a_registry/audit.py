@@ -145,6 +145,10 @@ def _maybe_create_audit_schema(engine: DatabaseEngine, retention_days: int = DEF
     ``_maybe_create_schema`` functions in the project, and to make
     the idempotency contract explicit in the name.
 
+    Also migrates existing tables that were created before the
+    ``tenant_id`` column was introduced (e.g. stale ``registry.db``
+    files from an older schema version).
+
     Args:
         engine:         Database engine (SQLite or MySQL).
         retention_days: Default event retention period.  Only stored as
@@ -152,6 +156,15 @@ def _maybe_create_audit_schema(engine: DatabaseEngine, retention_days: int = DEF
     """
     if engine.driver == "sqlite":
         engine.executescript(_AUDIT_SCHEMA_SQLITE)
+        # Migration: add tenant_id to existing tables created before
+        # the column was introduced (SQLite silently ignores duplicate
+        # columns via PRAGMA check).
+        try:
+            engine.execute(
+                f"ALTER TABLE {AUDIT_TABLE_NAME} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''"
+            )
+        except Exception:
+            pass  # column already exists
         engine.commit()
     elif engine.driver == "mysql":
         for statement in _AUDIT_SCHEMA_MYSQL.split(";"):
@@ -162,6 +175,13 @@ def _maybe_create_audit_schema(engine: DatabaseEngine, retention_days: int = DEF
                 engine.execute(stripped)
             except Exception:
                 pass  # ignore "already exists" errors
+        # Migration: add tenant_id for MySQL
+        try:
+            engine.execute(
+                f"ALTER TABLE {AUDIT_TABLE_NAME} ADD COLUMN tenant_id VARCHAR(255) NOT NULL DEFAULT ''"
+            )
+        except Exception:
+            pass
         engine.commit()
     logger.info(
         "Audit schema ready (retention=%d days)",

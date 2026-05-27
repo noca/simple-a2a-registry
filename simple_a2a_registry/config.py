@@ -12,6 +12,7 @@ auto-masked with ``***`` when printing the config summary at startup.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from dataclasses import dataclass, field, fields, asdict
@@ -20,7 +21,19 @@ from typing import Any, Dict, Optional, Set
 
 import yaml
 
-logger: Any = None  # set by cli.py after logging config
+logger = logging.getLogger(__name__)
+
+
+def _log(lvl: str, msg: str, *a: Any) -> None:
+    """Log a message via the standard library logging."""
+    log_fn = getattr(logger, lvl, None)
+    if log_fn:
+        if a:
+            log_fn(msg % a)
+        else:
+            log_fn(msg)
+    else:
+        print(f"[{lvl.upper()}] {msg % a if a else msg}", file=sys.stderr)
 
 # ---------------------------------------------------------------------------
 # Nested data-classes mirroring the YAML sections
@@ -84,6 +97,11 @@ class RateLimitConfig:
 
 
 @dataclass
+class AuditConfig:
+    retention_days: int = 90
+
+
+@dataclass
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
@@ -92,6 +110,7 @@ class Config:
     orchestration: OrchestrationConfig = field(default_factory=OrchestrationConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
+    audit: AuditConfig = field(default_factory=AuditConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +206,7 @@ def _dict_to_config(d: Dict[str, Any], cfg: Config) -> Config:
         "orchestration": cfg.orchestration,
         "monitoring": cfg.monitoring,
         "rate_limit": cfg.rate_limit,
+        "audit": cfg.audit,
     }
 
     for section_name, section_data in d.items():
@@ -287,14 +307,3 @@ def config_summary(cfg: Config) -> str:
 
     masked = _mask(d)
     return yaml.dump(masked, default_flow_style=False, sort_keys=False).strip()
-
-
-def _log(level: str, msg: str, *args: Any) -> None:
-    """Emit a log message if ``logger`` is configured, otherwise print."""
-    global logger
-    if logger is not None:
-        getattr(logger, level, logger.info)(msg, *args)
-    elif level in ("warning", "error"):
-        print(f"[config] {level}: {msg % args}", file=sys.stderr)
-    else:
-        pass  # info/debug — silent until logger is wired up

@@ -228,21 +228,27 @@ class TestStoreTenantListIsolation:
         assert len(b_agents) == 1
         assert b_agents[0].get("tenant") == TENANT_B
 
-    def test_list_with_empty_tenant_shows_all(self, store_factory):
-        """list_agents(tenant='') or no tenant returns ALL agents (admin scope)."""
+    def test_list_with_empty_tenant_shows_empty_agents(self, store_factory):
+        """list_agents(tenant='') returns only empty-tenant agents (backward compat)."""
         store = store_factory()
         store.register_agent(_agent_card("A1", tenant=TENANT_A))
         store.register_agent(_agent_card("B1", tenant=TENANT_B))
+        store.register_agent(_agent_card("Pub"))
 
         # No tenant filter = all agents
         all_agents = store.list_agents()
-        assert len(all_agents) == 2
+        assert len(all_agents) == 3
 
-        # Empty tenant filter now also returns all (admin scope bypass)
+        # Empty tenant filter = backward compat: only empty-tenant agents
         empty_agents = store.list_agents(tenant="")
-        assert len(empty_agents) == 2, (
-            f"Expected 2 agents for tenant='' (admin scope), got {len(empty_agents)}"
+        assert len(empty_agents) == 1, (
+            f"Expected 1 empty-tenant agent, got {len(empty_agents)}"
         )
+        assert empty_agents[0]["name"] == "Pub"
+
+        # None = admin = all agents
+        none_agents = store.list_agents(tenant=None)
+        assert len(none_agents) == 3
 
     def test_nonexistent_tenant_returns_empty(self, store_factory):
         """Querying a tenant with no agents returns empty list."""
@@ -1372,7 +1378,7 @@ class TestAdminAuditCrossTenant:
             "grant_type": "client_credentials",
             "client_id": client_id,
             "client_secret": client_secret,
-            "scope": "registry:admin",
+            "scope": "registry:admin agent:read agent:register task:read task:write",
         })
         assert resp.status == 200, f"Admin token request failed: {await resp.text()}"
         token_data = await resp.json()

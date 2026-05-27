@@ -220,6 +220,7 @@ class A2AClient:
         client_id: str = "",
         client_secret: str = "",
         *,
+        tenant: str = "",
         auth_enabled: Optional[bool] = None,
         scope: str = "task:read task:write agent:read agent:register",
         timeout: int = DEFAULT_TIMEOUT,
@@ -229,6 +230,7 @@ class A2AClient:
         self._base_url = registry_url.rstrip("/")
         self._client_id = client_id
         self._client_secret = client_secret
+        self._tenant = tenant
         self._timeout = timeout
         self._verify_ssl = verify_ssl
         self._user_agent = user_agent
@@ -258,6 +260,54 @@ class A2AClient:
 
         # Sync session (lazy)
         self._sync_session: Any = None
+
+    # ------------------------------------------------------------------
+    # Tenant selection
+    # ------------------------------------------------------------------
+
+    @property
+    def tenant(self) -> str:
+        """Currently selected tenant for multi-tenant isolation.
+
+        When set to a non-empty string, all subsequent API calls will
+        automatically include ``?tenant=<value>`` query parameter so the
+        Registry filters by this tenant.
+
+        Returns:
+            The currently selected tenant, or ``""`` if none is selected.
+        """
+        return self._tenant
+
+    @tenant.setter
+    def tenant(self, value: str) -> None:
+        """Select a tenant for subsequent API calls."""
+        self._tenant = value
+
+    def _tenant_params(self) -> Dict[str, str]:
+        """Build query-param dict with ``tenant`` when a tenant is selected.
+
+        Use this in ``params=`` argument of requests/aiohttp calls to
+        automatically attach ``?tenant=xxx`` to the URL.
+
+        Returns:
+            ``{"tenant": value}`` if a tenant is selected, else ``{}``.
+        """
+        if self._tenant:
+            return {"tenant": self._tenant}
+        return {}
+
+    def _tenant_header(self) -> Dict[str, str]:
+        """Build ``X-Tenant-ID`` header dict when a tenant is selected.
+
+        Use this alongside ``headers=`` to propagate tenant identity on
+        endpoints that read the ``X-Tenant-ID`` header.
+
+        Returns:
+            ``{"X-Tenant-ID": value}`` if a tenant is selected, else ``{}``.
+        """
+        if self._tenant:
+            return {"X-Tenant-ID": self._tenant}
+        return {}
 
     # ------------------------------------------------------------------
     # Context manager (async)
@@ -437,19 +487,24 @@ class A2AClient:
         Returns:
             ``{"Authorization": "Bearer <token>"}`` if auth is enabled,
             otherwise an empty dict (making callers transparently skip auth
-            via header merging).
+            via header merging).  Also includes ``X-Tenant-ID`` when a
+            tenant is selected.
         """
-        if not self._auth_enabled:
-            return {}
-        token = self._ensure_token()
-        return {"Authorization": f"Bearer {token}"}
+        result: Dict[str, str] = {}
+        if self._auth_enabled:
+            token = self._ensure_token()
+            result["Authorization"] = f"Bearer {token}"
+        result.update(self._tenant_header())
+        return result
 
     async def _async_auth_header(self) -> Dict[str, str]:
         """Async version of :meth:`_auth_header`."""
-        if not self._auth_enabled:
-            return {}
-        token = await self._async_ensure_token()
-        return {"Authorization": f"Bearer {token}"}
+        result: Dict[str, str] = {}
+        if self._auth_enabled:
+            token = await self._async_ensure_token()
+            result["Authorization"] = f"Bearer {token}"
+        result.update(self._tenant_header())
+        return result
 
     # ------------------------------------------------------------------
     # Agent Lifecycle
@@ -931,6 +986,7 @@ class A2AClient:
             try:
                 resp = session.get(
                     f"{self._base_url}/v1/tasks/{task_id}",
+                    params=self._tenant_params() or None,
                     headers=self._auth_header(),
                     timeout=self._timeout,
                     verify=self._verify_ssl,
@@ -972,6 +1028,7 @@ class A2AClient:
             try:
                 async with session.get(
                     f"{self._base_url}/v1/tasks/{task_id}",
+                    params=self._tenant_params() or None,
                     headers=await self._async_auth_header(),
                 ) as resp:
                     if resp.status == 200:

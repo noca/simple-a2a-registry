@@ -259,7 +259,7 @@ class Dispatcher:
 
             # Priority 2: Assignee is NOT a connected agent → block the task
             # so it doesn't sit in 'ready' forever
-            if self.ws_connections is not None:
+            if self.ws_connections:
                 logger.info(
                     "Blocking task '%s' (assignee=%s) — agent not connected via WebSocket",
                     task.id, assignee,

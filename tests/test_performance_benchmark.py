@@ -601,8 +601,10 @@ class TestLongRunning:
             except asyncio.CancelledError:
                 pass
 
-            assert not dt.exception(), \
-                f"Dispatcher crashed: {dt.exception()}"
+            if not dt.cancelled():
+                exc = dt.exception()
+                if exc:
+                    raise AssertionError(f"Dispatcher crashed: {exc}")
             print("\n  --- Soak Test Passed (5 min) ---")
         finally:
             await client.close()
