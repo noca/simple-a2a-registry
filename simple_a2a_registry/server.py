@@ -1358,7 +1358,7 @@ def create_app(
         if board_path is None:
             board_path = str(Path(data_dir).expanduser() / "board.db")
         task_store = TaskStore(board_path)
-    orch_handler = OrchestrationHandler(task_store)
+    orch_handler = OrchestrationHandler(task_store, registry_store=store)
 
     # V2 Workspace Manager
     if workspaces_root is None:

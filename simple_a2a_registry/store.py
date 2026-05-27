@@ -535,6 +535,7 @@ class Store:
                 else:
                     card["status"] = "alive" if elapsed <= HEARTBEAT_TIMEOUT else "stale"
                 card["lastHeartbeat"] = last_hb
+                card["tenant"] = row.get("tenant_id", "") or ""
 
                 if skill:
                     skills = card.get("skills", [])
@@ -585,6 +586,8 @@ class Store:
             db_tenant = row.get("tenant_id", "")
             if db_tenant:
                 card["tenant"] = db_tenant
+            else:
+                card["tenant"] = ""
             last_hb = row["heartbeat_at"]
             elapsed = time.time() - last_hb if last_hb else HEARTBEAT_TIMEOUT + 1
             if row.get("disabled"):

@@ -397,6 +397,12 @@ def _auth_middleware_factory(
         request["token_payload"] = payload
         request["tenant"] = payload.get("tenant", "")
 
+        # Admin scope bypasses tenant isolation — set tenant to "" so list/get
+        # operations return all tenants' data (no WHERE tenant= filter).
+        token_scopes = payload.get("scope", "").split()
+        if "registry:admin" in token_scopes:
+            request["tenant"] = ""
+
         record_auth_operation("token_validate", success=True)
         return await handler(request)
 
