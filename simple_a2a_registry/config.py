@@ -75,6 +75,15 @@ class MonitoringConfig:
 
 
 @dataclass
+class RateLimitConfig:
+    enabled: bool = False
+    default_unauthenticated: int = 60
+    default_authenticated: int = 300
+    storage: str = "memory"
+    whitelist: list = field(default_factory=list)
+
+
+@dataclass
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
@@ -82,6 +91,7 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     orchestration: OrchestrationConfig = field(default_factory=OrchestrationConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
+    rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +186,7 @@ def _dict_to_config(d: Dict[str, Any], cfg: Config) -> Config:
         "logging": cfg.logging,
         "orchestration": cfg.orchestration,
         "monitoring": cfg.monitoring,
+        "rate_limit": cfg.rate_limit,
     }
 
     for section_name, section_data in d.items():

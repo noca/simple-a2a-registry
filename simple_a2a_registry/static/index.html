@@ -1,218 +1,316 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>A2A Registry Dashboard</title>
+<title>A2A Registry — 管理后台</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0d1117; color: #c9d1d9; }
-  .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
-  h1 { font-size: 24px; font-weight: 600; }
-  h1 small { font-size: 14px; font-weight: 400; color: #8b949e; }
-  .header-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }
-  .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; }
-  .stat-label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
-  .value { font-size: 28px; font-weight: 700; line-height: 1.2; }
-  .stat-card.total     .value { color: #f0f6fc; }
-  .stat-card.alive     .value { color: #3fb950; }
-  .stat-card.stale     .value { color: #d29922; }
-  .stat-card.tasks     .value { color: #58a6ff; }
-  .stat-card.v2-todo   .value { color: #8b949e; }
-  .stat-card.v2-ready  .value { color: #58a6ff; }
-  .stat-card.v2-run    .value { color: #d2a8ff; }
-  .stat-card.v2-block  .value { color: #f0883e; }
-  .stat-card.v2-done   .value { color: #3fb950; }
-  .stat-card.v2-fail   .value { color: #f85149; }
-  .tabs { display: flex; gap: 0; margin-bottom: 0; border-bottom: 1px solid #30363d; }
-  .tabs button { background: transparent; border: none; color: #8b949e; padding: 10px 20px; cursor: pointer; font-size: 14px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-  .tabs button:hover { color: #c9d1d9; }
-  .tabs button.active { color: #f0f6fc; border-bottom-color: #f0f6fc; }
-  .tab-content { display: none; margin-top: 16px; }
-  .tab-content.active { display: block; }
-  .filter-bar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-  .filter-bar input, .filter-bar select { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; color: #c9d1d9; font-size: 14px; }
-  .filter-bar input { flex: 1; min-width: 200px; }
-  .filter-bar input::placeholder { color: #484f58; }
-  .filter-bar select { min-width: 120px; }
-  .filter-bar button { background: #21262d; border: 1px solid #30363d; border-radius: 6px; padding: 8px 16px; color: #c9d1d9; cursor: pointer; }
-  .filter-bar button:hover { background: #30363d; }
-  table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; padding: 8px 12px; font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #21262d; }
-  td { padding: 12px; border-bottom: 1px solid #21262d; font-size: 14px; }
-  .tag { display: inline-block; background: #1f6feb33; color: #58a6ff; border-radius: 12px; padding: 2px 8px; font-size: 12px; margin: 1px; }
-  .badge { display: inline-block; border-radius: 12px; padding: 2px 8px; font-size: 12px; font-weight: 500; }
-  .badge-alive { background: #3fb95022; color: #3fb950; }
-  .badge-stale { background: #d2992222; color: #d29922; }
-  .badge-dispatched  { background: #58a6ff22; color: #58a6ff; }
-  .badge-forwarded   { background: #d2992222; color: #d29922; }
-  .badge-working     { background: #3fb95022; color: #3fb950; }
-  .badge-completed   { background: #3fb95033; color: #3fb950; }
-  .badge-failed      { background: #f8514922; color: #f85149; }
-  .badge-ws { display: inline-block; background: #3fb95033; color: #3fb950; border: 1px solid #3fb95044; border-radius: 4px; padding: 1px 5px; font-size: 10px; font-weight: 600; margin-left: 4px; vertical-align: middle; letter-spacing: 0.3px; }
-  .skill-row { border-bottom: 1px solid #161b22; }
-  .agent-row, .task-row, .kb-row { cursor: default; }
-  .agent-row:hover, .task-row:hover, .kb-row:hover { background: #161b22; }
-  .agent-details, .task-details, .kb-details { display: none; }
-  .agent-details.open, .task-details.open, .kb-details.open { display: table-row; }
-  .agent-details td, .task-details td, .kb-details td { background: #0d1117; padding: 16px 24px; }
-  .detail-section { margin-bottom: 12px; }
-  .detail-section h3 { font-size: 12px; color: #8b949e; text-transform: uppercase; margin-bottom: 6px; }
-  .skill-card { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; margin-bottom: 6px; }
-  .skill-card .name { font-weight: 500; }
-  .skill-card .desc { font-size: 12px; color: #8b949e; }
-  .task-query { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; font-family: monospace; font-size: 13px; margin-bottom: 8px; }
-  .task-result pre { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; font-size: 13px; overflow-x: auto; max-height: 200px; }
-  .loading { text-align: center; padding: 48px; color: #8b949e; }
-  .error { text-align: center; padding: 48px; color: #f85149; }
-  code { font-size: 12px; color: #8b949e; word-break: break-all; }
+:root {
+  --bg: #0d1117; --bg-card: #161b22; --bg-input: #0d1117;
+  --border: #30363d; --border-light: #21262d;
+  --text: #c9d1d9; --text-muted: #8b949e; --text-dim: #484f58;
+  --accent: #58a6ff; --green: #3fb950; --yellow: #d29922;
+  --orange: #f0883e; --red: #f85149; --purple: #d2a8ff;
+  --radius: 8px; --radius-lg: 12px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); }
 
-  /* Kanban-specific styles */
-  .badge-todo      { background: #8b949e22; color: #8b949e; }
-  .badge-ready     { background: #58a6ff22; color: #58a6ff; }
-  .badge-running   { background: #d2a8ff22; color: #d2a8ff; }
-  .badge-blocked   { background: #f0883e22; color: #f0883e; }
-  .badge-archived  { background: #30363d55; color: #484f58; }
-  .badge-cancelled { background: #f8514922; color: #f85149; }
+/* Login overlay */
+#login-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--bg); z-index: 9999;
+  display: flex; align-items: center; justify-content: center;
+}
+#login-overlay.hidden { display: none !important; }
+.login-modal {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: 40px; width: 420px; max-width: 90vw;
+}
+.login-modal h2 { font-size: 22px; font-weight: 600; color: #f0f6fc; margin-bottom: 6px; }
+.login-modal .subtitle { font-size: 13px; color: var(--text-muted); margin-bottom: 28px; }
+.login-modal label { display: block; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.login-modal input { width: 100%; background: var(--bg-input); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; color: var(--text); font-size: 14px; margin-bottom: 16px; outline: none; }
+.login-modal input:focus { border-color: var(--accent); }
+.login-btn { width: 100%; background: #238636; border: none; border-radius: 6px; padding: 10px; color: #fff; font-size: 15px; font-weight: 500; cursor: pointer; margin-top: 4px; }
+.login-btn:hover { background: #2ea043; }
+.login-btn:disabled { background: var(--border-light); color: var(--text-dim); cursor: not-allowed; }
+.login-error { color: var(--red); font-size: 13px; margin-top: 12px; display: none; }
+.login-error.show { display: block; }
 
-  .kb-board { display: flex; gap: 12px; overflow-x: auto; min-height: 400px; padding-bottom: 16px; }
-  .kb-column { background: #161b22; border: 1px solid #30363d; border-radius: 8px; min-width: 220px; flex: 1; max-width: 300px; }
-  .kb-col-header { padding: 10px 14px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid #30363d; color: #8b949e; }
-  .kb-col-header .count { float: right; color: #484f58; font-size: 12px; }
-  .kb-col-body { padding: 8px; min-height: 60px; }
-  .kb-card { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 10px 12px; margin-bottom: 6px; cursor: pointer; transition: border-color 0.15s; }
-  .kb-card:hover { border-color: #30363d; }
-  .kb-card-title { font-size: 13px; font-weight: 500; line-height: 1.4; margin-bottom: 6px; }
-  .kb-card-meta { font-size: 11px; color: #484f58; display: flex; gap: 8px; flex-wrap: wrap; }
-  .kb-card-meta span { display: inline-flex; align-items: center; gap: 3px; }
-  .kb-card .badge { font-size: 10px; margin-right: 4px; }
-  .kb-col-todo    .kb-col-header { border-bottom-color: #8b949e; }
-  .kb-col-ready   .kb-col-header { border-bottom-color: #58a6ff; }
-  .kb-col-running .kb-col-header { border-bottom-color: #d2a8ff; }
-  .kb-col-blocked .kb-col-header { border-bottom-color: #f0883e; }
-  .kb-col-completed .kb-col-header { border-bottom-color: #3fb950; }
-  .kb-col-failed  .kb-col-header { border-bottom-color: #f85149; }
-  .kb-col-archived .kb-col-header { border-bottom-color: #30363d; }
-  .kb-col-cancelled .kb-col-header { border-bottom-color: #f85149; }
+/* Layout */
+.app { max-width: 1440px; margin: 0 auto; padding: 20px 24px; }
+.header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.header h1 { font-size: 22px; font-weight: 600; }
+.header h1 small { font-size: 13px; font-weight: 400; color: var(--text-muted); }
+.header-right { display: flex; align-items: center; gap: 12px; }
+.auth-badge { font-size: 11px; color: var(--text-muted); padding: 4px 10px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; }
+.logout-btn { background: transparent; border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; color: var(--text-muted); font-size: 13px; cursor: pointer; }
+.logout-btn:hover { background: var(--border-light); color: var(--red); border-color: var(--red); }
 
-  .detail-tabs { display: flex; gap: 0; border-bottom: 1px solid #21262d; margin-bottom: 8px; }
-  .detail-tabs button { background: transparent; border: none; color: #8b949e; padding: 6px 14px; cursor: pointer; font-size: 12px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-  .detail-tabs button:hover { color: #c9d1d9; }
-  .detail-tabs button.active { color: #f0f6fc; border-bottom-color: #58a6ff; }
-  .detail-pane { display: none; }
-  .detail-pane.active { display: block; }
+/* Navigation */
+.nav { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+.nav button { background: transparent; border: none; color: var(--text-muted); padding: 10px 18px; cursor: pointer; font-size: 13px; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color .15s,border-color .15s; white-space: nowrap; }
+.nav button:hover { color: var(--text); }
+.nav button.active { color: #f0f6fc; border-bottom-color: #f0f6fc; }
+.nav button .nav-badge { display: inline-block; background: var(--border-light); border-radius: 10px; padding: 0 6px; font-size: 11px; margin-left: 4px; color: var(--text-muted); }
 
-  .dep-graph { margin: 8px 0; padding: 8px; background: #161b22; border-radius: 6px; font-size: 12px; }
-  .dep-node { display: inline-block; padding: 2px 8px; margin: 2px; border-radius: 4px; background: #21262d; }
-  .dep-arrow { color: #484f58; margin: 0 4px; }
+/* Page container */
+.page { display: none; }
+.page.active { display: block; }
 
-  .comment-bubble { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; margin-bottom: 6px; }
-  .comment-bubble .author { font-weight: 500; font-size: 12px; color: #58a6ff; }
-  .comment-bubble .time { font-size: 11px; color: #484f58; margin-left: 8px; }
-  .comment-bubble .body { font-size: 13px; margin-top: 4px; }
+/* Stats grid */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 20px; }
+.stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; }
+.stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.stat-value { font-size: 26px; font-weight: 700; line-height: 1.2; }
+.stat-card.total .stat-value { color: #f0f6fc; }
+.stat-card.alive .stat-value { color: var(--green); }
+.stat-card.stale .stat-value { color: var(--yellow); }
+.stat-card.ws .stat-value { color: var(--accent); }
+.stat-card.todo .stat-value { color: var(--text-muted); }
+.stat-card.ready .stat-value { color: var(--accent); }
+.stat-card.running .stat-value { color: var(--purple); }
+.stat-card.blocked .stat-value { color: var(--orange); }
+.stat-card.done .stat-value { color: var(--green); }
+.stat-card.failed .stat-value { color: var(--red); }
 
-  .event-item { padding: 4px 8px; font-size: 12px; border-left: 2px solid #21262d; margin: 2px 0; }
-  .event-item .kind { font-weight: 500; color: #58a6ff; }
+/* Chart containers */
+.chart-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+@media (max-width: 900px) { .chart-row { grid-template-columns: 1fr; } }
+.chart-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.chart-box h3 { font-size: 13px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; margin-bottom: 12px; }
+.chart-box canvas { max-height: 280px; }
 
-  .run-item { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; margin-bottom: 6px; font-size: 12px; }
-  .run-item .run-status { font-weight: 500; }
-  .run-item .run-outcome { color: #8b949e; }
+/* Toolbar */
+.toolbar { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
+.toolbar input, .toolbar select { background: var(--bg-input); border: 1px solid var(--border); border-radius: 6px; padding: 7px 12px; color: var(--text); font-size: 13px; }
+.toolbar input { flex: 1; min-width: 180px; }
+.toolbar input::placeholder { color: var(--text-dim); }
+.toolbar select { min-width: 110px; }
+.toolbar .btn { background: var(--border-light); border: 1px solid var(--border); border-radius: 6px; padding: 7px 14px; color: var(--text); cursor: pointer; font-size: 13px; white-space: nowrap; }
+.toolbar .btn:hover { background: var(--border); }
+.toolbar .btn-primary { background: #238636; border-color: #2ea043; color: #fff; }
+.toolbar .btn-primary:hover { background: #2ea043; }
+.toolbar .btn-accent { background: #1f6feb33; border-color: #1f6feb55; color: var(--accent); }
 
-  /* Login overlay */
-  #login-overlay {
-    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-    background: #0d1117; z-index: 9999;
-    display: flex; align-items: center; justify-content: center;
-  }
-  #login-overlay.hidden { display: none !important; }
-  .login-modal {
-    background: #161b22; border: 1px solid #30363d; border-radius: 12px;
-    padding: 40px; width: 420px; max-width: 90vw;
-  }
-  .login-modal h2 {
-    font-size: 22px; font-weight: 600; color: #f0f6fc; margin-bottom: 6px;
-  }
-  .login-modal .subtitle {
-    font-size: 13px; color: #8b949e; margin-bottom: 28px;
-  }
-  .login-modal label {
-    display: block; font-size: 12px; color: #8b949e;
-    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;
-  }
-  .login-modal input {
-    width: 100%; background: #0d1117; border: 1px solid #30363d;
-    border-radius: 6px; padding: 10px 14px; color: #c9d1d9;
-    font-size: 14px; margin-bottom: 16px; outline: none;
-  }
-  .login-modal input:focus { border-color: #58a6ff; }
-  .login-modal .login-btn {
-    width: 100%; background: #238636; border: none; border-radius: 6px;
-    padding: 10px; color: #fff; font-size: 15px; font-weight: 500;
-    cursor: pointer; margin-top: 4px;
-  }
-  .login-modal .login-btn:hover { background: #2ea043; }
-  .login-modal .login-btn:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
-  .login-modal .login-error {
-    color: #f85149; font-size: 13px; margin-top: 12px; display: none;
-  }
-  .login-modal .login-error.show { display: block; }
+/* Table */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; padding: 8px 12px; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border-light); white-space: nowrap; cursor: pointer; user-select: none; }
+th:hover { color: var(--text); }
+th .sort-arrow { margin-left: 4px; opacity: 0.4; }
+th.sorted .sort-arrow { opacity: 1; color: var(--accent); }
+td { padding: 10px 12px; border-bottom: 1px solid var(--border-light); font-size: 13px; }
+tr.clickable { cursor: default; }
+tr.clickable:hover { background: var(--bg-card); }
+tr.details-row { display: none; }
+tr.details-row.open { display: table-row; }
+tr.details-row td { background: var(--bg); padding: 14px 20px; }
 
-  /* Logout button in header */
-  .header-right { display: flex; align-items: center; gap: 12px; }
-  .auth-badge {
-    font-size: 11px; color: #8b949e; padding: 4px 10px;
-    background: #161b22; border: 1px solid #30363d; border-radius: 6px;
-  }
-  .logout-btn {
-    background: transparent; border: 1px solid #30363d; border-radius: 6px;
-    padding: 6px 14px; color: #8b949e; font-size: 13px; cursor: pointer;
-  }
-  .logout-btn:hover { background: #21262d; color: #f85149; border-color: #f85149; }
+/* Badges / Tags */
+.badge { display: inline-block; border-radius: 12px; padding: 2px 8px; font-size: 11px; font-weight: 500; }
+.badge-alive { background: #3fb95022; color: var(--green); }
+.badge-stale { background: #d2992222; color: var(--yellow); }
+.badge-dispatched { background: #58a6ff22; color: var(--accent); }
+.badge-forwarded { background: #d2992222; color: var(--yellow); }
+.badge-working { background: #3fb95022; color: var(--green); }
+.badge-completed { background: #3fb95033; color: var(--green); }
+.badge-failed { background: #f8514922; color: var(--red); }
+.badge-todo { background: #8b949e22; color: var(--text-muted); }
+.badge-ready { background: #58a6ff22; color: var(--accent); }
+.badge-running { background: #d2a8ff22; color: var(--purple); }
+.badge-blocked { background: #f0883e22; color: var(--orange); }
+.badge-archived { background: #30363d55; color: var(--text-dim); }
+.badge-cancelled { background: #f8514922; color: var(--red); }
+.badge-enabled { background: #3fb95022; color: var(--green); }
+.badge-disabled { background: #f8514922; color: var(--red); }
+.tag { display: inline-block; background: #1f6feb33; color: var(--accent); border-radius: 12px; padding: 1px 7px; font-size: 11px; margin: 1px; }
+.ws-badge { display: inline-block; background: #3fb95033; color: var(--green); border: 1px solid #3fb95044; border-radius: 4px; padding: 1px 5px; font-size: 10px; font-weight: 600; margin-left: 4px; vertical-align: middle; }
+
+/* Pagination */
+.pagination { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 16px; }
+.pagination .page-btn { background: var(--border-light); border: 1px solid var(--border); border-radius: 4px; padding: 5px 10px; color: var(--text); font-size: 12px; cursor: pointer; }
+.pagination .page-btn:hover { background: var(--border); }
+.pagination .page-btn.active { background: #1f6feb33; border-color: #1f6feb55; color: var(--accent); }
+.pagination .page-btn:disabled { opacity: 0.4; cursor: default; }
+.pagination .page-info { font-size: 12px; color: var(--text-muted); margin: 0 8px; }
+
+/* Kanban board */
+.kb-board { display: flex; gap: 10px; overflow-x: auto; min-height: 360px; padding-bottom: 12px; }
+.kb-column { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); min-width: 210px; flex: 1; max-width: 280px; }
+.kb-col-header { padding: 9px 12px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid var(--border); color: var(--text-muted); }
+.kb-col-header .count { float: right; color: var(--text-dim); font-size: 11px; }
+.kb-col-body { padding: 6px; min-height: 50px; }
+.kb-card { background: var(--bg); border: 1px solid var(--border-light); border-radius: 6px; padding: 8px 10px; margin-bottom: 5px; cursor: pointer; transition: border-color .15s; }
+.kb-card:hover { border-color: var(--border); }
+.kb-card-title { font-size: 12px; font-weight: 500; line-height: 1.4; margin-bottom: 4px; }
+.kb-card-meta { font-size: 10px; color: var(--text-dim); display: flex; gap: 6px; flex-wrap: wrap; }
+.kb-col-todo .kb-col-header { border-bottom-color: var(--text-muted); }
+.kb-col-ready .kb-col-header { border-bottom-color: var(--accent); }
+.kb-col-running .kb-col-header { border-bottom-color: var(--purple); }
+.kb-col-blocked .kb-col-header { border-bottom-color: var(--orange); }
+.kb-col-completed .kb-col-header { border-bottom-color: var(--green); }
+.kb-col-failed .kb-col-header { border-bottom-color: var(--red); }
+.kb-col-archived .kb-col-header { border-bottom-color: var(--text-dim); }
+.kb-col-cancelled .kb-col-header { border-bottom-color: var(--red); }
+
+/* Detail sections */
+.detail-section { margin-bottom: 10px; }
+.detail-section h3 { font-size: 11px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px; }
+.skill-card { background: var(--bg-card); border: 1px solid var(--border-light); border-radius: 6px; padding: 6px 10px; margin-bottom: 4px; }
+.skill-card .name { font-weight: 500; font-size: 13px; }
+.skill-card .desc { font-size: 11px; color: var(--text-muted); }
+.task-query { background: var(--bg-card); border: 1px solid var(--border-light); border-radius: 6px; padding: 8px 12px; font-family: monospace; font-size: 12px; margin-bottom: 6px; }
+code { font-size: 11px; color: var(--text-muted); word-break: break-all; }
+pre { background: var(--bg-card); border: 1px solid var(--border-light); border-radius: 6px; padding: 8px 12px; font-size: 12px; overflow-x: auto; max-height: 180px; white-space: pre-wrap; }
+
+/* Loading & Empty states */
+.loading, .empty, .error-state { text-align: center; padding: 40px; font-size: 14px; }
+.loading { color: var(--text-muted); }
+.empty { color: var(--text-dim); }
+.error-state { color: var(--red); }
+
+/* Modal */
+.modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 1000; display: flex; align-items: center; justify-content: center; }
+.modal-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 24px; width: 680px; max-width: 95vw; max-height: 85vh; overflow-y: auto; }
+.modal-box h2 { font-size: 17px; font-weight: 600; color: #f0f6fc; margin-bottom: 12px; }
+.modal-close { float: right; background: transparent; border: none; color: var(--text-muted); font-size: 20px; cursor: pointer; padding: 0 4px; }
+.modal-close:hover { color: var(--text); }
+.detail-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border-light); margin-bottom: 8px; }
+.detail-tabs button { background: transparent; border: none; color: var(--text-muted); padding: 5px 12px; cursor: pointer; font-size: 12px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.detail-tabs button:hover { color: var(--text); }
+.detail-tabs button.active { color: #f0f6fc; border-bottom-color: var(--accent); }
+.detail-pane { display: none; }
+.detail-pane.active { display: block; }
+.comment-bubble { background: var(--bg-card); border: 1px solid var(--border-light); border-radius: 6px; padding: 8px 12px; margin-bottom: 5px; }
+.comment-bubble .author { font-weight: 500; font-size: 11px; color: var(--accent); }
+.comment-bubble .time { font-size: 10px; color: var(--text-dim); margin-left: 6px; }
+.comment-bubble .body { font-size: 12px; margin-top: 3px; }
+.event-item { padding: 3px 8px; font-size: 11px; border-left: 2px solid var(--border-light); margin: 2px 0; }
+.event-item .kind { font-weight: 500; color: var(--accent); }
+.run-item { background: var(--bg-card); border: 1px solid var(--border-light); border-radius: 6px; padding: 6px 10px; margin-bottom: 4px; font-size: 11px; }
+
+/* Form */
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.form-group input, .form-group textarea, .form-group select { width: 100%; background: var(--bg-input); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: var(--text); font-size: 13px; }
+.form-group textarea { resize: vertical; font-family: inherit; }
+.form-group input:focus, .form-group textarea:focus { border-color: var(--accent); outline: none; }
+.form-inline { display: flex; gap: 12px; flex-wrap: wrap; }
+.form-inline > * { flex: 1; min-width: 140px; }
+.checkbox-group { display: flex; gap: 14px; flex-wrap: wrap; }
+.checkbox-group label { display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
+
+/* Audit log specific */
+.audit-detail { background: var(--bg-card); border: 1px solid var(--border-light); border-radius: 6px; padding: 8px 12px; font-size: 11px; font-family: monospace; white-space: pre-wrap; margin-top: 4px; }
+
+/* Toggle switch */
+.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.toggle-track { width: 32px; height: 18px; background: var(--text-dim); border-radius: 10px; position: relative; transition: background .2s; }
+.toggle-track.active { background: var(--green); }
+.toggle-thumb { width: 14px; height: 14px; background: #fff; border-radius: 50%; position: absolute; top: 2px; left: 2px; transition: left .2s; }
+.toggle-track.active .toggle-thumb { left: 16px; }
+
+/* Duration bar for heartbeat viz */
+.hb-bar { display: flex; gap: 2px; align-items: flex-end; height: 28px; padding: 4px 0; }
+.hb-seg { width: 6px; border-radius: 2px; min-height: 4px; transition: height .3s; }
+
+/* Settings sections */
+.settings-section { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; margin-bottom: 12px; }
+.settings-section h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #f0f6fc; }
+.settings-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border-light); font-size: 13px; }
+.settings-row:last-child { border-bottom: none; }
+.settings-row .key { color: var(--text-muted); }
+.settings-row .val { color: var(--text); font-family: monospace; font-size: 12px; }
+
+/* Clients table action buttons */
+.action-btn { background: transparent; border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; font-size: 11px; cursor: pointer; color: var(--text-muted); }
+.action-btn:hover { background: var(--border-light); }
+.action-btn.danger { border-color: var(--red); color: var(--red); }
+.action-btn.danger:hover { background: #f8514911; }
 </style>
 </head>
 <body>
 <div id="login-overlay">
   <div class="login-modal">
     <h2>A2A Registry</h2>
-    <div class="subtitle">Authentication required — enter your OAuth credentials</div>
+    <div class="subtitle">请输入用户名和密码登录管理后台</div>
     <form id="login-form" onsubmit="doLogin(event)">
-      <label for="login-cid">Client ID</label>
-      <input id="login-cid" type="text" placeholder="e.g. client-a1b2c3d4e5f6" required>
-      <label for="login-secret">Client Secret</label>
-      <input id="login-secret" type="password" placeholder="your client secret" required>
-      <button type="submit" class="login-btn" id="login-btn">Login</button>
+      <label for="login-username">用户名</label>
+      <input id="login-username" type="text" placeholder="admin" required autocomplete="username">
+      <label for="login-password">密码</label>
+      <input id="login-password" type="password" placeholder="••••••••" required autocomplete="current-password">
+      <button type="submit" class="login-btn" id="login-btn">登 录</button>
       <div class="login-error" id="login-error"></div>
     </form>
   </div>
 </div>
-<div class="container" id="dashboard">
-  <div class="header-bar">
-    <h1>A2A Registry <small>Agent-to-Agent + Orchestration Dashboard</small></h1>
-    <div class="header-right" id="header-right"></div>
-  </div>
-  <div class="stats" id="stats"></div>
-  <div class="tabs">
-    <button id="tab-agents" class="active" onclick="switchTab('agents')">Agents</button>
-    <button id="tab-tasks" onclick="switchTab('tasks')">Tasks</button>
-    <button id="tab-kanban" onclick="switchTab('kanban')">Kanban</button>
-    <button id="tab-admin" onclick="switchTab('admin')">Admin</button>
-  </div>
 
-  <!-- Agents tab -->
-  <div id="content-agents" class="tab-content active">
-    <div class="filter-bar">
-      <input type="text" id="search" placeholder="Search agents..." oninput="debouncedSearch()">
-      <button onclick="fetchAgents()">Refresh</button>
+<div class="app" id="app">
+  <div class="header">
+    <h1>A2A Registry <small>Agent-to-Agent 管理后台</small></h1>
+    <div class="header-right" id="header-right">
+      <span id="user-badge" class="auth-badge" style="display:none;"></span>
+      <button id="btn-logout" class="logout-btn" onclick="handleLogout()" style="display:none;">退出登录</button>
     </div>
-    <div id="agent-list"><div class="loading">Loading agents...</div></div>
   </div>
 
-  <!-- Tasks tab -->
-  <div id="content-tasks" class="tab-content">
-    <div class="filter-bar">
-      <input type="text" id="task-search" placeholder="Filter by agent ID..." oninput="debouncedTaskSearch()">
-      <select id="task-state-filter" onchange="fetchTasks()">
+  <nav class="nav" id="main-nav">
+    <button id="tab-dashboard" class="active" onclick="switchTab('dashboard')">📊 Dashboard</button>
+    <button id="tab-agents" onclick="switchTab('agents')">🤖 Agents</button>
+    <button id="tab-tasks" onclick="switchTab('tasks')">📋 Tasks</button>
+    <button id="tab-clients" class="nav-admin" onclick="switchTab('clients')">🔑 Clients</button>
+    <button id="tab-audit" class="nav-admin" onclick="switchTab('audit')">📝 Audit Log</button>
+    <button id="tab-settings" class="nav-admin" onclick="switchTab('settings')">⚙️ Settings</button>
+  </nav>
+
+  <!-- ═══ DASHBOARD ═══ -->
+  <div id="page-dashboard" class="page active">
+    <div class="stats-grid" id="dash-stats"></div>
+    <div class="chart-row">
+      <div class="chart-box"><h3>Agent 健康状态</h3><canvas id="chart-agent-health"></canvas></div>
+      <div class="chart-box"><h3>任务状态分布</h3><canvas id="chart-task-status"></canvas></div>
+    </div>
+    <div class="chart-row">
+      <div class="chart-box"><h3>近期 Agent 注册趋势</h3><canvas id="chart-agent-trend"></canvas></div>
+      <div class="chart-box"><h3>Kanban 任务统计</h3><canvas id="chart-kanban-stats"></canvas></div>
+    </div>
+  </div>
+
+  <!-- ═══ AGENTS ═══ -->
+  <div id="page-agents" class="page">
+    <div class="toolbar">
+      <input type="text" id="ag-search" placeholder="Search agents..." oninput="debounce('ag', fetchAgents, 300)">
+      <select id="ag-status-filter" onchange="fetchAgents()">
+        <option value="">All Status</option>
+        <option value="alive">Alive</option>
+        <option value="stale">Stale</option>
+      </select>
+      <select id="ag-connection-filter" onchange="fetchAgents()">
+        <option value="">All Connections</option>
+        <option value="websocket">WebSocket</option>
+        <option value="http">HTTP</option>
+      </select>
+      <button class="btn" onclick="fetchAgents()">🔄 Refresh</button>
+    </div>
+    <div class="table-wrap"><table><thead><tr>
+      <th onclick="sortBy('ag','status')">Status <span class="sort-arrow">▲</span></th>
+      <th onclick="sortBy('ag','name')">Name <span class="sort-arrow">▲</span></th>
+      <th onclick="sortBy('ag','skills')">Skills <span class="sort-arrow">▲</span></th>
+      <th onclick="sortBy('ag','tags')">Tags <span class="sort-arrow">▲</span></th>
+      <th onclick="sortBy('ag','heartbeat')">Heartbeat <span class="sort-arrow">▲</span></th>
+      <th>Actions</th>
+    </tr></thead><tbody id="ag-tbody"></tbody></table></div>
+    <div class="pagination" id="ag-pagination"></div>
+  </div>
+
+  <!-- ═══ TASKS ═══ -->
+  <div id="page-tasks" class="page">
+    <div class="toolbar">
+      <input type="text" id="tk-search" placeholder="Search tasks..." oninput="debounce('tk', fetchTasks, 300)">
+      <select id="tk-state-filter" onchange="fetchTasks()">
         <option value="">All States</option>
         <option value="dispatched">dispatched</option>
         <option value="forwarded">forwarded</option>
@@ -220,777 +318,985 @@
         <option value="completed">completed</option>
         <option value="failed">failed</option>
       </select>
-      <button onclick="fetchTasks()">Refresh</button>
+      <button class="btn" onclick="fetchTasks()">🔄 Refresh</button>
+      <button class="btn btn-accent" id="tk-view-board" onclick="switchTaskView('board')">📋 Board View</button>
+      <button class="btn" id="tk-view-list" onclick="switchTaskView('list')">📄 List View</button>
     </div>
-    <div id="task-list"><div class="loading">No tasks yet.</div></div>
+    <div id="tk-content"></div>
   </div>
 
-  <!-- Kanban tab -->
-  <div id="content-kanban" class="tab-content">
-    <div class="filter-bar">
-      <input type="text" id="kb-search" placeholder="Search title / body..." oninput="debouncedKanbanSearch()">
-      <select id="kb-status-filter" onchange="fetchKanban()">
-        <option value="">All Statuses</option>
-        <option value="todo">todo</option>
-        <option value="ready">ready</option>
-        <option value="running">running</option>
-        <option value="blocked">blocked</option>
-        <option value="completed">completed</option>
-        <option value="failed">failed</option>
-        <option value="cancelled">cancelled</option>
-        <option value="archived">archived</option>
-      </select>
-      <select id="kb-assignee-filter" onchange="fetchKanban()">
-        <option value="">All Assignees</option>
-      </select>
-      <button onclick="fetchKanban()">Refresh</button>
-      <button onclick="switchKanbanView('board')" id="view-board" style="background:#1f6feb33;border-color:#1f6feb55;">Board</button>
-      <button onclick="switchKanbanView('list')" id="view-list">List</button>
-      <button onclick="showCreateTaskModal()" style="background:#238636;border-color:#238636;color:#fff;">+ 创建任务</button>
+  <!-- ═══ CLIENTS ═══ -->
+  <div id="page-clients" class="page">
+    <div class="toolbar">
+      <input type="text" id="cl-search" placeholder="Search clients..." oninput="debounce('cl', fetchClients, 300)">
+      <button class="btn" onclick="fetchClients()">🔄 Refresh</button>
+      <button id="cl-create-btn" class="btn btn-primary" onclick="showCreateClient()" style="display:none">+ 创建 Client</button>
     </div>
-    <div id="kanban-board"><div class="loading">Loading orchestration tasks...</div></div>
-  </div>
+    <div class="table-wrap"><table><thead><tr>
+      <th onclick="sortBy('cl','client_id')">Client ID <span class="sort-arrow">▲</span></th>
+      <th onclick="sortBy('cl','description')">Description <span class="sort-arrow">▲</span></th>
+      <th onclick="sortBy('cl','scopes')">Scopes <span class="sort-arrow">▲</span></th>
+      <th onclick="sortBy('cl','created')">Created <span class="sort-arrow">▲</span></th>
+      <th>Actions</th>
+    </tr></thead><tbody id="cl-tbody"></tbody></table></div>
+    <div class="pagination" id="cl-pagination"></div>
 
-  <!-- Admin tab -->
-  <div id="content-admin" class="tab-content">
-    <div class="filter-bar">
-      <input type="text" id="admin-search" placeholder="Filter by client_id or agent_card_id..." oninput="debouncedAdminSearch()">
-      <button onclick="fetchAdminClients()">Refresh</button>
-    </div>
-    <div id="admin-clients"><div class="loading">Loading OAuth clients...</div></div>
-    <div id="admin-create-section" style="margin-top:24px;">
-      <h3 style="font-size:15px;font-weight:600;margin-bottom:12px;color:#c9d1d9;">Create OAuth Client</h3>
-      <div id="admin-create-form" style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px;">
-        <div style="display:flex;gap:12px;margin-bottom:12px;">
-          <div style="flex:1;">
-            <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Agent Card ID</label>
-            <input id="ac-agent-card-id" type="text" placeholder="e.g. my-agent" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
+    <div id="cl-create-area" style="margin-top:28px;display:none;">
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;">
+        <h3 style="font-size:15px;font-weight:600;margin-bottom:14px;color:var(--text);">创建 OAuth Client</h3>
+        <div class="form-inline">
+          <div class="form-group">
+            <label>Agent Card ID</label>
+            <input id="cl-agent-card-id" type="text" placeholder="e.g. my-agent">
           </div>
-          <div style="flex:2;">
-            <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Description</label>
-            <input id="ac-description" type="text" placeholder="A short description of this client" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;">
+          <div class="form-group">
+            <label>Description</label>
+            <input id="cl-description" type="text" placeholder="Client description">
           </div>
         </div>
-        <div style="margin-bottom:16px;">
-          <label style="display:block;font-size:12px;color:#8b949e;margin-bottom:8px;">Allowed Scopes</label>
-          <div style="display:flex;gap:16px;flex-wrap:wrap;">
-            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#c9d1d9;cursor:pointer;">
-              <input type="checkbox" class="ac-scope" value="task:read" checked> task:read
-            </label>
-            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#c9d1d9;cursor:pointer;">
-              <input type="checkbox" class="ac-scope" value="task:write"> task:write
-            </label>
-            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#c9d1d9;cursor:pointer;">
-              <input type="checkbox" class="ac-scope" value="agent:read"> agent:read
-            </label>
-            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#c9d1d9;cursor:pointer;">
-              <input type="checkbox" class="ac-scope" value="agent:register"> agent:register
-            </label>
-            <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#c9d1d9;cursor:pointer;">
-              <input type="checkbox" class="ac-scope" value="registry:admin"> registry:admin
-            </label>
+        <div class="form-group">
+          <label>Allowed Scopes</label>
+          <div class="checkbox-group">
+            <label><input type="checkbox" class="cl-scope" value="task:read" checked> task:read</label>
+            <label><input type="checkbox" class="cl-scope" value="task:write"> task:write</label>
+            <label><input type="checkbox" class="cl-scope" value="agent:read"> agent:read</label>
+            <label><input type="checkbox" class="cl-scope" value="agent:register"> agent:register</label>
+            <label><input type="checkbox" class="cl-scope" value="registry:admin"> registry:admin</label>
           </div>
         </div>
-        <div style="display:flex;gap:8px;">
-          <button onclick="createAdminClient()" style="background:#238636;border:1px solid #2ea043;border-radius:6px;padding:8px 20px;color:#fff;cursor:pointer;font-weight:500;">Create Client</button>
-          <div id="ac-status" style="display:flex;align-items:center;font-size:13px;color:#8b949e;"></div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn btn-primary" onclick="createClient()">创建 Client</button>
+          <button class="btn" onclick="toggleCreateClient()">取消</button>
+          <span id="cl-status" style="font-size:13px;color:var(--text-muted);"></span>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- ═══ AUDIT LOG ═══ -->
+  <div id="page-audit" class="page">
+    <div class="toolbar">
+      <input type="text" id="au-search" placeholder="Search events..." oninput="debounce('au', fetchAudit, 300)">
+      <select id="au-type-filter" onchange="fetchAudit()">
+        <option value="">All Types</option>
+        <option value="agent_register">agent_register</option>
+        <option value="agent_unregister">agent_unregister</option>
+        <option value="agent_heartbeat">agent_heartbeat</option>
+        <option value="task_dispatch">task_dispatch</option>
+        <option value="task_complete">task_complete</option>
+        <option value="token_issued">token_issued</option>
+        <option value="client_create">client_create</option>
+        <option value="client_delete">client_delete</option>
+        <option value="user_create">user_create</option>
+        <option value="user_login">user_login</option>
+      </select>
+      <button class="btn" onclick="fetchAudit()">🔄 Refresh</button>
+    </div>
+    <div class="table-wrap"><table><thead><tr>
+      <th onclick="sortBy('au','time')">Time <span class="sort-arrow">▲</span></th>
+      <th onclick="sortBy('au','type')">Type <span class="sort-arrow">▲</span></th>
+      <th onclick="sortBy('au','actor')">Actor <span class="sort-arrow">▲</span></th>
+      <th onclick="sortBy('au','resource')">Resource <span class="sort-arrow">▲</span></th>
+      <th>Details</th>
+    </tr></thead><tbody id="au-tbody"></tbody></table></div>
+    <div class="pagination" id="au-pagination"></div>
+  </div>
+
+  <!-- ═══ SETTINGS ═══ -->
+  <div id="page-settings" class="page">
+    <div class="settings-section">
+      <h3>系统信息</h3>
+      <div id="st-system-info"></div>
+    </div>
+    <div class="settings-section">
+      <h3>用户管理 <small style="font-weight:400;color:var(--text-muted);font-size:12px;">(Admin only)</small></h3>
+      <div id="st-user-mgmt"></div>
+    </div>
+    <div class="settings-section">
+      <h3>配置参数</h3>
+      <div id="st-config-info"></div>
     </div>
   </div>
 </div>
 
 <script>
+// ═══════════════════════════════════════════════════════════════════════
+// Core state
+// ═══════════════════════════════════════════════════════════════════════
 const API = "";
-let searchTimeout = null;
-let taskSearchTimeout = null;
-let kbSearchTimeout = null;
-let adminSearchTimeout = null;
-let kanbanView = "board";
-const STATUS_COLUMNS = ["todo","ready","running","blocked","completed","failed","cancelled","archived"];
-const STATUS_LABELS = {todo:"Todo",ready:"Ready",running:"Running",blocked:"Blocked",completed:"Completed",failed:"Failed",cancelled:"Cancelled",archived:"Archived"};
+const PAGE_SIZE = 20;
+let _user = null;
+let _debounceTimers = {};
+let _sort = {};
+let _chartInstances = {};
+let _authEnabled = typeof window.__AUTH_CONFIG !== 'undefined' ? window.__AUTH_CONFIG.enabled === true : false;
+let _currentUser = null;
 
-// ── Auth ──────────────────────────────────────────────────────────
-
-function getAuthToken() {
-  return sessionStorage.getItem("a2a_dash_token");
+function debounce(key, fn, ms) {
+  clearTimeout(_debounceTimers[key]);
+  _debounceTimers[key] = setTimeout(fn, ms);
 }
 
-function isAuthEnabled() {
-  return window.__AUTH_CONFIG && window.__AUTH_CONFIG.enabled === true;
+function esc(s) { if (!s) return ""; const d=document.createElement("div"); d.textContent=s; return d.innerHTML.replace(/"/g,"&quot;"); }
+
+function getApiHeaders() { return {}; }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Auth
+// ═══════════════════════════════════════════════════════════════════════
+async function checkSession() {
+  try {
+    const r = await fetch(`${API}/api/me`);
+    if (!r.ok) return null;
+    const d = await r.json();
+    // /api/me returns {username, role} directly
+    if (d && d.username) {
+      _currentUser = { username: d.username, role: d.role || 'viewer' };
+      return _currentUser;
+    }
+    return null;
+  } catch { return null; }
 }
 
-function isAuthenticated() {
-  return !isAuthEnabled() || !!getAuthToken();
-}
-
-function authHeaders() {
-  const token = getAuthToken();
-  if (token) {
-    return { "Authorization": `Bearer ${token}` };
-  }
-  return {};
-}
-
-function doLogin(event) {
-  event.preventDefault();
+function doLogin(e) {
+  e.preventDefault();
   const btn = document.getElementById("login-btn");
-  const errorEl = document.getElementById("login-error");
-  const cid = document.getElementById("login-cid").value.trim();
-  const secret = document.getElementById("login-secret").value.trim();
-  btn.disabled = true;
-  btn.textContent = "Authenticating...";
-  errorEl.classList.remove("show");
-  errorEl.textContent = "";
-  fetch(`${API}/auth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `grant_type=client_credentials&client_id=${encodeURIComponent(cid)}&client_secret=${encodeURIComponent(secret)}`
+  const err = document.getElementById("login-error");
+  const u = document.getElementById("login-username").value.trim();
+  const p = document.getElementById("login-password").value;
+  btn.disabled = true; btn.textContent = "验证中...";
+  err.classList.remove("show"); err.textContent = "";
+  fetch(`${API}/api/login`, {
+    method: "POST", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({username: u, password: p})
   })
-  .then(r => {
-    if (!r.ok) { throw new Error(`Login failed (HTTP ${r.status})`); }
-    return r.json();
-  })
-  .then(data => {
-    sessionStorage.setItem("a2a_dash_token", data.access_token);
+  .then(r => r.json().then(d => ({status: r.status, body: d})))
+  .then(({status, body}) => {
+    if (status !== 200 || !body.success) throw new Error(body.message||`登录失败 (HTTP ${status})`);
+    _currentUser = body.user;
     document.getElementById("login-overlay").classList.add("hidden");
-    updateHeaderStatus();
-    initDashboard();
+    applyRBAC();
+    updateHeader();
+    initAll();
   })
-  .catch(err => {
-    errorEl.textContent = err.message;
-    errorEl.classList.add("show");
-  })
-  .finally(() => {
-    btn.disabled = false;
-    btn.textContent = "Login";
-  });
+  .catch(e => { err.textContent = e.message; err.classList.add("show"); })
+  .finally(() => { btn.disabled = false; btn.textContent = "登 录"; });
 }
 
 function doLogout() {
-  sessionStorage.removeItem("a2a_dash_token");
+  _currentUser = null;
+  fetch(`${API}/api/logout`, {method:"POST"}).catch(()=>{});
+  applyRBAC();
   document.getElementById("login-overlay").classList.remove("hidden");
-  updateHeaderStatus();
+  updateHeader();
 }
 
-function updateHeaderStatus() {
+function updateHeader() {
   const el = document.getElementById("header-right");
-  if (isAuthEnabled()) {
-    if (isAuthenticated()) {
-      el.innerHTML = '<span class="auth-badge">🔐 Authenticated</span><button class="logout-btn" onclick="doLogout()">Logout</button>';
+  const badge = document.getElementById("user-badge");
+  const logout = document.getElementById("btn-logout");
+  if (!_authEnabled) {
+    badge.style.display='inline'; badge.textContent='🔓 鉴权已关闭';
+    logout.style.display='none';
+    document.querySelectorAll('.nav-admin').forEach(b => b.style.display='');
+    return;
+  }
+  if (_currentUser) {
+    const roleIcon = _currentUser.role === 'admin' ? '👑' : '👤';
+    badge.style.display='inline'; badge.textContent=`${roleIcon} ${_currentUser.username} (${_currentUser.role})`;
+    logout.style.display='inline-block';
+  } else {
+    badge.style.display='inline'; badge.textContent='🔒 未登录';
+    logout.style.display='none';
+  }
+  updateNavVisibility();
+}
+
+function updateNavVisibility() {
+  const show = canOperator();
+  document.querySelectorAll('.nav-admin').forEach(b => {
+    b.style.display = show ? '' : 'none';
+  });
+  // Also gate the create-client button
+  const clBtn = document.getElementById('cl-create-btn');
+  if (clBtn) clBtn.style.display = show ? '' : 'none';
+}
+
+function handleLogout() { doLogout(); }
+function canAdmin() { return _currentUser && _currentUser.role === 'admin'; }
+function canOperator() { const w={admin:100,operator:50,viewer:10}; return _currentUser && (w[_currentUser.role]||0) >= 50; }
+
+// RBAC: viewer 不能访问 admin 管理页面
+function applyRBAC() {
+  const canViewAdmin = canOperator();
+  const restricted = ['clients', 'audit', 'settings'];
+  restricted.forEach(name => {
+    const tab = document.getElementById(`tab-${name}`);
+    const page = document.getElementById(`page-${name}`);
+    if (canViewAdmin) {
+      if (tab) tab.style.display = '';
+      if (page) page.style.display = '';
     } else {
-      el.innerHTML = '<span class="auth-badge" style="color:#d29922;">🔒 Auth Required</span>';
+      if (tab) tab.style.display = 'none';
+      if (page) page.style.display = 'none';
+      // 如果当前在看受限页面，切回 dashboard
+      if (page && page.classList.contains('active')) {
+        switchTab('dashboard');
+      }
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Init & Tab switching
+// ═══════════════════════════════════════════════════════════════════════
+function initAll() {
+  updateHeader();
+  updateNavVisibility();
+  fetchAgents(); fetchTasks(); fetchStats();
+  if (canOperator()) { fetchClients(); fetchAudit(); fetchSettings(); }
+  startAutoRefresh();
+}
+
+let _autoRefreshTimer = null;
+function startAutoRefresh() {
+  if (_autoRefreshTimer) clearInterval(_autoRefreshTimer);
+  _autoRefreshTimer = setInterval(() => {
+    const active = document.querySelector('.page.active');
+    if (!active) return;
+    const id = active.id;
+    if (id === 'page-dashboard') fetchStats();
+    else if (id === 'page-agents') fetchAgents();
+    else if (id === 'page-tasks') fetchTasks();
+    else if (id === 'page-clients') fetchClients();
+    else if (id === 'page-audit') fetchAudit();
+  }, 15000);
+}
+
+function switchTab(name) {
+  // RBAC gate: redirect viewers away from admin-only pages
+  const adminTabs = ['clients','audit','settings'];
+  if (adminTabs.includes(name) && !canOperator()) {
+    name = 'dashboard';
+    // If the user manually triggered this, update the caller too
+    const el = document.getElementById(`tab-${name}`);
+    if (el) { el.classList.add('active'); }
+  }
+  document.querySelectorAll('.nav button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById(`tab-${name}`).classList.add('active');
+  document.getElementById(`page-${name}`).classList.add('active');
+  if (name === 'dashboard') fetchStats();
+  if (name === 'agents') fetchAgents();
+  if (name === 'tasks') fetchTasks();
+  if (name === 'clients') fetchClients();
+  if (name === 'audit') fetchAudit();
+  if (name === 'settings') fetchSettings();
+}
+
+// Bootstrap
+(async function() {
+  if (_authEnabled) {
+    const user = await checkSession();
+    if (user) {
+      document.getElementById("login-overlay").classList.add("hidden");
+      applyRBAC(); updateHeader(); initAll();
+    } else {
+      document.getElementById("login-overlay").classList.remove("hidden");
+      applyRBAC(); updateHeader();
     }
   } else {
-    el.innerHTML = '<span class="auth-badge" style="color:#8b949e;">🔓 Auth Disabled</span>';
-  }
-}
-
-// ── Bootstrap ─────────────────────────────────────────────────────
-
-function initDashboard() {
-  updateHeaderStatus();
-  fetchAgents();
-  updateStats();
-}
-
-// On page load: check auth, show login overlay if needed
-(function() {
-  if (isAuthEnabled() && !isAuthenticated()) {
-    document.getElementById("login-overlay").classList.remove("hidden");
-    document.getElementById("dashboard").style.display = "block";
-  } else {
     document.getElementById("login-overlay").classList.add("hidden");
-  }
-  updateHeaderStatus();
-  if (isAuthenticated()) {
-    initDashboard();
+    applyRBAC(); updateHeader(); initAll();
   }
 })();
 
-// ── Data fetching ─────────────────────────────────────────────────
-
-function debouncedSearch() { clearTimeout(searchTimeout); searchTimeout = setTimeout(fetchAgents, 300); }
-function debouncedTaskSearch() { clearTimeout(taskSearchTimeout); taskSearchTimeout = setTimeout(fetchTasks, 300); }
-function debouncedKanbanSearch() { clearTimeout(kbSearchTimeout); kbSearchTimeout = setTimeout(fetchKanban, 300); }
-function debouncedAdminSearch() { clearTimeout(adminSearchTimeout); adminSearchTimeout = setTimeout(fetchAdminClients, 300); }
-
-async function fetchData(url) {
-  const resp = await fetch(url, { headers: authHeaders() });
-  if (resp.status === 401) {
-    sessionStorage.removeItem("a2a_dash_token");
+// ═══════════════════════════════════════════════════════════════════════
+// Data fetching helper with auth redirect
+// ═══════════════════════════════════════════════════════════════════════
+async function apiFetch(url) {
+  const r = await fetch(url);
+  if (r.status === 401 && _authEnabled) {
+    _currentUser = null;
     document.getElementById("login-overlay").classList.remove("hidden");
-    document.getElementById("login-error").textContent = "Session expired — please login again.";
+    document.getElementById("login-error").textContent = "会话已过期，请重新登录。";
     document.getElementById("login-error").classList.add("show");
     throw new Error("Unauthorized");
   }
-  if (!resp.ok) throw new Error(resp.statusText);
-  return resp.json();
+  if (!r.ok) { const errBody = await r.json().catch(()=>({})); throw new Error(errBody.detail || r.statusText); }
+  return r.json();
 }
 
-// ── Stats ─────────────────────────────────────────────────────────
-
-async function updateStats() {
+// ═══════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════
+async function fetchStats() {
   try {
     const [health, kbStats] = await Promise.all([
-      fetchData(`${API}/health`).catch(() => null),
-      fetchData(`${API}/v2/stats`).catch(() => null)
+      apiFetch(`${API}/health`).catch(()=>null),
+      apiFetch(`${API}/v2/stats`).catch(()=>null)
     ]);
-    const s = document.getElementById("stats");
-    if (!health && !kbStats) { s.innerHTML = ""; return; }
-    let html = "";
-    if (health) {
-      const st = health.stats || {};
-      html +=
-        `<div class="stat-card total"><div class="stat-label">Agents</div><div class="value">${st.total_agents || 0}</div></div>` +
-        `<div class="stat-card alive"><div class="stat-label">Alive</div><div class="value">${st.alive_agents || 0}</div></div>` +
-        `<div class="stat-card stale"><div class="stat-label">Stale</div><div class="value">${st.stale_agents || 0}</div></div>` +
-        `<div class="stat-card tasks"><div class="stat-label">WS</div><div class="value">${st.connected_via_ws || 0}</div></div>`;
-    }
-    if (kbStats) {
-      html +=
-        `<div class="stat-card v2-todo"><div class="stat-label">Todo</div><div class="value">${kbStats.todo||0}</div></div>` +
-        `<div class="stat-card v2-ready"><div class="stat-label">Ready</div><div class="value">${kbStats.ready||0}</div></div>` +
-        `<div class="stat-card v2-run"><div class="stat-label">Running</div><div class="value">${kbStats.running||0}</div></div>` +
-        `<div class="stat-card v2-block"><div class="stat-label">Blocked</div><div class="value">${kbStats.blocked||0}</div></div>` +
-        `<div class="stat-card v2-done"><div class="stat-label">Done</div><div class="value">${kbStats.completed||0}</div></div>` +
-        `<div class="stat-card v2-fail"><div class="stat-label">Failed</div><div class="value">${kbStats.failed||0}</div></div>`;
-    }
-    s.innerHTML = html;
-  } catch (e) { /* ignore */ }
+    renderStats(health, kbStats);
+    renderCharts(health, kbStats);
+  } catch(e) { /* silent */ }
 }
 
-// ── Tab switching ─────────────────────────────────────────────────
-
-function switchTab(name) {
-  document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-  document.getElementById(`tab-${name}`).classList.add('active');
-  document.getElementById(`content-${name}`).classList.add('active');
-  if (name === 'tasks') fetchTasks();
-  if (name === 'kanban') fetchKanban();
-  if (name === 'admin') fetchAdminClients();
+function renderStats(health, kbStats) {
+  const el = document.getElementById("dash-stats");
+  const st = (health && health.stats) || {};
+  const kb = kbStats || {};
+  el.innerHTML =
+    `<div class="stat-card total"><div class="stat-label">Agents</div><div class="stat-value">${st.total_agents||0}</div></div>` +
+    `<div class="stat-card alive"><div class="stat-label">Alive</div><div class="stat-value">${st.alive_agents||0}</div></div>` +
+    `<div class="stat-card stale"><div class="stat-label">Stale</div><div class="stat-value">${st.stale_agents||0}</div></div>` +
+    `<div class="stat-card ws"><div class="stat-label">WebSocket</div><div class="stat-value">${st.connected_via_ws||0}</div></div>` +
+    `<div class="stat-card todo"><div class="stat-label">Todo</div><div class="stat-value">${kb.todo||0}</div></div>` +
+    `<div class="stat-card ready"><div class="stat-label">Ready</div><div class="stat-value">${kb.ready||0}</div></div>` +
+    `<div class="stat-card running"><div class="stat-label">Running</div><div class="stat-value">${kb.running||0}</div></div>` +
+    `<div class="stat-card blocked"><div class="stat-label">Blocked</div><div class="stat-value">${kb.blocked||0}</div></div>` +
+    `<div class="stat-card done"><div class="stat-label">Done</div><div class="stat-value">${kb.completed||0}</div></div>` +
+    `<div class="stat-card failed"><div class="stat-label">Failed</div><div class="stat-value">${kb.failed||0}</div></div>`;
 }
 
-// ── AGENTS ────────────────────────────────────────────────────────
+function renderCharts(health, kbStats) {
+  // Agent health pie
+  const ctx1 = document.getElementById('chart-agent-health');
+  if (ctx1) {
+    if (_chartInstances.agentHealth) _chartInstances.agentHealth.destroy();
+    const st = (health && health.stats) || {};
+    _chartInstances.agentHealth = new Chart(ctx1, {
+      type: 'doughnut',
+      data: {
+        labels: ['Alive', 'Stale'],
+        datasets: [{ data: [st.alive_agents||0, st.stale_agents||0], backgroundColor: ['#3fb950', '#d29922'], borderWidth: 0 }]
+      },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#8b949e' } } } }
+    });
+  }
+  // Task status pie (v1 tasks)
+  const ctx2 = document.getElementById('chart-task-status');
+  if (ctx2) {
+    if (_chartInstances.taskStatus) _chartInstances.taskStatus.destroy();
+    const states = {dispatched:0, forwarded:0, working:0, completed:0, failed:0};
+    if (health && health.stats && health.stats.task_stats) {
+      Object.assign(states, health.stats.task_stats);
+    }
+    _chartInstances.taskStatus = new Chart(ctx2, {
+      type: 'doughnut',
+      data: {
+        labels: Object.keys(states),
+        datasets: [{ data: Object.values(states), backgroundColor: ['#58a6ff','#d29922','#3fb950','#3fb95033','#f85149'], borderWidth: 0 }]
+      },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#8b949e' } } } }
+    });
+  }
+  // Kanban bar chart
+  const ctx4 = document.getElementById('chart-kanban-stats');
+  if (ctx4) {
+    if (_chartInstances.kanbanStats) _chartInstances.kanbanStats.destroy();
+    const kb = kbStats || {};
+    const labels = ['Todo','Ready','Running','Blocked','Done','Failed'];
+    const vals = [kb.todo||0, kb.ready||0, kb.running||0, kb.blocked||0, kb.completed||0, kb.failed||0];
+    _chartInstances.kanbanStats = new Chart(ctx4, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{ data: vals, backgroundColor: ['#8b949e','#58a6ff','#d2a8ff','#f0883e','#3fb950','#f85149'], borderRadius: 3 }]
+      },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } },
+        scales: { x: { ticks: { color: '#8b949e' } }, y: { beginAtZero: true, ticks: { color: '#8b949e', stepSize: 1 } } } }
+    });
+  }
+  // Agent trend — we don't have historical data, show a placeholder
+  const ctx3 = document.getElementById('chart-agent-trend');
+  if (ctx3) {
+    if (_chartInstances.agentTrend) _chartInstances.agentTrend.destroy();
+    const st = (health && health.stats) || {};
+    _chartInstances.agentTrend = new Chart(ctx3, {
+      type: 'line',
+      data: {
+        labels: ['Total', 'Alive', 'Stale'],
+        datasets: [{
+          label: 'Agents', data: [st.total_agents||0, st.alive_agents||0, st.stale_agents||0],
+          borderColor: '#58a6ff', backgroundColor: '#58a6ff22', fill: true, tension: 0.3, pointRadius: 4
+        }]
+      },
+      options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { x: { ticks: { color: '#8b949e' } }, y: { beginAtZero: true, ticks: { color: '#8b949e', stepSize: 1 } } } }
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// AGENTS
+// ═══════════════════════════════════════════════════════════════════════
+let _agentsCache = [];
+let _agentsPage = 0;
 
 async function fetchAgents() {
-  const container = document.getElementById("agent-list");
-  container.innerHTML = '<div class="loading">Loading agents...</div>';
+  const tbody = document.getElementById("ag-tbody");
+  tbody.innerHTML = '<tr><td colspan="6" class="loading">Loading agents...</td></tr>';
   try {
-    const q = document.getElementById("search").value.trim();
-    const url = q ? `${API}/v1/agents?q=${encodeURIComponent(q)}` : `${API}/v1/agents`;
-    const data = await fetchData(url);
-    renderAgents(data);
-    updateStats();
-  } catch (e) {
-    container.innerHTML = `<div class="error">Failed to load agents: ${e.message}</div>`;
+    const q = document.getElementById("ag-search").value.trim();
+    const status = document.getElementById("ag-status-filter").value;
+    const conn = document.getElementById("ag-connection-filter").value;
+    let url = `${API}/v1/agents`;
+    const params = [];
+    if (q) params.push(`q=${encodeURIComponent(q)}`);
+    if (params.length) url += '?' + params.join('&');
+    const data = await apiFetch(url);
+    _agentsCache = data.agents || [];
+    _agentsPage = 0;
+    renderAgents();
+  } catch(e) {
+    tbody.innerHTML = `<tr><td colspan="6" class="error-state">Failed: ${esc(e.message)}</td></tr>`;
   }
 }
 
-function toggleAgentDetails(id) {
-  const row = document.getElementById(`agent-details-${id}`);
-  if (row) row.classList.toggle("open");
-}
+function renderAgents() {
+  const tbody = document.getElementById("ag-tbody");
+  const sortKey = _sort.ag && _sort.ag.key;
+  const sortDir = _sort.ag && _sort.ag.dir;
+  let items = [..._agentsCache];
 
-function renderAgents(data) {
-  const container = document.getElementById("agent-list");
-  if (!data.agents || data.agents.length === 0) {
-    container.innerHTML = '<div class="loading">No agents registered yet.</div>';
+  // Client-side filter
+  const status = document.getElementById("ag-status-filter").value;
+  const conn = document.getElementById("ag-connection-filter").value;
+  if (status) items = items.filter(a => a.status === status);
+  if (conn) items = items.filter(a => (a.connection||'http') === conn);
+
+  // Sort
+  if (sortKey) {
+    items.sort((a,b) => {
+      let va = '', vb = '';
+      if (sortKey === 'status') { va=a.status||''; vb=b.status||''; }
+      else if (sortKey === 'name') { va=(a.name||'').toLowerCase(); vb=(b.name||'').toLowerCase(); }
+      else if (sortKey === 'skills') { va=((a.skills||a.capabilities?.skills||[]).map(s=>s.name).join(',')||''); vb=((b.skills||b.capabilities?.skills||[]).map(s=>s.name).join(',')||''); }
+      else if (sortKey === 'heartbeat') { va=a.lastHeartbeat||0; vb=b.lastHeartbeat||0; return sortDir * (va-vb); }
+      return sortDir * (va > vb ? 1 : va < vb ? -1 : 0);
+    });
+  }
+
+  // Paginate
+  const total = items.length;
+  const pages = Math.ceil(total / PAGE_SIZE) || 1;
+  const pg = Math.min(_agentsPage, pages-1);
+  const start = pg * PAGE_SIZE;
+  const page = items.slice(start, start + PAGE_SIZE);
+
+  if (page.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No agents found.</td></tr>';
+    renderPagination('ag', pages, pg);
     return;
   }
-  let html = '<table><thead><tr><th>Status</th><th>Name</th><th>Skills</th><th>Tags</th><th>Last Heartbeat</th></tr></thead><tbody>';
-  for (const agent of data.agents) {
-    const statusClass = agent.status === "alive" ? "badge-alive" : "badge-stale";
-    const skills = (agent.skills || agent.capabilities?.skills || []).slice(0, 3);
-    const skillNames = skills.map(s => s.name).join(", ") || "-";
-    const tags = (agent.tags || []).map(t => `<span class="tag">${t}</span>`).join("") || "-";
-    const hb = agent.lastHeartbeat ? new Date(agent.lastHeartbeat * 1000).toLocaleString() : "-";
-    const id = agent.id;
-    const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "_");
-    html += `<tr class="agent-row" onclick="toggleAgentDetails('${safeId}')">`;
-    html += `<td><span class="badge ${statusClass}">${agent.status}</span>${agent.connection === 'websocket' ? '<span class="badge-ws">WS</span>' : ''}</td>`;
-    html += `<td><strong>${escHtml(agent.name)}</strong><br><small style="color:#8b949e">${escHtml(id)}</small></td>`;
+  let html = '';
+  for (const a of page) {
+    const sc = a.status === 'alive' ? 'badge-alive' : a.status === 'disabled' ? 'badge-disabled' : 'badge-stale';
+    const skills = (a.skills || a.capabilities?.skills || []).slice(0, 3);
+    const skillNames = skills.map(s => s.name).join(', ') || '-';
+    const tags = (a.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('') || '-';
+    const hb = a.lastHeartbeat ? new Date(a.lastHeartbeat * 1000).toLocaleString() : '-';
+    const isEnabled = a.status !== 'disabled';
+    const safeId = (a.id||'').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const connBadge = a.connection === 'websocket' ? '<span class="ws-badge">WS</span>' : '';
+
+    html += `<tr class="clickable" onclick="toggleAgentDetail('${safeId}')">`;
+    html += `<td><span class="badge ${sc}">${a.status}</span>${connBadge}</td>`;
+    html += `<td><strong>${esc(a.name)}</strong><br><small style="color:var(--text-muted)">${esc(a.id||'')}</small></td>`;
     html += `<td>${skillNames}</td>`;
     html += `<td>${tags}</td>`;
-    html += `<td>${hb}</td></tr>`;
-    html += `<tr id="agent-details-${safeId}" class="agent-details"><td colspan="5">`;
-    html += `<div class="detail-section"><h3>Description</h3><p>${escHtml(agent.description || "-")}</p></div>`;
-    if (agent.url) html += `<div class="detail-section"><h3>URL</h3><p>${agent.url}</p></div>`;
+    html += `<td>${hb}</td>`;
+    html += `<td>${canOperator()
+          ? `<button class="action-btn" onclick="event.stopPropagation();toggleAgentEnable('${safeId}')">${isEnabled?'⏸ 停用':'▶ 启用'}</button>`
+          : '<span style="color:var(--text-dim);font-size:11px;">—</span>'}</td></tr>`;
+
+    // Detail row
+    html += `<tr id="ag-detail-${safeId}" class="details-row"><td colspan="6">`;
+    html += `<div class="detail-section"><h3>Description</h3><p>${esc(a.description||'-')}</p></div>`;
+    if (a.url) html += `<div class="detail-section"><h3>URL</h3><p>${a.url}</p></div>`;
     if (skills.length > 0) {
       html += `<div class="detail-section"><h3>Skills</h3>`;
-      for (const sk of (agent.skills || agent.capabilities?.skills || [])) {
-        html += `<div class="skill-card"><span class="name">${escHtml(sk.name)}</span> <span class="desc">${escHtml(sk.description || "")}</span></div>`;
-      }
+      for (const sk of (a.skills || a.capabilities?.skills || []))
+        html += `<div class="skill-card"><span class="name">${esc(sk.name)}</span> <span class="desc">${esc(sk.description||'')}</span></div>`;
       html += `</div>`;
     }
-    html += `<div class="detail-section"><h3>ID</h3><code>${escHtml(agent.id)}</code></div>`;
+    // Heartbeat visualization
+    html += `<div class="detail-section"><h3>Heartbeat 状态</h3>`;
+    const lastHb = a.lastHeartbeat || 0;
+    const now = Math.floor(Date.now()/1000);
+    const elapsed = now - lastHb;
+    const totalBars = 12;
+    let hbHtml = '<div class="hb-bar">';
+    for (let i=0; i<totalBars; i++) {
+      const segAge = i * 30; // each segment = 30s
+      const h = Math.max(4, 24 - (segAge/30)*1.5);
+      const col = elapsed < segAge ? '#3fb950' : (elapsed < segAge + 30 ? '#d29922' : '#30363d');
+      hbHtml += `<div class="hb-seg" style="height:${h}px;background:${col};" title="${segAge}s ago"></div>`;
+    }
+    hbHtml += '</div>';
+    html += `<p style="font-size:11px;color:var(--text-muted);">上次心跳：${lastHb ? new Date(lastHb*1000).toLocaleString() : '无'} (${elapsed}s 前)</p>`;
+    html += hbHtml;
+    html += `<div class="detail-section"><h3>ID</h3><code>${esc(a.id||'')}</code></div>`;
     html += `</td></tr>`;
   }
-  html += '</tbody></table>';
-  if (data.total > data.agents.length) {
-    html += `<p style="color:#8b949e; margin-top: 8px;">Showing ${data.agents.length} of ${data.total} agents</p>`;
-  }
-  container.innerHTML = html;
+  tbody.innerHTML = html;
+  renderPagination('ag', pages, pg);
 }
 
-// ── TASKS ─────────────────────────────────────────────────────────
+function toggleAgentDetail(id) {
+  const r = document.getElementById(`ag-detail-${id}`);
+  if (r) r.classList.toggle('open');
+}
+
+async function toggleAgentEnable(id) {
+  // Toggle agent enabled/disabled state via dedicated endpoint
+  try {
+    const agent = _agentsCache.find(a => (a.id||'').replace(/[^a-zA-Z0-9_-]/g,'_') === id);
+    if (!agent) return;
+    await apiFetch(`${API}/v1/agents/${encodeURIComponent(agent.id)}/toggle`, {
+      method: 'POST',
+      headers: {...getApiHeaders()},
+    });
+    fetchAgents();
+  } catch(e) { alert('操作失败: ' + e.message); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TASKS
+// ═══════════════════════════════════════════════════════════════════════
+let _activeTaskView = 'list';
+
+function switchTaskView(view) {
+  _activeTaskView = view;
+  document.getElementById('tk-view-board').className = view==='board' ? 'btn btn-accent' : 'btn';
+  document.getElementById('tk-view-list').className = view==='list' ? 'btn btn-accent' : 'btn';
+  fetchTasks();
+}
 
 async function fetchTasks() {
-  const container = document.getElementById("task-list");
-  container.innerHTML = '<div class="loading">Loading tasks...</div>';
+  const el = document.getElementById("tk-content");
+  el.innerHTML = '<div class="loading">Loading tasks...</div>';
   try {
-    const q = document.getElementById("task-search").value.trim();
-    const state = document.getElementById("task-state-filter").value;
+    const q = document.getElementById("tk-search").value.trim();
+    const state = document.getElementById("tk-state-filter").value;
     let url = `${API}/v1/tasks`;
     const params = [];
     if (q) params.push(`agent_id=${encodeURIComponent(q)}`);
     if (state) params.push(`state=${encodeURIComponent(state)}`);
     if (params.length) url += '?' + params.join('&');
-    const data = await fetchData(url);
-    renderTasks(data);
-    updateStats();
-  } catch (e) {
-    container.innerHTML = `<div class="error">Failed to load tasks: ${e.message}</div>`;
+    const data = await apiFetch(url);
+    if (_activeTaskView === 'list') renderTaskList(data);
+    else renderTaskBoard(data);
+  } catch(e) {
+    el.innerHTML = `<div class="error-state">Failed: ${esc(e.message)}</div>`;
   }
 }
 
-function toggleTaskDetails(id) {
-  const row = document.getElementById(`task-details-${id}`);
-  if (row) row.classList.toggle("open");
-}
-
-function renderTasks(data) {
-  const container = document.getElementById("task-list");
-  if (!data.tasks || data.tasks.length === 0) {
-    container.innerHTML = '<div class="loading">No tasks yet.</div>';
-    return;
-  }
-  let html = '<table><thead><tr><th>State</th><th>Query</th><th>Agent</th><th>Created</th><th>Updated</th></tr></thead><tbody>';
-  for (const task of data.tasks) {
-    const state = task.state || "unknown";
-    const stateClass = `badge-${state}`;
-    const created = task.created_at ? new Date(task.created_at * 1000).toLocaleString() : "-";
-    const updated = task.updated_at ? new Date(task.updated_at * 1000).toLocaleString() : "-";
-    const tid = task.id || "";
-    const safeTid = tid.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const queryPreview = (task.query || "").length > 60 ? (task.query || "").substring(0, 57) + "..." : (task.query || "-");
-    html += `<tr class="task-row" onclick="toggleTaskDetails('${safeTid}')">`;
-    html += `<td><span class="badge ${stateClass}">${state}</span></td>`;
-    html += `<td>${escHtml(queryPreview)}</td>`;
-    html += `<td><code>${(task.agent_id || "").substring(0, 12)}...</code></td>`;
+function renderTaskList(data) {
+  const el = document.getElementById("tk-content");
+  const tasks = data.tasks || [];
+  if (tasks.length === 0) { el.innerHTML = '<div class="empty">No tasks yet.</div>'; return; }
+  let html = '<div class="table-wrap"><table><thead><tr><th>State</th><th>Query</th><th>Agent</th><th>Created</th><th>Updated</th></tr></thead><tbody>';
+  for (const t of tasks) {
+    const state = t.state||'unknown';
+    const sc = `badge-${state}`;
+    const qp = (t.query||'').length > 60 ? (t.query||'').substring(0,57)+'...' : (t.query||'-');
+    const created = t.created_at ? new Date(t.created_at*1000).toLocaleString() : '-';
+    const updated = t.updated_at ? new Date(t.updated_at*1000).toLocaleString() : '-';
+    const tid = (t.id||'');
+    html += `<tr class="clickable" onclick="showTaskDetail('${esc(tid)}')">`;
+    html += `<td><span class="badge ${sc}">${state}</span></td>`;
+    html += `<td>${esc(qp)}</td>`;
+    html += `<td><code>${esc((t.agent_id||'').substring(0,16))}</code></td>`;
     html += `<td>${created}</td>`;
     html += `<td>${updated}</td></tr>`;
-    html += `<tr id="task-details-${safeTid}" class="task-details"><td colspan="5">`;
-    if (task.query) {
-      html += `<div class="detail-section"><h3>Query</h3><div class="task-query">${escHtml(task.query)}</div></div>`;
-    }
-    html += `<div class="detail-section"><h3>Task ID</h3><code>${escHtml(tid)}</code></div>`;
-    html += `<div class="detail-section"><h3>Agent ID</h3><code>${escHtml(task.agent_id || "")}</code></div>`;
-    if (task.result && Object.keys(task.result).length > 0) {
-      html += `<div class="detail-section"><h3>Result</h3>${renderTaskResult(task.result)}</div>`;
-    }
-    if (task.error) {
-      html += `<div class="detail-section"><h3>Error</h3><pre style="color:#f85149">${escHtml(task.error)}</pre></div>`;
-    }
-    if (task.session_id) {
-      html += `<div class="detail-section"><h3>Session ID</h3><code>${escHtml(task.session_id)}</code></div>`;
-    }
-    html += `</td></tr>`;
   }
-  html += '</tbody></table>';
-  if (data.total > data.tasks.length) {
-    html += `<p style="color:#8b949e; margin-top: 8px;">Showing ${data.tasks.length} of ${data.total} tasks</p>`;
-  }
-  container.innerHTML = html;
+  html += '</tbody></table></div>';
+  html += `<p style="color:var(--text-muted);font-size:12px;margin-top:8px;">Showing ${tasks.length} task(s)</p>`;
+  el.innerHTML = html;
 }
 
-// ── KANBAN ────────────────────────────────────────────────────────
-
-async function fetchKanban() {
-  const container = document.getElementById("kanban-board");
-  container.dataset.loaded = true;
-  container.innerHTML = '<div class="loading">Loading orchestration tasks...</div>';
-  try {
-    const q = document.getElementById("kb-search").value.trim();
-    const status = document.getElementById("kb-status-filter").value;
-    let url = `${API}/v2/tasks?limit=200`;
-    const params = [];
-    if (q) params.push(`q=${encodeURIComponent(q)}`);
-    if (status) params.push(`status=${encodeURIComponent(status)}`);
-    if (params.length) url += '&' + params.join('&');
-    const data = await fetchData(url);
-    renderKanban(data);
-    updateStats();
-    const assigneeSet = new Set();
-    for (const t of data.tasks) { if (t.assignee) assigneeSet.add(t.assignee); }
-    const sel = document.getElementById("kb-assignee-filter");
-    const currentVal = sel.value;
-    let opts = '<option value="">All Assignees</option>';
-    for (const a of [...assigneeSet].sort()) { opts += `<option value="${escHtml(a)}">${escHtml(a)}</option>`; }
-    if (sel.innerHTML !== opts) sel.innerHTML = opts;
-    sel.value = currentVal;
-  } catch (e) {
-    container.innerHTML = `<div class="error">Failed to load orchestration tasks: ${e.message}</div>`;
-  }
-}
-
-function switchKanbanView(view) {
-  kanbanView = view;
-  document.getElementById("view-board").style.background = view === "board" ? "#1f6feb33" : "";
-  document.getElementById("view-board").style.borderColor = view === "board" ? "#1f6feb55" : "";
-  document.getElementById("view-list").style.background = view === "list" ? "#1f6feb33" : "";
-  document.getElementById("view-list").style.borderColor = view === "list" ? "#1f6feb55" : "";
-  const lastData = window._lastKanbanData;
-  if (lastData) renderKanban(lastData);
-}
-
-function renderKanban(data) {
-  window._lastKanbanData = data;
-  const container = document.getElementById("kanban-board");
-  if (!data.tasks || data.tasks.length === 0) {
-    container.innerHTML = '<div class="loading">No orchestration tasks yet.<br><small style="color:#484f58">Create tasks via POST /v2/tasks to see them here.</small></div>';
-    return;
-  }
-  const assigneeFilter = document.getElementById("kb-assignee-filter").value;
-  let tasks = data.tasks;
-  if (assigneeFilter) {
-    tasks = tasks.filter(t => t.assignee === assigneeFilter);
-  }
-  if (kanbanView === "list") {
-    renderKanbanList(container, tasks);
-  } else {
-    renderKanbanBoard(container, tasks);
-  }
-}
-
-function renderKanbanBoard(container, tasks) {
+function renderTaskBoard(data) {
+  const el = document.getElementById("tk-content");
+  const tasks = data.tasks || [];
+  if (tasks.length === 0) { el.innerHTML = '<div class="empty">No tasks yet.</div>'; return; }
+  const cols = ['dispatched','forwarded','working','completed','failed'];
+  const labels = {dispatched:'Dispatched',forwarded:'Forwarded',working:'Working',completed:'Completed',failed:'Failed'};
   const groups = {};
-  for (const s of STATUS_COLUMNS) groups[s] = [];
+  for (const c of cols) groups[c] = [];
   for (const t of tasks) {
-    const s = t.status || "todo";
-    if (groups[s]) groups[s].push(t);
-    else groups[s] = [t];
+    const s = t.state||'dispatched';
+    if (groups[s]) groups[s].push(t); else groups[s] = [t];
   }
   let html = '<div class="kb-board">';
-  for (const col of STATUS_COLUMNS) {
-    const items = groups[col] || [];
-    html += `<div class="kb-column kb-col-${col}">`;
-    html += `<div class="kb-col-header">${STATUS_LABELS[col] || col} <span class="count">${items.length}</span></div>`;
-    html += `<div class="kb-col-body">`;
-    if (items.length === 0) {
-      html += `<div style="color:#484f58;font-size:12px;text-align:center;padding:12px;">—</div>`;
-    } else {
+  for (const c of cols) {
+    const items = groups[c]||[];
+    html += `<div class="kb-column"><div class="kb-col-header"><span class="badge badge-${c}">${labels[c]}</span> <span class="count">${items.length}</span></div><div class="kb-col-body">`;
+    if (items.length === 0) html += '<div style="color:var(--text-dim);font-size:11px;text-align:center;padding:10px;">—</div>';
+    else {
       for (const t of items) {
-        const assignee = t.assignee ? `<span>👤 ${escHtml(t.assignee)}</span>` : '';
-        const priority = t.priority > 0 ? `<span>⚡${t.priority}</span>` : '';
-        html += `<div class="kb-card" onclick="showTaskDetail('${t.id}')">`;
-        html += `<div class="kb-card-title">${escHtml(t.title || "Untitled")}</div>`;
-        html += `<div class="kb-card-meta">${assignee}${priority}<span>#${escHtml(t.id)}</span></div>`;
-        html += `</div>`;
+        const tid = (t.id||'');
+        html += `<div class="kb-card" onclick="showTaskDetail('${esc(tid)}')">`;
+        html += `<div class="kb-card-title">${esc((t.query||'Untitled').substring(0,40))}</div>`;
+        html += `<div class="kb-card-meta"><span>🤖 ${esc((t.agent_id||'?').substring(0,12))}</span></div></div>`;
       }
     }
-    html += `</div></div>`;
+    html += '</div></div>';
   }
   html += '</div>';
-  container.innerHTML = html;
+  el.innerHTML = html;
 }
 
-function renderKanbanList(container, tasks) {
-  let html = '<table><thead><tr><th>Status</th><th>Title</th><th>Assignee</th><th>Priority</th><th>Created</th></tr></thead><tbody>';
-  for (const t of tasks) {
-    html += `<tr class="kb-row" onclick="showTaskDetail('${t.id}')">`;
-    html += `<td><span class="badge badge-${t.status}">${t.status}</span></td>`;
-    html += `<td>${escHtml(t.title || "Untitled")}</td>`;
-    html += `<td>${escHtml(t.assignee || "-")}</td>`;
-    html += `<td>${t.priority || 0}</td>`;
-    html += `<td>${t.created_at ? new Date(t.created_at*1000).toLocaleString() : "-"}</td></tr>`;
+// ═══════════════════════════════════════════════════════════════════════
+// Task Detail Modal
+// ═══════════════════════════════════════════════════════════════════════
+function showTaskDetail(taskId) {
+  const task = Array.from(document.querySelectorAll('#task-detail-modal')).length > 0;
+  apiFetch(`${API}/v1/tasks/${taskId}`).then(data => {
+    const t = data.task || data;
+    openModal('task-detail-modal', buildTaskDetailHtml(t));
+  }).catch(e => alert('Failed: ' + e.message));
+}
+
+function buildTaskDetailHtml(t) {
+  let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+    <h2>${esc(t.query||'Task')}</h2>
+    <span class="badge badge-${t.state||'unknown'}">${t.state||'unknown'}</span>
+  </div>
+  <div style="display:flex;gap:12px;margin-bottom:14px;font-size:12px;color:var(--text-muted);flex-wrap:wrap;">
+    <span>ID: <code>${esc(t.id||'')}</code></span>
+    <span>Agent: <code>${esc(t.agent_id||'')}</code></span>`;
+  if (t.session_id) html += `<span>Session: <code>${esc(t.session_id)}</code></span>`;
+  html += `</div>`;
+
+  if (t.query) html += `<div class="detail-section"><h3>Query</h3><div class="task-query">${esc(t.query)}</div></div>`;
+  if (t.result && Object.keys(t.result).length > 0) {
+    const resultStr = typeof t.result === 'string' ? t.result : JSON.stringify(t.result, null, 2);
+    html += `<div class="detail-section"><h3>Result</h3><pre>${esc(resultStr)}</pre></div>`;
   }
-  html += '</tbody></table>';
-  container.innerHTML = html;
+  if (t.error) html += `<div class="detail-section"><h3>Error</h3><pre style="color:var(--red)">${esc(t.error)}</pre></div>`;
+  if (t.created_at) html += `<div class="detail-section"><h3>Created</h3><p>${new Date(t.created_at*1000).toLocaleString()}</p></div>`;
+  if (t.updated_at) html += `<div class="detail-section"><h3>Updated</h3><p>${new Date(t.updated_at*1000).toLocaleString()}</p></div>`;
+
+  html += `<div style="margin-top:14px;text-align:right;"><button class="btn" onclick="closeModal('task-detail-modal')">Close</button></div>`;
+  return html;
 }
 
-// ── Task detail modal ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// CLIENTS
+// ═══════════════════════════════════════════════════════════════════════
+let _clientsCache = [];
+let _clientsPage = 0;
 
-let _taskDetailData = {};
-
-function applyTaskDetailTab(name) {
-  document.querySelectorAll('#modal-detail-tabs button').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('.detail-pane').forEach(p => p.classList.remove('active'));
-  document.getElementById(`dp-${name}`).classList.add('active');
-}
-
-async function showTaskDetail(taskId) {
+async function fetchClients() {
+  const tbody = document.getElementById("cl-tbody");
+  tbody.innerHTML = '<tr><td colspan="5" class="loading">Loading clients...</td></tr>';
   try {
-    const data = await fetchData(`${API}/v2/tasks/${taskId}`);
-    _taskDetailData = data;
-    const t = data.task;
-    let html = '<div style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;" onclick="event.target===this&&closeTaskDetail()">';
-    html += `<div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:28px;width:700px;max-width:95vw;max-height:85vh;overflow-y:auto;">`;
-    html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">`;
-    html += `<h2 style="font-size:18px;font-weight:600;color:#f0f6fc;">${escHtml(t.title)}</h2>`;
-    html += `<span class="badge badge-${t.status}" style="font-size:13px;padding:4px 12px;">${t.status}</span>`;
-    html += `</div>`;
-    html += `<div style="display:flex;gap:16px;margin-bottom:16px;font-size:13px;color:#8b949e;">`;
-    html += `<span>ID: <code>${escHtml(t.id)}</code></span>`;
-    if (t.assignee) html += `<span>Assignee: <code>${escHtml(t.assignee)}</code></span>`;
-    if (t.tenant) html += `<span>Tenant: <code>${escHtml(t.tenant)}</code></span>`;
-    html += `</div>`;
-
-    // Tabs
-    html += `<div id="modal-detail-tabs" class="detail-tabs">`;
-    html += `<button class="active" onclick="detailTab('runs')">Runs (${(data.runs||[]).length})</button>`;
-    html += `<button onclick="detailTab('events')">Events (${(data.events||[]).length})</button>`;
-    html += `<button onclick="detailTab('comments')">Comments (${(data.comments||[]).length})</button>`;
-    html += `<button onclick="detailTab('deps')">Dependencies</button>`;
-    if (t.body) html += `<button onclick="detailTab('body')">Body</button>`;
-    html += `</div>`;
-
-    // Runs pane
-    html += `<div id="dp-runs" class="detail-pane active">`;
-    if (!data.runs || data.runs.length === 0) {
-      html += `<div style="color:#484f58;font-size:13px;padding:16px;text-align:center;">No runs yet.</div>`;
-    } else {
-      for (const r of data.runs) {
-        html += `<div class="run-item">`;
-        html += `<span class="run-status badge badge-${r.status}">${r.status}</span> `;
-        html += `<span class="run-outcome">${r.outcome || ""}</span> — `;
-        html += `<span>${r.started_at ? new Date(r.started_at*1000).toLocaleString() : "?"}`;
-        if (r.ended_at) html += ` → ${new Date(r.ended_at*1000).toLocaleString()}`;
-        html += `</span>`;
-        if (r.summary) html += `<div style="margin-top:4px;font-size:12px;color:#c9d1d9;">${escHtml(r.summary)}</div>`;
-        if (r.error) html += `<div style="margin-top:4px;font-size:12px;color:#f85149;">${escHtml(r.error)}</div>`;
-        html += `</div>`;
-      }
-    }
-    html += `</div>`;
-
-    // Events pane
-    html += `<div id="dp-events" class="detail-pane">`;
-    if (!data.events || data.events.length === 0) {
-      html += `<div style="color:#484f58;font-size:13px;padding:16px;text-align:center;">No events logged.</div>`;
-    } else {
-      for (const e of data.events) {
-        const date = e.created_at ? new Date(e.created_at*1000).toLocaleString() : "";
-        html += `<div class="event-item"><span class="kind">${e.kind}</span> <span style="color:#484f58">${date}</span></div>`;
-      }
-    }
-    html += `</div>`;
-
-    // Comments pane
-    html += `<div id="dp-comments" class="detail-pane">`;
-    if (!data.comments || data.comments.length === 0) {
-      html += `<div style="color:#484f58;font-size:13px;padding:16px;text-align:center;">No comments yet.</div>`;
-    } else {
-      for (const c of data.comments) {
-        html += `<div class="comment-bubble"><span class="author">${escHtml(c.author)}</span><span class="time">${c.created_at ? new Date(c.created_at*1000).toLocaleString() : ""}</span><div class="body">${escHtml(c.body)}</div></div>`;
-      }
-    }
-    html += `</div>`;
-
-    // Dependencies pane
-    html += `<div id="dp-deps" class="detail-pane">`;
-    const parents = data.parents || [];
-    const children = data.children || [];
-    if (parents.length === 0 && children.length === 0) {
-      html += `<div style="color:#484f58;font-size:13px;padding:16px;text-align:center;">No dependencies.</div>`;
-    } else {
-      if (parents.length > 0) {
-        html += `<div class="detail-section"><h3>Depends on (parents)</h3>`;
-        for (const p of parents) html += `<div class="dep-node"><span class="badge badge-${p.status}" style="font-size:10px;margin-right:6px;">${p.status}</span>${escHtml(p.title)} <code style="font-size:11px;">${escHtml(p.id)}</code></div> `;
-        html += `</div>`;
-      }
-      if (children.length > 0) {
-        html += `<div class="detail-section" style="margin-top:12px;"><h3>Blocks (children)</h3>`;
-        for (const c of children) html += `<div class="dep-node"><span class="badge badge-${c.status}" style="font-size:10px;margin-right:6px;">${c.status}</span>${escHtml(c.title)} <code style="font-size:11px;">${escHtml(c.id)}</code></div> `;
-        html += `</div>`;
-      }
-    }
-    html += `</div>`;
-
-    // Body pane
-    if (t.body) {
-      html += `<div id="dp-body" class="detail-pane"><pre style="background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;font-size:12px;white-space:pre-wrap;margin-top:8px;">${escHtml(t.body)}</pre></div>`;
-    }
-
-    html += `<div style="margin-top:16px;text-align:right;"><button onclick="closeTaskDetail()" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:6px 16px;color:#c9d1d9;cursor:pointer;">Close</button></div>`;
-    html += `</div></div>`;
-    const div = document.createElement("div");
-    div.id = "task-detail-modal";
-    div.innerHTML = html;
-    document.body.appendChild(div);
-    window._taskDetailTab = function(name) {
-      document.querySelectorAll('#modal-detail-tabs button').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.detail-pane').forEach(p => p.classList.remove('active'));
-      document.getElementById(`dp-${name}`).classList.add('active');
-    };
-  } catch (e) {
-    alert("Failed to load task details: " + e.message);
+    const data = await apiFetch(`${API}/admin/clients`);
+    _clientsCache = Array.isArray(data) ? data : (data.clients || []);
+    _clientsPage = 0;
+    renderClients();
+  } catch(e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="error-state">Failed: ${esc(e.message)}</td></tr>`;
   }
 }
 
-function detailTab(name) {
-  if (window._taskDetailTab) window._taskDetailTab(name);
+function renderClients() {
+  const tbody = document.getElementById("cl-tbody");
+  const sortKey = _sort.cl && _sort.cl.key;
+  const sortDir = _sort.cl && _sort.cl.dir;
+  let items = [..._clientsCache];
+
+  const q = document.getElementById("cl-search").value.trim().toLowerCase();
+  if (q) items = items.filter(c => (c.client_id||'').toLowerCase().includes(q) || (c.description||'').toLowerCase().includes(q));
+
+  if (sortKey) {
+    items.sort((a,b) => {
+      let va='', vb='';
+      if (sortKey === 'client_id') { va=(a.client_id||'').toLowerCase(); vb=(b.client_id||'').toLowerCase(); }
+      else if (sortKey === 'description') { va=(a.description||'').toLowerCase(); vb=(b.description||'').toLowerCase(); }
+      else if (sortKey === 'scopes') { va=((a.scopes||[]).join(',')||'').toLowerCase(); vb=((b.scopes||[]).join(',')||'').toLowerCase(); }
+      else if (sortKey === 'created') { return sortDir * ((a.created_at||0)-(b.created_at||0)); }
+      return sortDir * (va > vb ? 1 : va < vb ? -1 : 0);
+    });
+  }
+
+  const total = items.length;
+  const pages = Math.ceil(total / PAGE_SIZE) || 1;
+  const pg = Math.min(_clientsPage, pages-1);
+  const page = items.slice(pg * PAGE_SIZE, (pg+1) * PAGE_SIZE);
+
+  if (page.length === 0) { tbody.innerHTML = '<tr><td colspan="5" class="empty">No clients.</td></tr>'; renderPagination('cl', pages, pg); return; }
+  let html = '';
+  for (const c of page) {
+    const created = c.created_at ? new Date(c.created_at*1000).toLocaleString() : '-';
+    const delBtn = canOperator()
+      ? `<button class="action-btn danger" onclick="deleteClient('${esc(c.client_id)}')">Delete</button>`
+      : '<span style="color:var(--text-dim);font-size:11px;">—</span>';
+    html += `<tr>
+      <td><code>${esc(c.client_id)}</code></td>
+      <td>${esc(c.description||'-')}</td>
+      <td>${(c.scopes||[]).map(s => `<span class="tag">${s}</span>`).join('')||'-'}</td>
+      <td>${created}</td>
+      <td>${delBtn}</td>
+    </tr>`;
+  }
+  tbody.innerHTML = html;
+  renderPagination('cl', pages, pg);
 }
 
-function closeTaskDetail() {
-  const el = document.getElementById("task-detail-modal");
-  if (el) { el.remove(); }
+async function deleteClient(clientId) {
+  if (!confirm(`删除 OAuth client ${clientId}？将同时撤销其所有 token。`)) return;
+  try {
+    await fetch(`${API}/admin/clients/${clientId}`, {method:'DELETE'});
+    fetchClients();
+  } catch(e) { alert('Delete failed: ' + e.message); }
 }
 
-// ── Create Task modal ─────────────────────────────────────────────
+function toggleCreateClient() {
+  const area = document.getElementById("cl-create-area");
+  area.style.display = area.style.display === 'none' ? 'block' : 'none';
+}
+function showCreateClient() { document.getElementById("cl-create-area").style.display = 'block'; }
 
-function showCreateTaskModal() {
-  let html = '<div style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;" onclick="event.target===this&&closeCreateTaskModal()">';
-  html += '<div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:28px;width:500px;max-width:95vw;" onclick="event.stopPropagation()">';
-  html += '<h2 style="font-size:18px;font-weight:600;color:#f0f6fc;margin-bottom:16px;">Create Task</h2>';
-  html += '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Title *</label>';
-  html += '<input id="ct-title" type="text" placeholder="Task title" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;margin-bottom:12px;">';
-  html += '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Body (Markdown)</label>';
-  html += '<textarea id="ct-body" rows="4" placeholder="## Requirements..." style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;margin-bottom:12px;resize:vertical;font-family:inherit;"></textarea>';
-  html += '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Assign to (profile)</label>';
-  html += '<input id="ct-assignee" type="text" placeholder="e.g. coder-agent" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;margin-bottom:12px;">';
-  html += '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px;">Parent Task IDs (comma-separated)</label>';
-  html += '<input id="ct-parents" type="text" placeholder="e.g. t_abc123, t_def456" style="width:100%;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#c9d1d9;font-size:14px;margin-bottom:16px;">';
-  html += '<div style="display:flex;gap:8px;justify-content:flex-end;">';
-  html += '<button onclick="closeCreateTaskModal()" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:8px 16px;color:#c9d1d9;cursor:pointer;">Cancel</button>';
-  html += '<button onclick="submitCreateTask()" style="background:#238636;border:none;border-radius:6px;padding:8px 16px;color:#fff;cursor:pointer;font-weight:500;">Create</button>';
-  html += '</div><div id="ct-status" style="margin-top:12px;font-size:13px;color:#8b949e;"></div></div></div>';
+async function createClient() {
+  const agentCardId = document.getElementById("cl-agent-card-id").value.trim();
+  const description = document.getElementById("cl-description").value.trim();
+  const scopes = Array.from(document.querySelectorAll(".cl-scope:checked")).map(el => el.value);
+  const payload = {};
+  if (description) payload.description = description;
+  if (scopes.length > 0) payload.allowed_scopes = scopes;
+  if (agentCardId) payload.agent_card_id = agentCardId;
+  const status = document.getElementById("cl-status");
+  status.textContent = "Creating...";
+  try {
+    const resp = await fetch(`${API}/admin/clients`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify(payload)
+    });
+    if (!resp.ok) { const err = await resp.json(); throw new Error(err.detail || resp.statusText); }
+    const data = await resp.json();
+    status.innerHTML = `✅ Created <code>${esc(data.client_id)}</code><br><small style="color:var(--yellow);">Secret: ${esc(data.client_secret||'(no secret)')} (以后不再显示)</small>`;
+    fetchClients();
+  } catch(e) { status.textContent = "Error: " + e.message; }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// AUDIT LOG
+// ═══════════════════════════════════════════════════════════════════════
+let _auditCache = [];
+let _auditPage = 0;
+
+async function fetchAudit() {
+  const tbody = document.getElementById("au-tbody");
+  tbody.innerHTML = '<tr><td colspan="5" class="loading">Loading audit log...</td></tr>';
+  try {
+    const q = document.getElementById("au-search").value.trim();
+    const type = document.getElementById("au-type-filter").value;
+    let url = `${API}/admin/audit?limit=200`;
+    const params = [];
+    if (q) params.push(`q=${encodeURIComponent(q)}`);
+    if (type) params.push(`event_type=${encodeURIComponent(type)}`);
+    if (params.length) url += '&' + params.join('&');
+    const data = await apiFetch(url);
+    _auditCache = Array.isArray(data) ? data : (data.events || data.audit_logs || []);
+    _auditPage = 0;
+    renderAudit();
+  } catch(e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="error-state">Failed: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function renderAudit() {
+  const tbody = document.getElementById("au-tbody");
+  const sortKey = _sort.au && _sort.au.key;
+  const sortDir = _sort.au && _sort.au.dir;
+  let items = [..._auditCache];
+
+  if (sortKey) {
+    items.sort((a,b) => {
+      let va='', vb='';
+      if (sortKey === 'time') { return sortDir * ((a.timestamp||a.created_at||0)-(b.timestamp||b.created_at||0)); }
+      else if (sortKey === 'type') { va=(a.event_type||'').toLowerCase(); vb=(b.event_type||'').toLowerCase(); }
+      else if (sortKey === 'actor') { va=(a.actor||a.username||'').toLowerCase(); vb=(b.actor||b.username||'').toLowerCase(); }
+      else if (sortKey === 'resource') { va=(a.resource||a.target||'').toLowerCase(); vb=(b.resource||b.target||'').toLowerCase(); }
+      return sortDir * (va > vb ? 1 : va < vb ? -1 : 0);
+    });
+  }
+
+  const total = items.length;
+  const pages = Math.ceil(total / PAGE_SIZE) || 1;
+  const pg = Math.min(_auditPage, pages-1);
+  const page = items.slice(pg * PAGE_SIZE, (pg+1) * PAGE_SIZE);
+
+  if (page.length === 0) { tbody.innerHTML = '<tr><td colspan="5" class="empty">No audit events.</td></tr>'; renderPagination('au', pages, pg); return; }
+  let html = '';
+  for (const e of page) {
+    const ts = (e.timestamp||e.created_at||0) * 1000;
+    const time = ts ? new Date(ts).toLocaleString() : '-';
+    const evType = e.event_type || e.type || '-';
+    const actor = e.actor || e.username || '-';
+    const resource = e.resource || e.target || e.agent_id || '-';
+    const detail = e.details || e.payload || {};
+    const detailStr = typeof detail === 'string' ? detail : JSON.stringify(detail, null, 2);
+    html += `<tr class="clickable" onclick="this.nextElementSibling.classList.toggle('open')">
+      <td>${time}</td>
+      <td><span class="badge badge-${evType.includes('fail')||evType.includes('error')?'failed':evType.includes('create')||evType.includes('register')?'completed':'ready'}">${esc(evType)}</span></td>
+      <td>${esc(actor)}</td>
+      <td><code>${esc(resource)}</code></td>
+      <td><button class="action-btn">View</button></td>
+    </tr>
+    <tr class="details-row"><td colspan="5"><div class="audit-detail">${esc(detailStr)}</div></td></tr>`;
+  }
+  tbody.innerHTML = html;
+  renderPagination('au', pages, pg);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SETTINGS
+// ═══════════════════════════════════════════════════════════════════════
+async function fetchSettings() {
+  try {
+    const [health, users] = await Promise.all([
+      apiFetch(`${API}/health`).catch(()=>({})),
+      canAdmin() ? apiFetch(`${API}/admin/users`).catch(()=>[]) : Promise.resolve([])
+    ]);
+    renderSystemInfo(health);
+    renderUserMgmt(users);
+    renderConfigInfo(health);
+  } catch(e) { /* silent */ }
+}
+
+function renderSystemInfo(health) {
+  const el = document.getElementById("st-system-info");
+  const st = health.stats || {};
+  el.innerHTML = Object.entries({
+    'Registry Version': health.version||'N/A',
+    'Uptime': health.uptime ? `${Math.floor(health.uptime/60)}m ${Math.round(health.uptime%60)}s` : 'N/A',
+    'Total Agents': st.total_agents||0,
+    'Alive Agents': st.alive_agents||0,
+    'WebSocket Connections': st.connected_via_ws||0,
+  }).map(([k,v]) => `<div class="settings-row"><span class="key">${k}</span><span class="val">${v}</span></div>`).join('');
+}
+
+function renderUserMgmt(users) {
+  const el = document.getElementById("st-user-mgmt");
+  const userList = Array.isArray(users) ? users : (users.users || []);
+  if (!canAdmin()) { el.innerHTML = '<p style="color:var(--text-dim);font-size:13px;">需要管理员权限才能管理用户。</p>'; return; }
+  let html = '<div class="table-wrap" style="margin-bottom:12px;"><table><thead><tr><th>Username</th><th>Role</th><th>Actions</th></tr></thead><tbody>';
+  for (const u of userList) {
+    html += `<tr><td>${esc(u.username)}</td><td><span class="badge ${u.role==='admin'?'badge-ready':'badge-alive'}">${esc(u.role)}</span></td>
+      <td>${u.username !== 'admin' ? `<button class="action-btn danger" onclick="deleteUser('${esc(u.username)}')">删除</button>` : '<span style="color:var(--text-dim);font-size:11px;">不可删除</span>'}</td></tr>`;
+  }
+  html += '</tbody></table></div>';
+  // Create user form
+  html += `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+    <div><label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:2px;">Username</label><input id="su-username" type="text" placeholder="username" style="background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:13px;"></div>
+    <div><label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:2px;">Password</label><input id="su-password" type="password" placeholder="password" style="background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:13px;"></div>
+    <div><label style="font-size:11px;color:var(--text-muted);display:block;margin-bottom:2px;">Role</label><select id="su-role" style="background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:13px;"><option value="operator">Operator</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select></div>
+    <button class="btn btn-primary" onclick="createUser()">创建用户</button>
+    <span id="su-status" style="font-size:12px;color:var(--text-muted);"></span>
+  </div>`;
+  el.innerHTML = html;
+}
+
+async function createUser() {
+  const username = document.getElementById("su-username").value.trim();
+  const password = document.getElementById("su-password").value;
+  const role = document.getElementById("su-role").value;
+  if (!username || !password) { document.getElementById("su-status").textContent = "Username and password required."; return; }
+  document.getElementById("su-status").textContent = "Creating...";
+  try {
+    const resp = await fetch(`${API}/admin/users`, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({username, password, role})
+    });
+    if (!resp.ok) { const err = await resp.json(); throw new Error(err.detail||resp.statusText); }
+    document.getElementById("su-status").textContent = "✅ Created";
+    document.getElementById("su-username").value = '';
+    document.getElementById("su-password").value = '';
+    fetchSettings();
+  } catch(e) { document.getElementById("su-status").textContent = "Error: " + e.message; }
+}
+
+async function deleteUser(username) {
+  if (!confirm(`Delete user ${username}?`)) return;
+  try {
+    const resp = await fetch(`${API}/admin/users/${encodeURIComponent(username)}`, {method:"DELETE"});
+    if (!resp.ok) throw new Error('Delete failed');
+    fetchSettings();
+  } catch(e) { alert(e.message); }
+}
+
+function renderConfigInfo(health) {
+  const el = document.getElementById("st-config-info");
+  el.innerHTML = Object.entries({
+    'Health Endpoint': '/health',
+    'Login Endpoint': '/api/login',
+    'OAuth Token': '/auth/token',
+    'API Version': 'v1 + v2 (Orchestration)',
+    'Auth Enabled': _authEnabled ? '✅' : '❌',
+    'Database': health.database||'N/A',
+  }).map(([k,v]) => `<div class="settings-row"><span class="key">${k}</span><span class="val">${v}</span></div>`).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Sorting & Pagination
+// ═══════════════════════════════════════════════════════════════════════
+function sortBy(prefix, key) {
+  if (!_sort[prefix]) _sort[prefix] = {};
+  if (_sort[prefix].key === key) _sort[prefix].dir = -(_sort[prefix].dir || 1);
+  else { _sort[prefix].key = key; _sort[prefix].dir = 1; }
+  // Re-render
+  if (prefix === 'ag') renderAgents();
+  else if (prefix === 'cl') renderClients();
+  else if (prefix === 'au') renderAudit();
+}
+
+function setPage(prefix, pg) {
+  if (prefix === 'ag') { _agentsPage = pg; renderAgents(); }
+  else if (prefix === 'cl') { _clientsPage = pg; renderClients(); }
+  else if (prefix === 'au') { _auditPage = pg; renderAudit(); }
+}
+
+function renderPagination(prefix, pages, current) {
+  const el = document.getElementById(`${prefix}-pagination`);
+  if (!el) return;
+  if (pages <= 1) { el.innerHTML = ''; return; }
+  let html = `<button class="page-btn" onclick="setPage('${prefix}',0)" ${current===0?'disabled':''}>«</button>`;
+  html += `<button class="page-btn" onclick="setPage('${prefix}',${Math.max(0,current-1)})" ${current===0?'disabled':''}>‹</button>`;
+  const start = Math.max(0, current-2);
+  const end = Math.min(pages, current+3);
+  for (let i=start; i<end; i++) {
+    html += `<button class="page-btn${i===current?' active':''}" onclick="setPage('${prefix}',${i})">${i+1}</button>`;
+  }
+  html += `<button class="page-btn" onclick="setPage('${prefix}',${Math.min(pages-1,current+1)})" ${current>=pages-1?'disabled':''}>›</button>`;
+  html += `<button class="page-btn" onclick="setPage('${prefix}',${pages-1})" ${current>=pages-1?'disabled':''}>»</button>`;
+  html += `<span class="page-info">${current+1}/${pages}</span>`;
+  el.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Modal helpers
+// ═══════════════════════════════════════════════════════════════════════
+function openModal(id, content) {
+  const existing = document.getElementById(id);
+  if (existing) existing.remove();
   const div = document.createElement("div");
-  div.id = "create-task-modal";
-  div.innerHTML = html;
+  div.id = id;
+  div.className = "modal-overlay";
+  div.onclick = function(e) { if (e.target === this) closeModal(id); };
+  div.innerHTML = `<div class="modal-box" onclick="event.stopPropagation()">${content}</div>`;
   document.body.appendChild(div);
 }
 
-function closeCreateTaskModal() {
-  const el = document.getElementById("create-task-modal");
+function closeModal(id) {
+  const el = document.getElementById(id);
   if (el) el.remove();
 }
-
-async function submitCreateTask() {
-  const title = document.getElementById("ct-title").value.trim();
-  if (!title) { document.getElementById("ct-status").textContent = "Title is required."; return; }
-  const body = document.getElementById("ct-body").value.trim();
-  const assignee = document.getElementById("ct-assignee").value.trim();
-  const parentsRaw = document.getElementById("ct-parents").value.trim();
-  const parents = parentsRaw ? parentsRaw.split(",").map(s => s.trim()).filter(Boolean) : [];
-  const payload = { title };
-  if (body) payload.body = body;
-  if (assignee) payload.assignee = assignee;
-  if (parents.length > 0) payload.parents = parents;
-  try {
-    document.getElementById("ct-status").textContent = "Creating...";
-    const resp = await fetch(`${API}/v2/tasks`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify(payload)
-    });
-    if (!resp.ok) { const err = await resp.json(); throw new Error(err.detail || resp.statusText); }
-    const data = await resp.json();
-    document.getElementById("ct-status").innerHTML = `✅ Created <code>${data.task.id}</code>`;
-    setTimeout(closeCreateTaskModal, 800);
-    setTimeout(fetchKanban, 1000);
-  } catch (e) {
-    document.getElementById("ct-status").textContent = "Error: " + e.message;
-  }
-}
-
-// ── ADMIN ─────────────────────────────────────────────────────────
-
-async function fetchAdminClients() {
-  const container = document.getElementById("admin-clients");
-  container.innerHTML = '<div class="loading">Loading OAuth clients...</div>';
-  try {
-    const q = document.getElementById("admin-search").value.trim();
-    let url = `${API}/admin/clients`;
-    if (q) url += `?q=${encodeURIComponent(q)}`;
-    const data = await fetchData(url);
-    renderAdminClients(data);
-  } catch (e) {
-    container.innerHTML = `<div class="error">Failed to load clients: ${e.message}</div>`;
-  }
-}
-
-function renderAdminClients(data) {
-  const container = document.getElementById("admin-clients");
-  const clients = Array.isArray(data) ? data : (data.clients || []);
-  if (clients.length === 0) {
-    container.innerHTML = '<div class="loading">No OAuth clients registered.</div>';
-    return;
-  }
-  let html = '<table><thead><tr><th>Client ID</th><th>Description</th><th>Scopes</th><th>Created</th><th>Action</th></tr></thead><tbody>';
-  for (const c of clients) {
-    html += '<tr>';
-    html += `<td><code>${escHtml(c.client_id)}</code></td>`;
-    html += `<td>${escHtml(c.description || "-")}</td>`;
-    html += `<td>${(c.scopes||[]).map(s => `<span class="tag">${s}</span>`).join("")}</td>`;
-    html += `<td>${c.created_at ? new Date(c.created_at*1000).toLocaleString() : "-"}</td>`;
-    html += `<td><button onclick="confirmDeleteClient('${c.client_id}')" style="background:transparent;border:1px solid #f85149;color:#f85149;border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer;">Delete</button></td>`;
-    html += '</tr>';
-  }
-  html += '</tbody></table>';
-  container.innerHTML = html;
-}
-
-function confirmDeleteClient(clientId) {
-  if (!confirm(`Delete OAuth client ${clientId}? This will revoke all its tokens.`)) return;
-  fetch(`${API}/admin/clients/${clientId}`, {
-    method: "DELETE",
-    headers: { ...authHeaders() }
-  }).then(r => { if (r.ok) fetchAdminClients(); else alert("Delete failed"); });
-}
-
-async function createAdminClient() {
-  const agentCardId = document.getElementById("ac-agent-card-id").value.trim();
-  const description = document.getElementById("ac-description").value.trim();
-  const scopeEls = document.querySelectorAll(".ac-scope:checked");
-  const allowedScopes = Array.from(scopeEls).map(el => el.value);
-  const payload = {};
-  if (description) payload.description = description;
-  if (allowedScopes.length > 0) payload.allowed_scopes = allowedScopes;
-  if (agentCardId) payload.agent_card_id = agentCardId;
-  try {
-    document.getElementById("ac-status").textContent = "Creating...";
-    const resp = await fetch(`${API}/admin/clients`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify(payload)
-    });
-    if (!resp.ok) { const err = await resp.json(); throw new Error(err.detail || resp.statusText); }
-    const data = await resp.json();
-    const secret = data.client_secret || "(no secret returned)";
-    document.getElementById("ac-status").innerHTML = `✅ Created <code>${data.client_id}</code><br><small style="color:#d29922;">Secret: ${secret} (save it now — won't be shown again)</small>`;
-    fetchAdminClients();
-  } catch (e) {
-    document.getElementById("ac-status").textContent = "Error: " + e.message;
-  }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────
-
-function escHtml(s) {
-  if (!s) return "";
-  const d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML.replace(/"/g, "&quot;");
-}
-
-function renderTaskResult(result) {
-  if (typeof result === "string") return `<pre>${escHtml(result)}</pre>`;
-  return `<pre>${escHtml(JSON.stringify(result, null, 2))}</pre>`;
-}
-
-// Auto-refresh every 15s
-setInterval(() => {
-  if (isAuthenticated()) {
-    updateStats();
-    const tab = document.querySelector('.tabs .active');
-    if (tab) {
-      const name = tab.id.replace('tab-', '');
-      if (name === 'agents') fetchAgents();
-    }
-  }
-}, 15000);
 </script>
 </body>
 </html>

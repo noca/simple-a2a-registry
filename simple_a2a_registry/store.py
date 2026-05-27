@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS agents (
     id              TEXT PRIMARY KEY,
     card_json       TEXT NOT NULL,
     heartbeat_at    REAL NOT NULL DEFAULT 0,
+    disabled        INTEGER NOT NULL DEFAULT 0,
     registered_at   TEXT NOT NULL,
     created_at      REAL NOT NULL
 );
@@ -130,6 +131,7 @@ CREATE TABLE IF NOT EXISTS agents (
     id              VARCHAR(255) PRIMARY KEY,
     card_json       LONGTEXT NOT NULL,
     heartbeat_at    DOUBLE NOT NULL DEFAULT 0,
+    disabled        TINYINT(1) NOT NULL DEFAULT 0,
     registered_at   VARCHAR(255) NOT NULL,
     created_at      DOUBLE NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -174,6 +176,14 @@ def _maybe_create_schema(engine: DatabaseEngine) -> None:
     if engine.driver == "sqlite":
         engine.executescript(_SCHEMA_SQL)
         engine.commit()
+        # Migrate existing databases — add disabled column if missing
+        try:
+            engine.execute(
+                "ALTER TABLE agents ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0"
+            )
+            engine.commit()
+        except Exception:
+            pass  # column already exists
     elif engine.driver == "mysql":
         for statement in _SCHEMA_SQL_MYSQL.split(";"):
             stripped = statement.strip()
@@ -184,6 +194,12 @@ def _maybe_create_schema(engine: DatabaseEngine) -> None:
             except Exception:
                 pass  # ignore "already exists" errors
         engine.commit()
+        # Migrate existing databases — add disabled column if missing
+        try:
+            engine.execute("ALTER TABLE agents ADD COLUMN disabled TINYINT(1) NOT NULL DEFAULT 0")
+            engine.commit()
+        except Exception:
+            pass  # column already exists
 
 
 # ======================================================================
@@ -471,15 +487,17 @@ class Store:
         results: List[Dict[str, Any]] = []
 
         with self._tx("DEFERRED") as engine:
-            result = engine.execute("SELECT id, card_json, heartbeat_at FROM agents")
+            result = engine.execute("SELECT id, card_json, heartbeat_at, disabled FROM agents")
             for row in result.fetchall():
                 agent_id = row["id"]
                 card = json.loads(row["card_json"])
                 last_hb = row["heartbeat_at"]
                 elapsed = now - last_hb if last_hb else HEARTBEAT_TIMEOUT + 1
-                is_alive = elapsed <= HEARTBEAT_TIMEOUT
                 card["id"] = agent_id
-                card["status"] = "alive" if is_alive else "stale"
+                if row.get("disabled"):
+                    card["status"] = "disabled"
+                else:
+                    card["status"] = "alive" if elapsed <= HEARTBEAT_TIMEOUT else "stale"
                 card["lastHeartbeat"] = last_hb
 
                 if skill:
@@ -510,18 +528,21 @@ class Store:
         """
         with self._tx("DEFERRED") as engine:
             result = engine.execute(
-                "SELECT id, card_json, heartbeat_at FROM agents WHERE id=?",
+                "SELECT id, card_json, heartbeat_at, disabled FROM agents WHERE id=?",
                 (agent_id,),
             )
             row = result.fetchone()
             if row is None:
                 return None
             card = json.loads(row["card_json"])
+            card["id"] = row["id"]
             last_hb = row["heartbeat_at"]
             elapsed = time.time() - last_hb if last_hb else HEARTBEAT_TIMEOUT + 1
-            card["id"] = agent_id
-            card["status"] = "alive" if elapsed <= HEARTBEAT_TIMEOUT else "stale"
-            card["lastHeartbeat"] = last_hb
+            if row.get("disabled"):
+                card["status"] = "disabled"
+            else:
+                is_alive = elapsed <= HEARTBEAT_TIMEOUT
+                card["status"] = "alive" if is_alive else "stale"
             return card
 
     # -- Mutations ------------------------------------------------------------
@@ -590,6 +611,25 @@ class Store:
             if removed:
                 logger.info("Purged %d stale agents", removed)
             return removed
+
+    def toggle_agent(self, agent_id: str) -> Optional[bool]:
+        """Toggle the disabled status of an agent.
+
+        Returns:
+            ``True`` if now disabled, ``False`` if now enabled,
+            ``None`` if agent not found.
+        """
+        with self._tx() as engine:
+            row = engine.execute(
+                "SELECT disabled FROM agents WHERE id=?", (agent_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            new_val = 0 if row["disabled"] else 1
+            engine.execute(
+                "UPDATE agents SET disabled=? WHERE id=?", (new_val, agent_id)
+            )
+            return bool(new_val)
 
     # -- Stats -----------------------------------------------------------------
 

@@ -347,6 +347,24 @@ class RegistryHandler:
             status=203,
         )
 
+    async def handle_toggle_agent(self, request: web.Request) -> web.Response:
+        """POST /v1/agents/{agent_id}/toggle — toggle agent disabled status.
+
+        Requires ``agent:admin`` scope.
+        """
+        agent_id = request.match_info["agent_id"]
+        result = self.store.toggle_agent(agent_id)
+        if result is None:
+            return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
+        card = self.store.get_agent(agent_id)
+        return web.json_response(
+            {
+                "id": agent_id,
+                "status": card["status"] if card else "unknown",
+                "disabled": card["disabled"] if card else False,
+            }
+        )
+
     # ------------------------------------------------------------------
     # WebSocket — persistent agent connection
     # ------------------------------------------------------------------
@@ -1338,6 +1356,12 @@ def create_app(
     app.router.add_post(
         "/v1/agents/{agent_id}/heartbeat",
         require_scope("agent:read")(handler.handle_heartbeat),
+    )
+
+    # Toggle agent disabled status — requires agent:admin
+    app.router.add_post(
+        "/v1/agents/{agent_id}/toggle",
+        require_scope("agent:admin")(handler.handle_toggle_agent),
     )
 
     # WebSocket — no scope check here (query param token validated in handler)
