@@ -562,6 +562,21 @@ function populateTenantDropdown(agents) {
   sel.innerHTML = html;
 }
 
+// P6-A4-2+3-4: Admin 用户页面加载后始终默认"所有租户"，不恢复 localStorage
+function resetTenantForAdmin() {
+  if (!_authEnabled) {
+    // Auth 关闭 = admin 范围，强制重置
+  } else if (!canOperator()) {
+    return; // 普通用户不干扰
+  }
+  _currentTenant = "";
+  localStorage.removeItem('a2a-tenant');
+  const sel = document.getElementById('tenant-select');
+  if (sel) sel.value = "";
+  const badge = document.getElementById('tenant-current');
+  if (badge) badge.textContent = "所有租户";
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Auth
 // ═══════════════════════════════════════════════════════════════════════
@@ -748,14 +763,20 @@ function switchTab(name) {
     const user = await checkSession();
     if (user) {
       document.getElementById("login-overlay").classList.add("hidden");
-      applyRBAC(); updateHeader(); initAll();
+      applyRBAC(); updateHeader();
+      // P6-A4-2+3-4: Admin/operator 用户页面加载后默认重置为"所有租户"
+      resetTenantForAdmin();
+      initAll();
     } else {
       document.getElementById("login-overlay").classList.remove("hidden");
       applyRBAC(); updateHeader();
     }
   } else {
     document.getElementById("login-overlay").classList.add("hidden");
-    applyRBAC(); updateHeader(); initAll();
+    applyRBAC(); updateHeader();
+    // Auth 关闭时视为 admin 范围，默认为"所有租户"
+    resetTenantForAdmin();
+    initAll();
   }
 })();
 
