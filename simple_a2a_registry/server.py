@@ -193,7 +193,16 @@ class RegistryHandler:
         except (ValueError, TypeError):
             offset = 0
 
-        tenant = request.query.get("tenant", None)
+        # Query param ?tenant= overrides auth-injected tenant ONLY when
+        # the auth-injected tenant is empty (admin scope / backwards compat).
+        # When a non-admin token has a bound tenant, the query param cannot
+        # override it — this prevents ?tenant= spoofing.
+        auth_tenant = request["tenant"] if "tenant" in request else None
+        qp_tenant = request.query.get("tenant", None)
+        if qp_tenant is not None and (not auth_tenant):
+            tenant = qp_tenant
+        else:
+            tenant = auth_tenant
         all_agents = self.store.list_agents(skill=skill, tag=tag, q=q, tenant=tenant)
         total = len(all_agents)
         page = all_agents[offset:offset + limit]
@@ -215,7 +224,17 @@ class RegistryHandler:
     async def handle_get_agent(self, request: web.Request) -> web.Response:
         """GET /v1/agents/{agent_id}"""
         agent_id = request.match_info["agent_id"]
-        tenant = request.headers.get("X-Tenant-ID", None)
+        # JWT tenant from auth middleware is authoritative; fall back to
+        # ?tenant= query param, then X-Tenant-ID header.
+        # When auth_tenant is set, ?tenant= cannot override it (anti-spoofing).
+        auth_tenant = request["tenant"] if "tenant" in request else None
+        qp_tenant = request.query.get("tenant", None)
+        if qp_tenant is not None and (not auth_tenant):
+            tenant = qp_tenant
+        elif auth_tenant is not None:
+            tenant = auth_tenant
+        else:
+            tenant = request.headers.get("X-Tenant-ID", None)
         card = self.store.get_agent(agent_id, tenant=tenant)
         if card is None:
             return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
@@ -262,15 +281,20 @@ class RegistryHandler:
         if not name:
             return json_error(400, "validation_error", "Agent requires a 'name'")
 
-        # Check for duplicate name among external agents (scoped to tenant)
-        tenant = body.get("tenant", "")
+        # Auth middleware injects request['tenant'] (JWT); fall back to body tenant.
+        # Admin scope (registry:admin) sets request['tenant']='' so registration
+        # creates an agent in the default (empty) tenant.
+        # Auth middleware always sets request['tenant'] ('' when JWT has no tenant).
+        # When auth tenant is empty, fall back to the body's tenant field so that
+        # tokens without a tenant claim can still register agents under a tenant.
+        tenant = request["tenant"] if request.get("tenant") else body.get("tenant", "")
         existing = self.store.list_agents(tenant=tenant if tenant else None)
         for agent in existing:
             if agent.get("name", "").strip().lower() == name.lower():
                 return json_error(
                     409, "agent_exists", f"Agent '{name}' already exists"
                 )
-        tenant = body.get("tenant", "")
+        tenant = request["tenant"] if request.get("tenant") else body.get("tenant", "")
         agent_id = self.store.register_agent(body, tenant=tenant)
         card = self.store.get_agent(agent_id)
 
@@ -371,7 +395,8 @@ class RegistryHandler:
         Requires agent:admin scope.
         """
         agent_id = request.match_info["agent_id"]
-        tenant = request.query.get("tenant", "") or ""
+        # Auth middleware injects request['tenant']; fall back to ?tenant= query param
+        tenant = request["tenant"] if "tenant" in request else (request.query.get("tenant", "") or "")
         result = self.store.toggle_agent(agent_id, tenant=tenant)
         if result is None:
             return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
@@ -400,8 +425,12 @@ class RegistryHandler:
         """
         agent_id = request.match_info["agent_id"]
 
+        # Extract tenant from WebSocket query param (or later from JWT token).
+        # The auth_middleware skips WS paths, so request["tenant"] is not set here.
+        ws_tenant = request.query.get("tenant", None)
+
         # Verify the agent is registered FIRST (needed for sub check below)
-        card = self.store.get_agent(agent_id)
+        card = self.store.get_agent(agent_id, tenant=ws_tenant)
         if card is None:
             return web.json_response(
                 {"error": "agent_not_found", "detail": f"Agent '{agent_id}' not found"},
@@ -458,6 +487,15 @@ class RegistryHandler:
                         status=403,
                     )
 
+            # JWT tenant is authoritative — override ws_tenant from token payload.
+            # Admin scope (registry:admin) bypasses tenant isolation.
+            token_tenant = payload.get("tenant", None)
+            token_scopes = payload.get("scope", "").split()
+            if "registry:admin" in token_scopes:
+                ws_tenant = ""
+            elif token_tenant is not None:
+                ws_tenant = token_tenant
+
         ws = web.WebSocketResponse(max_msg_size=0)  # no size limit
         await ws.prepare(request)
 
@@ -476,7 +514,7 @@ class RegistryHandler:
                      agent_id, len(self._ws_connections))
 
         # Mark alive in store
-        self.store.heartbeat(agent_id)
+        self.store.heartbeat(agent_id, tenant=ws_tenant or "")
 
         # On reconnection, dispatch any pending tasks blocked for this agent
         await _maybe_dispatch_pending(self.task_store, ws, agent_id, self._dispatched_ws_tasks)
@@ -599,11 +637,14 @@ class RegistryHandler:
         """
         agent_id = request.match_info["agent_id"]
 
+        # Tenant filter from auth middleware; fall back to query param
+        tenant = request["tenant"] if "tenant" in request else request.query.get("tenant", None)
+
         # Check WebSocket connection
         ws = self._ws_connections.get(agent_id)
         if not ws or ws.closed:
             # Check if agent exists but isn't connected
-            card = self.store.get_agent(agent_id)
+            card = self.store.get_agent(agent_id, tenant=tenant)
             if card is None:
                 return json_error(404, "agent_not_found",
                                    f"Agent '{agent_id}' not found")
@@ -634,6 +675,7 @@ class RegistryHandler:
             "created_at": now,
             "updated_at": now,
             "dispatched_at": now,
+            "tenant": tenant or "",
         }
         self._tasks[task_id] = task
 
@@ -674,8 +716,14 @@ class RegistryHandler:
     async def handle_get_task(self, request: web.Request) -> web.Response:
         """GET /v1/tasks/{task_id} — get task status and result."""
         task_id = request.match_info["task_id"]
+        tenant = request["tenant"] if "tenant" in request else None
         task = self._tasks.get(task_id)
         if task is None:
+            return json_error(404, "task_not_found",
+                               f"Task '{task_id}' not found")
+        # Tenant isolation: if tenant is set, only show tasks for that tenant
+        task_tenant = task.get("tenant", "")
+        if tenant and task_tenant and task_tenant != tenant:
             return json_error(404, "task_not_found",
                                f"Task '{task_id}' not found")
         return web.json_response(task)
@@ -700,12 +748,16 @@ class RegistryHandler:
 
         agent_filter = request.query.get("agent_id", "").strip()
         state_filter = request.query.get("state", "").strip()
+        tenant = request["tenant"] if "tenant" in request else None
 
         all_tasks = list(self._tasks.values())
         # Sort newest first
         all_tasks.sort(key=lambda t: t.get("created_at", 0), reverse=True)
 
         # Apply filters
+        if tenant:
+            # Tenant isolation: only show tasks for this tenant
+            all_tasks = [t for t in all_tasks if t.get("tenant", "") == tenant]
         if agent_filter:
             af = agent_filter.lower()
             all_tasks = [t for t in all_tasks if af in t.get("agent_id", "").lower()]
@@ -731,7 +783,10 @@ class RegistryHandler:
         """POST /v1/agents/{agent_id}/task — proxy a task to an agent's URL."""
         agent_id = request.match_info["agent_id"]
 
-        card = self.store.get_agent(agent_id)
+        # Tenant filter from auth middleware; fall back to query param
+        tenant = request["tenant"] if "tenant" in request else request.query.get("tenant", None)
+
+        card = self.store.get_agent(agent_id, tenant=tenant)
         if card is None:
             return json_error(404, "agent_not_found",
                                f"Agent '{agent_id}' not found")
@@ -987,6 +1042,34 @@ class AdminHandler:
             "client_id": client_id,
         })
 
+    async def handle_get_agent_stats(self, request: web.Request) -> web.Response:
+        """GET /admin/agent-stats — get agent statistics, optionally filtered by tenant.
+
+        Query params:
+            tenant: If set, only return stats for this tenant.
+                When omitted (or empty), return stats for all agents.
+
+        Returns::
+
+            {
+                "tenant": "tenant1" | null,
+                "totalAgents": 42,
+                "aliveAgents": 38,
+                "staleAgents": 4
+            }
+        """
+        # Explicit ?tenant query param; None/empty means all tenants
+        tenant = request.query.get("tenant", None)
+        stats = self.auth_store.stats(tenant=tenant)
+        response = {
+            "totalAgents": stats["totalAgents"],
+            "aliveAgents": stats["aliveAgents"],
+            "staleAgents": stats["staleAgents"],
+        }
+        if tenant:
+            response["tenant"] = tenant
+        return web.json_response(response)
+
 
 # ---------------------------------------------------------------------------
 
@@ -1204,7 +1287,7 @@ def create_app(
     workspaces_root: Optional[str] = None,
     host: str = "0.0.0.0",
     port: int = 8321,
-    user_session_enabled: bool = True,
+    user_session_enabled: bool = False,
 ) -> web.Application:
     """Create and configure the aiohttp web application.
 
@@ -1487,6 +1570,12 @@ def create_app(
             "/admin/clients/{client_id}",
             require_scope("registry:admin")(admin_handler.handle_delete_client),
         )
+        app.router.add_get(
+            "/admin/agent-stats",
+            require_scope("registry:admin")(
+                admin_handler.handle_get_agent_stats
+            ),
+        )
 
     # User authentication routes — login/logout + user management
     app.router.add_get("/login", user_handler.handle_login_page)
@@ -1552,15 +1641,6 @@ def create_app(
                 logger.info("  [OK] RSA key pair generated (%d bits)", 2048)
             else:
                 logger.warning("  [?] Auth enabled but public key empty — may affect JWKS endpoint")
-
-        # 4. Bootstrap default admin account on first start
-        user_store: UserStore = app.get("user_store")
-        if user_store:
-            admin_pw = user_store.bootstrap_admin()
-            if admin_pw:
-                logger.info("  [BOOTSTRAP] Default admin account initialised — password logged above")
-            else:
-                logger.info("  [OK] Users already bootstrapped — skipping default admin creation")
 
         logger.info("Preflight checks complete — starting server.")
 
@@ -1652,6 +1732,14 @@ def create_app(
 
     app.on_startup.append(_start_background)
     app.on_cleanup.append(_stop_background)
+
+    # Bootstrap default admin account on first start
+    if user_store:
+        admin_pw = user_store.bootstrap_admin()
+        if admin_pw:
+            logger.info("  [BOOTSTRAP] Default admin account initialised — password logged above")
+        else:
+            logger.info("  [OK] Users already bootstrapped — skipping default admin creation")
 
     # Store host/port for startup check
     app["_host"] = host
@@ -1844,6 +1932,7 @@ def run_server(
         claim_ttl=claim_ttl,
         failure_limit=failure_limit,
         workspaces_root=workspaces_root,
+        user_session_enabled=True,
     )
 
     # Validate TLS pair completeness — both or neither

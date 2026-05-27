@@ -417,6 +417,38 @@ class TestTenantListIsolation:
             assert data["limit"] == 2
             assert data["offset"] == 0
 
+    async def test_tenant_list_returns_only_own_agents(self, app_factory):
+        """GET /v1/agents?tenant=X returns exclusively X's agents (not Y's)."""
+        async with await app_factory() as client:
+            r1 = await _register_agent(client, "AgentOne", tenant=TENANT_A)
+            r2 = await _register_agent(client, "AgentTwo", tenant=TENANT_B)
+
+            # List with tenant=A: should only see AgentOne
+            a_list = await _list_agents(client, tenant=TENANT_A)
+            a_names = [a["name"] for a in a_list]
+            assert len(a_list) == 1, (
+                f"Expected 1 agent for {TENANT_A}, got {len(a_list)}"
+            )
+            assert "AgentOne" in a_names, (
+                f"{TENANT_A} should see AgentOne, got {a_names}"
+            )
+            assert "AgentTwo" not in a_names, (
+                f"{TENANT_A} should NOT see AgentTwo, got {a_names}"
+            )
+
+            # List with tenant=B: should only see AgentTwo
+            b_list = await _list_agents(client, tenant=TENANT_B)
+            b_names = [b["name"] for b in b_list]
+            assert len(b_list) == 1, (
+                f"Expected 1 agent for {TENANT_B}, got {len(b_list)}"
+            )
+            assert "AgentTwo" in b_names, (
+                f"{TENANT_B} should see AgentTwo, got {b_names}"
+            )
+            assert "AgentOne" not in b_names, (
+                f"{TENANT_B} should NOT see AgentOne, got {b_names}"
+            )
+
 
 class TestTenantDetailIsolation:
     """3. Tenant A cannot fetch Tenant B's agent detail."""
@@ -464,6 +496,72 @@ class TestTenantDetailIsolation:
                 headers={"X-Tenant-ID": TENANT_A},
             )
             assert resp.status == 404
+
+    # ------------------------------------------------------------------
+    # P6-A4-1b: ?tenant=xxx query param tests
+    # ------------------------------------------------------------------
+
+    async def test_get_agent_with_correct_tenant_query_param(self, app_factory):
+        """GET /v1/agents/{id}?tenant=X returns the agent when tenant matches."""
+        async with await app_factory() as client:
+            r = await _register_agent(client, "TenantAgent", tenant=TENANT_A)
+            agent_id = r["id"]
+
+            resp = await client.get(
+                f"/v1/agents/{agent_id}",
+                params={"tenant": TENANT_A},
+            )
+            assert resp.status == 200, (
+                f"Expected 200 for correct tenant query param, got {resp.status}: "
+                f"{await resp.text()}"
+            )
+            data = await resp.json()
+            assert data["name"] == "TenantAgent"
+            assert data.get("tenant") == TENANT_A
+
+    async def test_get_agent_with_wrong_tenant_query_param(self, app_factory):
+        """GET /v1/agents/{id}?tenant=Y returns 404 when agent belongs to tenant X."""
+        async with await app_factory() as client:
+            r = await _register_agent(client, "SecretAgent", tenant=TENANT_A)
+            agent_id = r["id"]
+
+            resp = await client.get(
+                f"/v1/agents/{agent_id}",
+                params={"tenant": TENANT_B},
+            )
+            assert resp.status in (403, 404), (
+                f"Expected 403/404 for wrong tenant query param, got {resp.status}: "
+                f"{await resp.text()}"
+            )
+
+    async def test_get_agent_without_tenant_query_param_still_works(self, app_factory):
+        """No ?tenant param still returns agent (backward compat)."""
+        async with await app_factory() as client:
+            r = await _register_agent(client, "PublicAgent", tenant=TENANT_A)
+            agent_id = r["id"]
+
+            card = await _get_agent(client, agent_id)
+            assert card is not None
+            assert card["name"] == "PublicAgent"
+
+    async def test_get_agent_tenant_query_param_overrides_header(self, app_factory):
+        """?tenant= query param overrides X-Tenant-ID header when no auth tenant."""
+        async with await app_factory() as client:
+            r = await _register_agent(client, "TestBot", tenant=TENANT_A)
+            agent_id = r["id"]
+
+            # Wrong header but correct ?tenant= param
+            resp = await client.get(
+                f"/v1/agents/{agent_id}",
+                params={"tenant": TENANT_A},
+                headers={"X-Tenant-ID": TENANT_B},
+            )
+            assert resp.status == 200, (
+                f"Expected 200 (query param overrides header), got {resp.status}: "
+                f"{await resp.text()}"
+            )
+            data = await resp.json()
+            assert data["name"] == "TestBot"
 
 
 class TestOAuthTenantIsolation:
