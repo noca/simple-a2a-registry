@@ -581,6 +581,10 @@ class Store:
                 return None
             card = json.loads(row["card_json"])
             card["id"] = row["id"]
+            # Include tenant_id from DB in the returned card
+            db_tenant = row.get("tenant_id", "")
+            if db_tenant:
+                card["tenant"] = db_tenant
             last_hb = row["heartbeat_at"]
             elapsed = time.time() - last_hb if last_hb else HEARTBEAT_TIMEOUT + 1
             if row.get("disabled"):
@@ -846,7 +850,7 @@ class Store:
                 agent_card_id=row["agent_card_id"],
                 created_at=row["created_at"],
                 description=row["description"],
-                tenant_id=row.get("tenant_id", ""),
+                tenant=row.get("tenant_id", ""),
             )
 
     def verify_client_secret(self, client_id: str, secret: str) -> bool:

@@ -27,11 +27,19 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def _column_exists(table: str, column: str) -> bool:
-    """Check if a column exists in the given table (works on both SQLite & MySQL)."""
+    """Check if a column exists in the given table (works on both SQLite & MySQL).
+
+    In offline mode (``sql=True``, ``--sql``), Alembic uses a ``MockConnection``
+    which cannot be inspected. We return ``False`` so the full DDL is emitted
+    — safe for fresh databases where columns don't exist yet.
+    """
     bind = op.get_bind()
-    inspector = inspect(bind)
-    columns = [c['name'] for c in inspector.get_columns(table)]
-    return column in columns
+    try:
+        inspector = inspect(bind)
+        columns = [c['name'] for c in inspector.get_columns(table)]
+        return column in columns
+    except Exception:
+        return False
 
 
 def upgrade() -> None:

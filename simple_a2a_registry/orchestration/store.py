@@ -936,11 +936,15 @@ class TaskStore:
     # TTL Release
     # ------------------------------------------------------------------
 
-    def release_expired_claims(self) -> int:
+    def release_expired_claims(self, tenant: Optional[str] = None) -> int:
         """Release all tasks whose claim lock has expired.
 
         Expired running tasks are marked ``failed`` and their runs are ended.
         Expired blocked tasks are also marked ``failed``.
+
+        Args:
+            tenant: Optional tenant filter.  If set, only release claims
+                for tasks belonging to this tenant.
 
         Returns:
             Number of tasks released.
@@ -949,20 +953,25 @@ class TaskStore:
         released = 0
 
         with self._tx() as engine:
-            result = engine.execute(
+            query = (
                 "SELECT id, current_run_id, consecutive_failures, "
                 "       COALESCE(max_retries, ?) AS max_ret "
                 "FROM tasks "
                 "WHERE status IN (?, ?) "
                 "  AND claim_expires IS NOT NULL "
-                "  AND claim_expires <= ?",
-                (
-                    DEFAULT_MAX_RETRIES,
-                    TaskStatus.RUNNING.value,
-                    TaskStatus.BLOCKED.value,
-                    now,
-                ),
+                "  AND claim_expires <= ?"
             )
+            params: List[Any] = [
+                DEFAULT_MAX_RETRIES,
+                TaskStatus.RUNNING.value,
+                TaskStatus.BLOCKED.value,
+                now,
+            ]
+            if tenant is not None:
+                query += " AND tenant = ?"
+                params.append(tenant)
+
+            result = engine.execute(query, tuple(params))
             expired = result.fetchall()
 
             for row in expired:
@@ -1021,8 +1030,12 @@ class TaskStore:
     # Retry promotion
     # ------------------------------------------------------------------
 
-    def promote_retryable_tasks(self) -> int:
+    def promote_retryable_tasks(self, tenant: Optional[str] = None) -> int:
         """Promote failed tasks that are below their retry limit back to ``ready``.
+
+        Args:
+            tenant: Optional tenant filter.  If set, only promote tasks
+                belonging to this tenant.
 
         Returns:
             Number of tasks promoted.
@@ -1031,14 +1044,19 @@ class TaskStore:
         promoted = 0
 
         with self._tx() as engine:
-            result = engine.execute(
+            query = (
                 "SELECT id, consecutive_failures "
                 "FROM tasks "
                 "WHERE status = ? "
                 "  AND consecutive_failures <= COALESCE(max_retries, ?) "
-                "  AND consecutive_failures > 0",
-                (TaskStatus.FAILED.value, DEFAULT_MAX_RETRIES),
+                "  AND consecutive_failures > 0"
             )
+            params: List[Any] = [TaskStatus.FAILED.value, DEFAULT_MAX_RETRIES]
+            if tenant is not None:
+                query += " AND tenant = ?"
+                params.append(tenant)
+
+            result = engine.execute(query, tuple(params))
 
             for row in result.fetchall():
                 task_id = row["id"]
@@ -1217,17 +1235,37 @@ class TaskStore:
     # Stats
     # ------------------------------------------------------------------
 
-    def stats(self) -> Dict[str, Any]:
-        """Return summary statistics across all tasks."""
-        with self._tx("DEFERRED") as engine:
-            result = engine.execute(
-                "SELECT status, COUNT(*) AS cnt FROM tasks GROUP BY status"
-            )
-            by_status: Dict[str, int] = {}
-            for r in result.fetchall():
-                by_status[r["status"]] = r["cnt"]
+    def stats(self, tenant: Optional[str] = None) -> Dict[str, Any]:
+        """Return summary statistics across all tasks.
 
-            result = engine.execute("SELECT COUNT(*) AS total FROM tasks")
+        Args:
+            tenant: If set, only count tasks belonging to this tenant.
+        """
+        with self._tx("DEFERRED") as engine:
+            if tenant:
+                result = engine.execute(
+                    "SELECT status, COUNT(*) AS cnt FROM tasks "
+                    "WHERE tenant=? GROUP BY status",
+                    (tenant,),
+                )
+                by_status: Dict[str, int] = {}
+                for r in result.fetchall():
+                    by_status[r["status"]] = r["cnt"]
+
+                result = engine.execute(
+                    "SELECT COUNT(*) AS total FROM tasks WHERE tenant=?",
+                    (tenant,),
+                )
+            else:
+                result = engine.execute(
+                    "SELECT status, COUNT(*) AS cnt FROM tasks GROUP BY status"
+                )
+                by_status = {}
+                for r in result.fetchall():
+                    by_status[r["status"]] = r["cnt"]
+
+                result = engine.execute("SELECT COUNT(*) AS total FROM tasks")
+
             total = result.fetchone()["total"]
 
             return {

@@ -53,6 +53,7 @@ class DispatcherConfig:
             workers to claim and execute tasks.
         board_slug: Board slug to inject as ``KANBAN_BOARD`` env var.
         dispatcher_id: Unique identifier for this dispatcher instance.
+        tenant: If set, the dispatcher only processes tasks from this tenant.
     """
 
     poll_interval: int = 5
@@ -61,6 +62,7 @@ class DispatcherConfig:
     worker_command: Optional[str] = None
     board_slug: str = "default"
     dispatcher_id: str = "dispatcher-1"
+    tenant: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +153,7 @@ class Dispatcher:
 
         # 1. TTL Release — expired claims → failed
         try:
-            released = self.store.release_expired_claims()
+            released = self.store.release_expired_claims(tenant=self.config.tenant)
             if released:
                 logger.info("TTL release: %d task(s) marked failed", released)
             stats["ttl_released"] = released
@@ -160,7 +162,7 @@ class Dispatcher:
 
         # 2. Retry Promotion — failed below limit → ready
         try:
-            promoted = self.store.promote_retryable_tasks()
+            promoted = self.store.promote_retryable_tasks(tenant=self.config.tenant)
             if promoted:
                 logger.info("Retry promotion: %d task(s) promoted to ready", promoted)
             stats["retry_promoted"] = promoted
@@ -191,6 +193,7 @@ class Dispatcher:
             status=TaskStatus.READY.value,
             limit=200,
             sort="-priority",
+            tenant=self.config.tenant,
         )
 
         if not ready_tasks:

@@ -336,7 +336,7 @@ class RegistryHandler:
     async def handle_heartbeat(self, request: web.Request) -> web.Response:
         """POST /v1/agents/{agent_id}/heartbeat"""
         agent_id = request.match_info["agent_id"]
-        card = self.store.get_agent(agent_id)
+        card = self.store.get_agent(agent_id, tenant=request.get("tenant", None))
         if card is None:
             return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
 
@@ -345,7 +345,7 @@ class RegistryHandler:
                 410, "agent_stale", f"Agent '{agent_id}' is stale and cannot heartbeat"
             )
 
-        success = self.store.heartbeat(agent_id)
+        success = self.store.heartbeat(agent_id, tenant=request.get("tenant", ""))
         if not success:
             return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
 
