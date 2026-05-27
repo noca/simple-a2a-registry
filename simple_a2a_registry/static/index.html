@@ -283,6 +283,20 @@ pre { background: var(--bg-card); border: 1px solid var(--border-light); border-
 .action-btn:hover { background: var(--border-light); }
 .action-btn.danger { border-color: var(--red); color: var(--red); }
 .action-btn.danger:hover { background: #f8514911; }
+
+/* Tenant Selector */
+.tenant-selector { display: flex; align-items: center; gap: 6px; }
+.tenant-selector label { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.tenant-selector select {
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 10px; color: var(--text); font-size: 12px; max-width: 180px;
+  cursor: pointer;
+}
+.tenant-selector select:hover { border-color: var(--accent); }
+.tenant-selector .tenant-badge {
+  display: inline-block; background: #1f6feb33; color: var(--accent);
+  border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: 500;
+}
 </style>
 </head>
 <body>

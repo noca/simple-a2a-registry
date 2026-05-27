@@ -317,3 +317,115 @@ class TestFullCycle:
                     await asyncio.wait_for(asyncio_task, timeout=5)
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     pass
+
+
+# ===================================================================
+# Tenant-scoped Dispatcher
+# ===================================================================
+
+
+class TestTenantScopedDispatcher:
+    """Dispatcher with tenant config should only process that tenant's tasks."""
+
+    async def test_dispatcher_with_tenant_only_claims_its_tasks(
+        self, store: TaskStore, ws_mgr: WorkspaceManager,
+    ) -> None:
+        """A tenant-scoped dispatcher only claims tasks from its own tenant."""
+        # Create tasks for two tenants
+        t_a = store.create_task(
+            title="TenantA-task", assignee="worker-1", tenant="tenant-a",
+        )
+        t_b = store.create_task(
+            title="TenantB-task", assignee="worker-1", tenant="tenant-b",
+        )
+        assert t_a.status == TaskStatus.READY.value
+        assert t_b.status == TaskStatus.READY.value
+
+        # Dispatcher scoped to tenant-a
+        config = DispatcherConfig(
+            poll_interval=3600,
+            tenant="tenant-a",
+            claim_ttl=DEFAULT_CLAIM_TTL,
+            failure_limit=3,
+            dispatcher_id="test-tenant-dispatcher",
+            worker_command="echo",
+        )
+        disp = Dispatcher(store, ws_mgr, config)
+
+        stats = await disp.trigger_poll_cycle()
+
+        # Only tenant-a's task should be claimed
+        assert stats["tasks_claimed"] == 1
+
+        a = store.get_task(t_a.id)
+        assert a is not None
+        assert a.status == TaskStatus.RUNNING.value
+
+        b = store.get_task(t_b.id)
+        assert b is not None
+        assert b.status == TaskStatus.READY.value  # untouched
+
+    async def test_dispatcher_tenant_ttl_release_isolation(
+        self, store: TaskStore, ws_mgr: WorkspaceManager,
+    ) -> None:
+        """A tenant-scoped dispatcher only releases claims for its tenant."""
+        t_a = store.create_task(
+            title="A-expire", assignee="worker-1", tenant="tenant-a", max_retries=0,
+        )
+        t_b = store.create_task(
+            title="B-expire", assignee="worker-1", tenant="tenant-b", max_retries=0,
+        )
+
+        # Claim both with immediate TTL expiry
+        store.claim_task(t_a.id, "worker-1", 1, ttl=0)
+        store.claim_task(t_b.id, "worker-1", 2, ttl=0)
+        import time
+        time.sleep(0.1)
+
+        # Dispatcher scoped to tenant-a
+        config = DispatcherConfig(
+            poll_interval=3600,
+            tenant="tenant-a",
+            claim_ttl=DEFAULT_CLAIM_TTL,
+            failure_limit=3,
+            dispatcher_id="test-ttl-tenant",
+            worker_command="echo",
+        )
+        disp = Dispatcher(store, ws_mgr, config)
+        stats = await disp.trigger_poll_cycle()
+
+        assert stats["ttl_released"] == 1
+
+        a = store.get_task(t_a.id)
+        assert a is not None
+        assert a.status == TaskStatus.FAILED.value
+
+        b = store.get_task(t_b.id)
+        assert b is not None
+        assert b.status == TaskStatus.RUNNING.value  # still running
+
+    async def test_dispatcher_without_tenant_processes_all(
+        self, store: TaskStore, ws_mgr: WorkspaceManager,
+    ) -> None:
+        """A dispatcher without tenant config processes all tenants."""
+        t_a = store.create_task(
+            title="A", assignee="worker-1", tenant="tenant-a",
+        )
+        t_b = store.create_task(
+            title="B", assignee="worker-1", tenant="tenant-b",
+        )
+        assert t_a.status == TaskStatus.READY.value
+        assert t_b.status == TaskStatus.READY.value
+
+        # No tenant config
+        config = DispatcherConfig(
+            poll_interval=3600,
+            claim_ttl=DEFAULT_CLAIM_TTL,
+            failure_limit=3,
+            dispatcher_id="test-all-tenant",
+            worker_command="echo",
+        )
+        disp = Dispatcher(store, ws_mgr, config)
+
+        stats = await disp.trigger_poll_cycle()
+        assert stats["tasks_claimed"] == 2

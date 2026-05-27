@@ -643,3 +643,153 @@ class TestEdgeCases:
             store.add_comment(task.id, "bot", "spam")
         events = store.get_events(task.id, limit=2)
         assert len(events) <= 2
+
+
+# ---------------------------------------------------------------------------
+# Tenant-filtered operations
+# ---------------------------------------------------------------------------
+
+
+class TestTenantFilteredTTLRelease:
+    """release_expired_claims(tenant=...) should only affect matching tasks."""
+
+    def test_release_expired_claims_respects_tenant(self, store: TaskStore) -> None:
+        """Only release tasks belonging to the specified tenant."""
+        t_a = store.create_task(
+            title="A-tenant", assignee="coder", tenant="tenant-a", max_retries=0,
+        )
+        t_b = store.create_task(
+            title="B-tenant", assignee="coder", tenant="tenant-b", max_retries=0,
+        )
+
+        # Claim both with 0 TTL
+        store.claim_task(t_a.id, "worker-1", 1, ttl=0)
+        store.claim_task(t_b.id, "worker-1", 2, ttl=0)
+        time.sleep(0.1)
+
+        # Release only tenant-a's expired claims
+        released = store.release_expired_claims(tenant="tenant-a")
+        assert released == 1, f"Expected 1 release, got {released}"
+
+        # tenant-a task should be failed, tenant-b should still be running
+        a = store.get_task(t_a.id)
+        assert a is not None
+        assert a.status == TaskStatus.FAILED.value
+
+        b = store.get_task(t_b.id)
+        assert b is not None
+        assert b.status == TaskStatus.RUNNING.value, (
+            f"tenant-b task should still be running, got {b.status}"
+        )
+
+    def test_release_expired_claims_no_tenant_processes_all(
+        self, store: TaskStore,
+    ) -> None:
+        """Without tenant filter, release all expired claims regardless of tenant."""
+        t_a = store.create_task(
+            title="A", assignee="coder", tenant="tenant-a", max_retries=0,
+        )
+        t_b = store.create_task(
+            title="B", assignee="coder", tenant="tenant-b", max_retries=0,
+        )
+
+        store.claim_task(t_a.id, "worker-1", 1, ttl=0)
+        store.claim_task(t_b.id, "worker-1", 2, ttl=0)
+        time.sleep(0.1)
+
+        released = store.release_expired_claims()  # no tenant filter
+        assert released == 2, f"Expected 2 releases, got {released}"
+
+    def test_release_expired_claims_wrong_tenant_noop(self, store: TaskStore) -> None:
+        """Releasing expired claims for a tenant with none returns 0."""
+        task = store.create_task(
+            title="T", assignee="coder", tenant="tenant-a", max_retries=0,
+        )
+        store.claim_task(task.id, "worker-1", 1, ttl=600)  # long TTL
+
+        released = store.release_expired_claims(tenant="tenant-b")
+        assert released == 0
+
+
+class TestTenantFilteredPromoteRetry:
+    """promote_retryable_tasks(tenant=...) should only affect matching tasks."""
+
+    def test_promote_respects_tenant(self, store: TaskStore) -> None:
+        """Only promote failed tasks from the specified tenant."""
+        t_a = store.create_task(
+            title="A", assignee="coder", tenant="tenant-a", max_retries=3,
+        )
+        t_b = store.create_task(
+            title="B", assignee="coder", tenant="tenant-b", max_retries=3,
+        )
+
+        # Fail both tasks
+        for t in (t_a, t_b):
+            store.update_task_status(t.id, TaskStatus.RUNNING.value)
+            store.update_task_status(t.id, TaskStatus.FAILED.value)
+            # Set consecutive_failures = 1 so retry logic picks it up
+            with store._tx() as cur:
+                cur.execute(
+                    "UPDATE tasks SET consecutive_failures=1 WHERE id=?", (t.id,)
+                )
+
+        # Promote only tenant-a
+        promoted = store.promote_retryable_tasks(tenant="tenant-a")
+        assert promoted == 1, f"Expected 1 promotion, got {promoted}"
+
+        a = store.get_task(t_a.id)
+        assert a is not None
+        assert a.status == TaskStatus.READY.value
+
+        b = store.get_task(t_b.id)
+        assert b is not None
+        assert b.status == TaskStatus.FAILED.value
+
+    def test_promote_no_tenant_processes_all(self, store: TaskStore) -> None:
+        """Without tenant filter, promote all retryable tasks."""
+        for tenant in ("tenant-a", "tenant-b"):
+            t = store.create_task(
+                title=f"T-{tenant}", assignee="coder", tenant=tenant, max_retries=3,
+            )
+            store.update_task_status(t.id, TaskStatus.RUNNING.value)
+            store.update_task_status(t.id, TaskStatus.FAILED.value)
+            with store._tx() as cur:
+                cur.execute(
+                    "UPDATE tasks SET consecutive_failures=1 WHERE id=?", (t.id,)
+                )
+
+        promoted = store.promote_retryable_tasks()  # no tenant filter
+        assert promoted == 2
+
+
+class TestTenantFilteredStats:
+    """stats(tenant=...) should only count tasks from that tenant."""
+
+    def test_stats_tenant_isolation(self, store: TaskStore) -> None:
+        """stats(tenant=X) only counts tasks belonging to X."""
+        for tenant in ("acme", "globex", None):
+            store.create_task(
+                title=f"Task-{tenant or 'none'}", tenant=tenant,
+            )
+
+        stats_acme = store.stats(tenant="acme")
+        assert stats_acme["total"] == 1
+
+        stats_all = store.stats()
+        assert stats_all["total"] == 3  # includes None-tenanted tasks
+
+    def test_stats_nonexistent_tenant(self, store: TaskStore) -> None:
+        """stats(tenant=nonexistent) returns {total: 0, by_status: {}}."""
+        store.create_task(title="T", tenant="tenant-a")
+        stats = store.stats(tenant="no-such-tenant")
+        assert stats["total"] == 0
+        assert stats["by_status"] == {}
+
+    def test_stats_no_tenant_returns_all(self, store: TaskStore) -> None:
+        """stats() without tenant returns all tasks."""
+        store.create_task(title="A", tenant="tenant-a")
+        store.create_task(title="B", tenant=None)
+        store.create_task(title="C")
+
+        stats = store.stats()
+        assert stats["total"] == 3

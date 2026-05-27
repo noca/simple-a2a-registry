@@ -295,8 +295,13 @@ class RegistryHandler:
         """DELETE /v1/agents/{agent_id} — unregister an agent.
 
         Closes the agent's WebSocket connection and removes it from the registry.
+
+        Query params:
+            tenant: Optional tenant filter.  If set, only unregisters if the
+                agent belongs to this tenant.
         """
         agent_id = request.match_info["agent_id"]
+        tenant = request.query.get("tenant", "") or ""
 
         # Close WS connection if open
         ws = self._ws_connections.pop(agent_id, None)
@@ -307,7 +312,7 @@ class RegistryHandler:
             except Exception:
                 pass
 
-        success = self.store.unregister(agent_id)
+        success = self.store.unregister(agent_id, tenant=tenant)
         if not success:
             return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
 
@@ -324,7 +329,6 @@ class RegistryHandler:
             "message": "Agent unregistered successfully",
             "id": agent_id,
         })
-
     # ------------------------------------------------------------------
     # Heartbeat
     # ------------------------------------------------------------------
@@ -360,10 +364,15 @@ class RegistryHandler:
     async def handle_toggle_agent(self, request: web.Request) -> web.Response:
         """POST /v1/agents/{agent_id}/toggle — toggle agent disabled status.
 
-        Requires ``agent:admin`` scope.
+        Query params:
+            tenant: Optional tenant filter.  If set, only toggles if the
+                agent belongs to this tenant.
+
+        Requires agent:admin scope.
         """
         agent_id = request.match_info["agent_id"]
-        result = self.store.toggle_agent(agent_id)
+        tenant = request.query.get("tenant", "") or ""
+        result = self.store.toggle_agent(agent_id, tenant=tenant)
         if result is None:
             return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
         card = self.store.get_agent(agent_id)
@@ -374,7 +383,6 @@ class RegistryHandler:
                 "disabled": card["disabled"] if card else False,
             }
         )
-
     # ------------------------------------------------------------------
     # WebSocket — persistent agent connection
     # ------------------------------------------------------------------
@@ -1196,6 +1204,7 @@ def create_app(
     workspaces_root: Optional[str] = None,
     host: str = "0.0.0.0",
     port: int = 8321,
+    user_session_enabled: bool = True,
 ) -> web.Application:
     """Create and configure the aiohttp web application.
 
@@ -1335,7 +1344,7 @@ def create_app(
             whitelist=config.rate_limit.whitelist if config is not None else [],
             engine=_shared_engine,
         ),
-        user_session_middleware_factory(session_manager, enabled=True),
+        user_session_middleware_factory(session_manager, enabled=user_session_enabled),
     ])
     app["store"] = store
     app["handler"] = handler

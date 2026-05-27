@@ -518,14 +518,14 @@ class Store:
         results: List[Dict[str, Any]] = []
 
         with self._tx("DEFERRED") as engine:
-            result = engine.execute("SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents")
+            if tenant is not None and tenant != "":
+                result = engine.execute(
+                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE tenant_id=?", (tenant,),
+                )
+            else:
+                result = engine.execute("SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents")
             for row in result.fetchall():
                 agent_id = row["id"]
-                # Tenant filter
-                if tenant is not None:
-                    row_tenant = row["tenant_id"] or ""
-                    if row_tenant != tenant:
-                        continue
                 card = json.loads(row["card_json"])
                 last_hb = row["heartbeat_at"]
                 elapsed = now - last_hb if last_hb else HEARTBEAT_TIMEOUT + 1
@@ -568,18 +568,17 @@ class Store:
             or ``None`` if the agent doesn't exist or tenant doesn't match.
         """
         with self._tx("DEFERRED") as engine:
-            result = engine.execute(
-                "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE id=?",
-                (agent_id,),
-            )
+            if tenant is not None and tenant != "":
+                result = engine.execute(
+                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE id=? AND tenant_id=?", (agent_id, tenant),
+                )
+            else:
+                result = engine.execute(
+                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE id=?", (agent_id,),
+                )
             row = result.fetchone()
             if row is None:
                 return None
-            # Tenant check
-            if tenant is not None:
-                row_tenant = row["tenant_id"] or ""
-                if row_tenant != tenant:
-                    return None
             card = json.loads(row["card_json"])
             card["id"] = row["id"]
             last_hb = row["heartbeat_at"]
@@ -625,27 +624,49 @@ class Store:
 
         return agent_id
 
-    def heartbeat(self, agent_id: str) -> bool:
+    def heartbeat(self, agent_id: str, tenant: str = "") -> bool:
         """Record a heartbeat for an agent.
 
+        Args:
+            agent_id: The agent's unique identifier.
+            tenant: If non-empty, only heartbeat if agent belongs to this tenant.
+                Pass '' to skip tenant check (legacy / admin scope).
+
         Returns:
-            ``True`` if the agent is known, ``False`` otherwise.
+            True if updated, False if agent not found or tenant mismatch.
         """
         with self._tx() as engine:
-            result = engine.execute(
-                "UPDATE agents SET heartbeat_at=? WHERE id=?",
-                (time.time(), agent_id),
-            )
+            if tenant:
+                result = engine.execute(
+                    "UPDATE agents SET heartbeat_at=? WHERE id=? AND tenant_id=?",
+                    (time.time(), agent_id, tenant),
+                )
+            else:
+                result = engine.execute(
+                    "UPDATE agents SET heartbeat_at=? WHERE id=?",
+                    (time.time(), agent_id),
+                )
             return result.rowcount > 0
 
-    def unregister(self, agent_id: str) -> bool:
+    def unregister(self, agent_id: str, tenant: str = "") -> bool:
         """Remove an agent registration.
 
+        Args:
+            agent_id: The agent's unique identifier.
+            tenant: If non-empty, only unregister if agent belongs to this tenant.
+                Pass '' to skip tenant check (legacy / admin scope).
+
         Returns:
-            ``True`` if removed, ``False`` if not found.
+            True if removed, False if not found or tenant mismatch.
         """
         with self._tx() as engine:
-            result = engine.execute("DELETE FROM agents WHERE id=?", (agent_id,))
+            if tenant:
+                result = engine.execute(
+                    "DELETE FROM agents WHERE id=? AND tenant_id=?",
+                    (agent_id, tenant),
+                )
+            else:
+                result = engine.execute("DELETE FROM agents WHERE id=?", (agent_id,))
             return result.rowcount > 0
 
     def purge_stale(self) -> int:
@@ -666,17 +687,28 @@ class Store:
                 logger.info("Purged %d stale agents", removed)
             return removed
 
-    def toggle_agent(self, agent_id: str) -> Optional[bool]:
+    def toggle_agent(self, agent_id: str, tenant: str = "") -> Optional[bool]:
         """Toggle the disabled status of an agent.
 
+        Args:
+            agent_id: The agent's unique identifier.
+            tenant: If non-empty, only toggle if agent belongs to this tenant.
+                Pass '' to skip tenant check (legacy / admin scope).
+
         Returns:
-            ``True`` if now disabled, ``False`` if now enabled,
-            ``None`` if agent not found.
+            True if now disabled, False if now enabled,
+            None if agent not found or tenant mismatch.
         """
         with self._tx() as engine:
-            row = engine.execute(
-                "SELECT disabled FROM agents WHERE id=?", (agent_id,)
-            ).fetchone()
+            if tenant:
+                row = engine.execute(
+                    "SELECT disabled FROM agents WHERE id=? AND tenant_id=?",
+                    (agent_id, tenant),
+                ).fetchone()
+            else:
+                row = engine.execute(
+                    "SELECT disabled FROM agents WHERE id=?", (agent_id,)
+                ).fetchone()
             if row is None:
                 return None
             new_val = 0 if row["disabled"] else 1
