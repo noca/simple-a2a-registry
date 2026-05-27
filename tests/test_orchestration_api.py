@@ -1336,3 +1336,87 @@ class TestOAuthFlow:
 
             agents = await client.get("/v1/agents")
             assert agents.status == 200
+
+
+# ===================================================================
+# GET /v2/stats/tenants — Per-tenant statistics
+# ===================================================================
+
+
+class TestV2StatsByTenant:
+    """Verify GET /v2/stats/tenants returns agent+task stats grouped by tenant."""
+
+    async def test_stats_by_tenant_empty(self, api_client):
+        """No data → empty tenants dict for both agent and task stats."""
+        async with await api_client() as client:
+            resp = await client.get("/v2/stats/tenants")
+            assert resp.status == 200
+            data = await resp.json()
+            assert "task_stats" in data
+            assert "agent_stats" in data
+            assert data["task_stats"]["tenants"] == {}
+            assert data["task_stats"]["total"] == 0
+            assert data["agent_stats"]["tenants"] == {}
+            assert data["agent_stats"]["total"] == 0
+
+    async def test_stats_by_tenant_with_data(self, api_client):
+        """Agents and tasks under different tenants are counted correctly."""
+        async with await api_client() as client:
+            # Create V2 tasks under different tenants
+            r1 = await client.post("/v2/tasks", json={
+                "title": "Task-T1", "tenant": "tenant1", "assignee": "w1",
+            })
+            assert r1.status == 201, await r1.text()
+            r2 = await client.post("/v2/tasks", json={
+                "title": "Task-T2", "tenant": "tenant1", "assignee": "w2",
+            })
+            assert r2.status == 201, await r2.text()
+            r3 = await client.post("/v2/tasks", json={
+                "title": "Task-T3", "tenant": "tenant2", "assignee": "w1",
+            })
+            assert r3.status == 201, await r3.text()
+            r4 = await client.post("/v2/tasks", json={
+                "title": "Task-T4",
+            })
+            assert r4.status == 201, await r4.text()
+
+            # Register V1 agents under different tenants
+            r5 = await client.post("/v1/agents", json={
+                "name": "Agent-A1", "description": "t1 agent",
+                "tenant": "tenant1",
+            })
+            assert r5.status in (200, 201), await r5.text()
+            r6 = await client.post("/v1/agents", json={
+                "name": "Agent-A2", "description": "t1 agent 2",
+                "tenant": "tenant1",
+            })
+            assert r6.status in (200, 201), await r6.text()
+            r7 = await client.post("/v1/agents", json={
+                "name": "Agent-B1", "description": "t2 agent",
+                "tenant": "tenant2",
+            })
+            assert r7.status in (200, 201), await r7.text()
+            r8 = await client.post("/v1/agents", json={
+                "name": "Agent-C1", "description": "no tenant",
+                "tenant": "",
+            })
+            assert r8.status in (200, 201), await r8.text()
+
+            # Verify stats
+            resp = await client.get("/v2/stats/tenants")
+            assert resp.status == 200
+            data = await resp.json()
+
+            # Task stats — grouped by tenant
+            ts = data["task_stats"]
+            assert ts["total"] == 4
+            assert ts["tenants"]["tenant1"]["total"] == 2
+            assert ts["tenants"]["tenant2"]["total"] == 1
+            assert ts["tenants"][""]["total"] == 1
+
+            # Agent stats — grouped by tenant
+            ag = data["agent_stats"]
+            assert ag["total"] == 4
+            assert ag["tenants"]["tenant1"]["total"] == 2
+            assert ag["tenants"]["tenant2"]["total"] == 1
+            assert ag["tenants"][""]["total"] == 1

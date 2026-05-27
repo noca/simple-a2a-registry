@@ -140,3 +140,61 @@ def test_persistence() -> None:
         assert card is not None
         assert card["name"] == "Persistent"
         store2.close()
+
+
+def test_stats_by_tenant_empty() -> None:
+    """stats_by_tenant returns empty stats when no agents exist."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = Store(tmpdir)
+        result = store.stats_by_tenant()
+        assert result == {}
+
+
+def test_stats_by_tenant_with_agents() -> None:
+    """stats_by_tenant groups agents correctly by tenant_id."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = Store(tmpdir)
+        store.register_agent({"name": "A1", "description": "t1 agent"}, tenant="tenant1")
+        store.register_agent({"name": "A2", "description": "t1 agent 2"}, tenant="tenant1")
+        store.register_agent({"name": "B1", "description": "t2 agent"}, tenant="tenant2")
+        store.register_agent({"name": "C1", "description": "no tenant"})
+
+        result = store.stats_by_tenant()
+
+        assert set(result.keys()) == {"tenant1", "tenant2", ""}
+        assert result["tenant1"]["totalAgents"] == 2
+        assert result["tenant1"]["aliveAgents"] == 2
+        assert result["tenant2"]["totalAgents"] == 1
+        assert result[""]["totalAgents"] == 1
+
+
+def test_stats_with_tenant_filter() -> None:
+    """Store.stats(tenant=...) filters correctly by tenant."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = Store(tmpdir)
+        store.register_agent({"name": "A1", "description": "t1"}, tenant="tenant1")
+        store.register_agent({"name": "A2", "description": "t1 b"}, tenant="tenant1")
+        store.register_agent({"name": "B1", "description": "t2"}, tenant="tenant2")
+        store.register_agent({"name": "G1", "description": "global"})
+
+        # Global stats (no filter) should include all 4
+        g = store.stats()
+        assert g["totalAgents"] == 4
+
+        # Filtered by tenant1 -> 2 agents
+        t1 = store.stats(tenant="tenant1")
+        assert t1["totalAgents"] == 2
+        assert t1["aliveAgents"] == 2
+        assert t1["staleAgents"] == 0
+
+        # Filtered by tenant2 -> 1 agent
+        t2 = store.stats(tenant="tenant2")
+        assert t2["totalAgents"] == 1
+
+        # Filtered by nonexistent -> 0 agents
+        nx = store.stats(tenant="nonexistent")
+        assert nx["totalAgents"] == 0
+
+        # Empty string tenant filter -> same as global (4 agents)
+        e = store.stats(tenant="")
+        assert e["totalAgents"] == 4
