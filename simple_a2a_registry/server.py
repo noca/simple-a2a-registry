@@ -320,12 +320,18 @@ class RegistryHandler:
 
         Closes the agent's WebSocket connection and removes it from the registry.
 
+        Auth middleware injects request['tenant'] (JWT); falls back to
+        ?tenant= query param.  When auth is disabled (no request['tenant']),
+        the query param is used directly.
+
         Query params:
-            tenant: Optional tenant filter.  If set, only unregisters if the
-                agent belongs to this tenant.
+            tenant: Optional tenant filter (only when auth is disabled or
+                JWT tenant is empty, e.g. admin scope).
         """
         agent_id = request.match_info["agent_id"]
-        tenant = request.query.get("tenant", "") or ""
+        # Auth middleware injects request['tenant']; fall back to ?tenant= query param.
+        # When request['tenant'] is set, it's authoritative (from JWT or admin override).
+        tenant = request["tenant"] if "tenant" in request else (request.query.get("tenant", "") or "")
 
         # Close WS connection if open
         ws = self._ws_connections.pop(agent_id, None)
@@ -358,9 +364,14 @@ class RegistryHandler:
     # ------------------------------------------------------------------
 
     async def handle_heartbeat(self, request: web.Request) -> web.Response:
-        """POST /v1/agents/{agent_id}/heartbeat"""
+        """POST /v1/agents/{agent_id}/heartbeat
+
+        Auth middleware injects request['tenant']; falls back to ?tenant= query param.
+        The heartbeat only succeeds if the agent belongs to the caller's tenant.
+        """
         agent_id = request.match_info["agent_id"]
-        card = self.store.get_agent(agent_id, tenant=request.get("tenant", None))
+        tenant = request["tenant"] if "tenant" in request else request.query.get("tenant", None)
+        card = self.store.get_agent(agent_id, tenant=tenant)
         if card is None:
             return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
 
@@ -369,7 +380,7 @@ class RegistryHandler:
                 410, "agent_stale", f"Agent '{agent_id}' is stale and cannot heartbeat"
             )
 
-        success = self.store.heartbeat(agent_id, tenant=request.get("tenant", ""))
+        success = self.store.heartbeat(agent_id, tenant=tenant or "")
         if not success:
             return json_error(404, "agent_not_found", f"Agent '{agent_id}' not found")
 

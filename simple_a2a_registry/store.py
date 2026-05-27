@@ -726,26 +726,81 @@ class Store:
 
     # -- Stats -----------------------------------------------------------------
 
-    def stats(self) -> Dict[str, Any]:
-        """Return registry statistics.
+    def stats(self, tenant: Optional[str] = None) -> Dict[str, Any]:
+        """Return registry statistics, optionally filtered by tenant.
+
+        Args:
+            tenant: Filter by tenant.  Pass ``None`` or ``''`` to see all (admin scope).
 
         Returns:
             Dict with keys: ``totalAgents``, ``aliveAgents``, ``staleAgents``.
         """
         now = time.time()
         with self._tx("DEFERRED") as engine:
-            result = engine.execute("SELECT COUNT(*) FROM agents")
-            total = result.fetchone()["COUNT(*)"]
-            result = engine.execute(
-                "SELECT COUNT(*) FROM agents WHERE ? - heartbeat_at <= ?",
-                (now, HEARTBEAT_TIMEOUT),
-            )
+            if tenant is not None and tenant != "":
+                result = engine.execute(
+                    "SELECT COUNT(*) FROM agents WHERE tenant_id=?", (tenant,)
+                )
+                total = result.fetchone()["COUNT(*)"]
+                result = engine.execute(
+                    "SELECT COUNT(*) FROM agents WHERE tenant_id=? AND ? - heartbeat_at <= ?",
+                    (tenant, now, HEARTBEAT_TIMEOUT),
+                )
+            else:
+                result = engine.execute("SELECT COUNT(*) FROM agents")
+                total = result.fetchone()["COUNT(*)"]
+                result = engine.execute(
+                    "SELECT COUNT(*) FROM agents WHERE ? - heartbeat_at <= ?",
+                    (now, HEARTBEAT_TIMEOUT),
+                )
             alive = result.fetchone()["COUNT(*)"]
         return {
             "totalAgents": total,
             "aliveAgents": alive,
             "staleAgents": total - alive,
         }
+
+    def stats_by_tenant(self) -> Dict[str, Dict[str, int]]:
+        """Return registry statistics grouped by tenant.
+
+        Returns:
+            Dict mapping tenant name (or ``""`` for unassigned) to stats::
+
+                {
+                    "tenant1": {"totalAgents": 10, "aliveAgents": 8, "staleAgents": 2},
+                    "": {"totalAgents": 5, "aliveAgents": 3, "staleAgents": 2},
+                }
+        """
+        now = time.time()
+        with self._tx("DEFERRED") as engine:
+            result = engine.execute(
+                "SELECT tenant_id, COUNT(*) AS cnt FROM agents GROUP BY tenant_id",
+            )
+            total_by_tenant: Dict[str, int] = {}
+            for row in result.fetchall():
+                tid = row["tenant_id"] or ""
+                total_by_tenant[tid] = row["cnt"]
+
+            result = engine.execute(
+                "SELECT tenant_id, COUNT(*) AS cnt FROM agents WHERE ? - heartbeat_at <= ? GROUP BY tenant_id",
+                (now, HEARTBEAT_TIMEOUT),
+            )
+            alive_by_tenant: Dict[str, int] = {}
+            for row in result.fetchall():
+                tid = row["tenant_id"] or ""
+                alive_by_tenant[tid] = row["cnt"]
+
+        all_tenants = set(total_by_tenant.keys()) | set(alive_by_tenant.keys())
+        stats: Dict[str, Dict[str, int]] = {}
+        for tid in all_tenants:
+            total = total_by_tenant.get(tid, 0)
+            alive = alive_by_tenant.get(tid, 0)
+            stats[tid] = {
+                "totalAgents": total,
+                "aliveAgents": alive,
+                "staleAgents": total - alive,
+            }
+        return stats
 
     # ======================================================================
     # OAuth — client & token management
