@@ -1273,6 +1273,28 @@ class TaskStore:
                 "by_status": by_status,
             }
 
+    def stats_by_tenant(self) -> Dict[str, Any]:
+        """Return task statistics grouped by tenant.
+
+        Returns:
+            dict with ``{"total": int, "tenants": {tenant: {"total": int}}}``.
+        """
+        with self._tx("DEFERRED") as engine:
+            result = engine.execute(
+                "SELECT tenant, COUNT(*) AS cnt FROM tasks GROUP BY tenant"
+            )
+            tenants: Dict[str, Dict[str, int]] = {}
+            total = 0
+            for r in result.fetchall():
+                t = r["tenant"] if r["tenant"] is not None else ""
+                cnt = r["cnt"]
+                tenants[t] = {"total": cnt}
+                total += cnt
+            return {
+                "total": total,
+                "tenants": tenants,
+            }
+
     # ------------------------------------------------------------------
     # Dispatcher helpers
     # ------------------------------------------------------------------
