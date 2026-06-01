@@ -377,6 +377,8 @@ _tasks: Dict[str, A2ATask] = {}
 
 # Active subprocesses for cancellation tracking
 _active_procs: Dict[str, subprocess.Popen] = {}
+# Cancellation signals per task — set when server sends task_cancel
+_cancel_events: Dict[str, asyncio.Event] = {}
 
 # ── WebSocket connection state ────────────────────────────────────────────
 _ws_session: Optional[ClientSession] = None
@@ -538,17 +540,42 @@ async def _send_ws_json(msg: Dict[str, Any]) -> bool:
         return False
 
 
+async def _periodic_progress(task_id: str, cancel_event: asyncio.Event, started_at: float) -> None:
+    """Send task_progress every 15s with estimated progress percentage.
+
+    Runs as a background asyncio task alongside process_ws_task.
+    Exits cleanly when ``cancel_event`` is set (task completes, fails, or is cancelled).
+    Progress percentage is estimated from elapsed vs HERMES_TIMEOUT (capped at 99%).
+    """
+    while not cancel_event.is_set():
+        try:
+            await asyncio.wait_for(cancel_event.wait(), timeout=15.0)
+            return  # Cancelled or task done
+        except asyncio.TimeoutError:
+            # 15s elapsed — send a progress update
+            elapsed = time.time() - started_at
+            pct = min(99, int((elapsed / HERMES_TIMEOUT) * 100))
+            await _send_ws_json({
+                "type": "task_progress",
+                "id": task_id,
+                "status": "working",
+                "progress": pct,
+            })
+
+
 async def process_ws_task(task_msg: Dict[str, Any]) -> None:
-    """Process a task received via WebSocket and report results via WS.
+    """Process a task received via WebSocket with full lifecycle.
+
+    Lifecycle (per spec):
+      1. task_ack  (immediate — 0.5s within receipt)  → status=accepted
+      2. task_progress  (on execution start, then every 15s)  → status=working + progress%
+      3. task_complete  (on success)  → status=completed + result + metrics
+      4. task_fail      (on error)    → status=failed + error + code
+      5. task_cancel    (external signal)  → stop execution, clean up, report canceled
 
     Supports two message formats:
-
-    **A2A-style (direct query)** — ``tasks/send`` endpoint:
-      {"type":"task","id":"uuid","query":"...","sessionId":"..."}
-
-    **Kanban-style (dispatcher)** — Kaban V2 orchestration dispatch:
-      {"type":"task","id":"uuid","title":"say hello","body":"...",
-       "assignee":"...","workspace_path":"","kanban":true}
+      A2A-style:  {"type":"task","id":"uuid","query":"...","sessionId":"..."}
+      Kanban-style:  {"type":"task","id":"uuid","title":"...","body":"...","workspace_path":"..."}
     """
     task_id = task_msg.get("id", "")
     # Kanban tasks → body; A2A tasks → query
@@ -562,14 +589,34 @@ async def process_ws_task(task_msg: Dict[str, Any]) -> None:
         logger.warning("Invalid WS task message: missing id or query: %s", task_msg)
         return
 
-    # Send progress
+    # ── 1. Immediately send task_ack → accepted ──
+    await _send_ws_json({
+        "type": "task_ack",
+        "id": task_id,
+        "status": "accepted",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    logger.debug("WS task %s: sent task_ack (accepted)", task_id)
+
+    # ── 2. Set up cancellation tracking ──
+    cancel_event = asyncio.Event()
+    _cancel_events[task_id] = cancel_event
+    started_at = time.time()
+
+    # ── 3. Send task_progress → working (progress=0) ──
     await _send_ws_json({
         "type": "task_progress",
         "id": task_id,
         "status": "working",
+        "progress": 0,
     })
 
-    # Build and run the task via Hermes CLI
+    # ── 4. Start periodic progress reporter (fires every 15s) ──
+    progress_task = asyncio.create_task(
+        _periodic_progress(task_id, cancel_event, started_at)
+    )
+
+    # ── 5. Build Hermes CLI command ──
     cmd = [
         "hermes", "chat",
         "-q", query,
@@ -594,48 +641,90 @@ async def process_ws_task(task_msg: Dict[str, Any]) -> None:
             proc.kill()
             await proc.wait()
             _active_procs.pop(task_id, None)
+            cancel_event.set()
+            await asyncio.wait_for(progress_task, timeout=5.0)
+            _cancel_events.pop(task_id, None,)
+            elapsed = round(time.time() - started_at, 1)
             await _send_ws_json({
-                "type": "task_result",
+                "type": "task_fail",
                 "id": task_id,
                 "status": "failed",
                 "error": f"Task timed out after {HERMES_TIMEOUT}s",
+                "code": "TIMEOUT",
+                "metrics": {"elapsed_seconds": elapsed},
             })
-            logger.warning("WS task %s timed out", task_id)
+            logger.warning("WS task %s timed out after %ss", task_id, HERMES_TIMEOUT)
             return
 
+        # ── 6. Clean up progress reporter ──
+        # Snapshot: was cancel_event already set externally (task_cancel from server)?
+        # We need this BEFORE setting it ourselves to stop the progress reporter.
+        _was_externally_cancelled = cancel_event.is_set()
+        cancel_event.set()
+        await asyncio.wait_for(progress_task, timeout=5.0)
         _active_procs.pop(task_id, None)
+        _cancel_events.pop(task_id, None)
+
+        elapsed = round(time.time() - started_at, 1)
+
+        # Check if task was externally cancelled (server sent task_cancel)
+        # When cancelled, the subprocess was killed externally, so returncode != 0
+        # We report canceled status instead of failed
+        if _was_externally_cancelled:
+            await _send_ws_json({
+                "type": "task_fail",
+                "id": task_id,
+                "status": "canceled",
+                "error": "Task cancelled by server",
+                "code": "CANCELED",
+                "metrics": {"elapsed_seconds": elapsed},
+            })
+            logger.info("WS task %s was cancelled (%ss)", task_id, elapsed)
+            return
 
         if proc.returncode != 0:
             stderr_text = stderr.decode("utf-8", errors="replace")[:2000]
             logger.warning("Hermes exited with code %d for WS task %s", proc.returncode, task_id)
             await _send_ws_json({
-                "type": "task_result",
+                "type": "task_fail",
                 "id": task_id,
                 "status": "failed",
                 "error": f"Hermes process exited with code {proc.returncode}: {stderr_text}",
+                "code": f"EXIT_{proc.returncode}",
+                "metrics": {"elapsed_seconds": elapsed},
             })
             return
 
-        # Clean and send result
+        # ── 7. Send task_complete with result and metrics ──
         full_output = stdout.decode("utf-8", errors="replace")
         cleaned = _clean_hermes_output(full_output)
 
         await _send_ws_json({
-            "type": "task_result",
+            "type": "task_complete",
             "id": task_id,
             "status": "completed",
             "result": {"text": cleaned or "(Hermes returned no output)"},
+            "metrics": {
+                "elapsed_seconds": elapsed,
+                "output_chars": len(cleaned),
+            },
         })
-        logger.info("WS task %s completed (output=%d chars)", task_id, len(cleaned))
+        logger.info("WS task %s completed (%d chars in %ss)", task_id, len(cleaned), elapsed)
 
     except Exception as e:
         logger.exception("WS task %s failed with exception", task_id)
         _active_procs.pop(task_id, None)
+        cancel_event.set()
+        if not progress_task.done():
+            await asyncio.wait_for(progress_task, timeout=5.0)
+        _cancel_events.pop(task_id, None)
         await _send_ws_json({
-            "type": "task_result",
+            "type": "task_fail",
             "id": task_id,
             "status": "failed",
             "error": str(e)[:2000],
+            "code": "EXCEPTION",
+            "metrics": {"elapsed_seconds": round(time.time() - started_at, 1)},
         })
 
 
@@ -1052,6 +1141,22 @@ async def ws_connect_loop(close_event: asyncio.Event) -> None:
                     if msg_type == "task":
                         # Spawn task processing as a fire-and-forget task
                         asyncio.create_task(process_ws_task(data))
+                    elif msg_type == "task_cancel":
+                        task_id = data.get("id", "")
+                        if task_id:
+                            logger.info("WS: received task_cancel for %s", task_id)
+                            # Kill the running Hermes subprocess
+                            proc = _active_procs.get(task_id)
+                            if proc:
+                                try:
+                                    proc.kill()
+                                    logger.debug("WS: killed subprocess for cancelled task %s", task_id)
+                                except Exception as e:
+                                    logger.warning("WS: failed to kill subprocess for %s: %s", task_id, e)
+                            # Signal cancellation via event (process_ws_task reads this)
+                            cancel_evt = _cancel_events.get(task_id)
+                            if cancel_evt:
+                                cancel_evt.set()
                     elif msg_type == "ping":
                         # Respond to server ping (some WS frameworks expect this)
                         pass
