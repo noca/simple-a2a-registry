@@ -72,6 +72,12 @@ from simple_a2a_registry.orchestration import (
     register_swarm_routes,
 )
 from simple_a2a_registry.ws_admin import AdminWSHub
+from simple_a2a_registry.registry_handler import (
+    WSContext,
+    create_default_router,
+)
+from simple_a2a_registry.registry_handler import WSMessageRouter
+from simple_a2a_registry.registry_handler import _get_ws_handler
 
 logger = logging.getLogger("a2a_registry.server")
 
@@ -149,6 +155,10 @@ class RegistryHandler:
         self._auth_public_key: str = ""
         self._auth_algorithm: str = "HS256"
         self._auth_enabled: bool = False
+
+        # Task timeout management
+        self._task_timeout: int = 300  # Default 300s, overridden via config
+        self._task_timers: Dict[str, asyncio.Task] = {}  # task_id -> asyncio timer task
 
     # ------------------------------------------------------------------
     # Health / meta
@@ -622,73 +632,22 @@ class RegistryHandler:
 
                     msg_type = data.get("type", "")
 
+                    # --- Fast-path handlers (no routing overhead) ---
                     if msg_type == "ping":
                         await ws.send_json({"type": "pong"})
-
-                    elif msg_type == "task_result":
-                        # Agent reports task completion
-                        task_id = data.get("id", "")
-                        task = self._tasks.get(task_id)
-                        if task:
-                            task["state"] = data.get("status", "completed")
-                            task["result"] = data.get("result", {})
-                            task["error"] = data.get("error")
-                            task["updated_at"] = time.time()
-                            logger.info("Task %s completed by agent '%s': %s",
-                                        task_id, agent_id, task["state"])
-                        else:
-                            # Auto-create task entry for externally reported results
-                            now = time.time()
-                            self._tasks[task_id] = {
-                                "id": task_id,
-                                "agent_id": agent_id,
-                                "state": data.get("status", "completed"),
-                                "result": data.get("result", {}),
-                                "error": data.get("error"),
-                                "created_at": now,
-                                "updated_at": now,
-                            }
-                            logger.info("Task %s result received (auto-created) from agent '%s'",
-                                        task_id, agent_id)
-
-                        # Reconcile with kanban TaskStore if this is a WS-dispatched kanban task
-                        _maybe_update_kanban(
-                            self.task_store,
-                            self._dispatched_ws_tasks,
-                            task_id,
-                            data.get("status", "completed"),
-                            data.get("result"),
-                            data.get("error"),
-                        )
-
-                    elif msg_type == "task_progress":
-                        task_id = data.get("id", "")
-                        task = self._tasks.get(task_id)
-                        if task:
-                            task["state"] = data.get("status", "working")
-                            task["updated_at"] = time.time()
-                        else:
-                            # Auto-create task entry for externally reported progress
-                            now = time.time()
-                            self._tasks[task_id] = {
-                                "id": task_id,
-                                "agent_id": agent_id,
-                                "state": data.get("status", "working"),
-                                "result": None,
-                                "error": None,
-                                "created_at": now,
-                                "updated_at": now,
-                            }
-                            logger.info("Task %s progress received (auto-created) from agent '%s'",
-                                        task_id, agent_id)
 
                     elif msg_type == "close":
                         logger.info("Agent '%s' closing WebSocket", agent_id)
                         break
 
+                    # --- Handler-map dispatch (extensible) ---
                     else:
-                        logger.debug("Unknown WS message from %s: %s",
-                                     agent_id, msg_type)
+                        handler_fn = _get_ws_handler(msg_type)
+                        if handler_fn is not None:
+                            await handler_fn(self, ws, data, agent_id)
+                        else:
+                            logger.debug("Unknown WS message from %s: %s",
+                                         agent_id, msg_type)
 
                 elif msg.type == WSMsgType.ERROR:
                     logger.error("WS error for agent '%s': %s",
@@ -707,10 +666,193 @@ class RegistryHandler:
             logger.info("Agent '%s' disconnected via WebSocket (%d active)",
                          agent_id, len(self._ws_connections))
 
+            # P1.3: WS 断连自动失败该 agent 的所有进行中任务
+            try:
+                await self._fail_agent_tasks(agent_id)
+            except Exception:
+                logger.exception(
+                    "Failed to auto-fail tasks for disconnected agent '%s'",
+                    agent_id,
+                )
+
+            # P1.3: Broadcast disconnection event to Admin UI
+            admin_ws_hub = request.app.get("admin_ws_hub")
+            if admin_ws_hub:
+                try:
+                    admin_ws_hub.broadcast_to_all({
+                        "type": "agent_disconnected",
+                        "agent_id": agent_id,
+                    })
+                except Exception:
+                    logger.exception(
+                        "Failed to broadcast disconnection event for '%s'",
+                        agent_id,
+                    )
+
         return ws
 
+    async def _fail_agent_tasks(self, agent_id: str) -> None:
+        """Fail all active tasks for a disconnected agent.
+
+        Scans ``self._tasks`` for tasks belonging to *agent_id* with
+        non-terminal states (dispatched, forwarded, working).  Marks them
+        as ``failed("agent_disconnected")``.
+
+        If the task was WS-dispatched from the kanban board, also updates
+        the V2 ``TaskStore`` so the kanban lifecycle reflects the failure.
+        """
+        now = time.time()
+        failed_ids: list[str] = []
+
+        for task_id, task in list(self._tasks.items()):
+            if task.get("agent_id") != agent_id:
+                continue
+            state = task.get("state", "")
+            if state in ("completed", "failed", "cancelled"):
+                continue
+
+            task["state"] = "failed"
+            task["error"] = "agent_disconnected"
+            task["updated_at"] = now
+            failed_ids.append(task_id)
+
+            # P1.2: Cancel the timeout timer for this task
+            self._cancel_task_timeout(task_id)
+
+            logger.info(
+                "Task %s for agent '%s' → failed (agent_disconnected)",
+                task_id, agent_id,
+            )
+
+        if not failed_ids:
+            return
+
+        # Sync with V2 TaskStore for WS-dispatched kanban tasks
+        if self.task_store is not None and self._dispatched_ws_tasks is not None:
+            for task_id in failed_ids:
+                if task_id in self._dispatched_ws_tasks:
+                    try:
+                        self.task_store.update_task_status(
+                            task_id, TaskStatus.FAILED.value,
+                            result="Agent disconnected via WebSocket",
+                        )
+                        logger.info(
+                            "Kanban task %s → failed (agent_disconnected via WS)",
+                            task_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to fail kanban task '%s' from WS disconnect",
+                            task_id,
+                        )
+
     # ------------------------------------------------------------------
-    # Task dispatch — client → Registry → Agent (via WS)
+    # P1.2: Task timeout management
+    # ------------------------------------------------------------------
+
+    def _schedule_task_timeout(self, task_id: str) -> None:
+        """Schedule a timeout timer for *task_id*.
+
+        Creates an ``asyncio.Task`` that waits ``_task_timeout`` seconds and
+        then fires the timeout logic:
+
+        1. Mark the task as ``failed("timeout")``
+        2. Send a ``task_cancel`` WebSocket message to the agent
+        3. Clean up the timer entry
+        4. Reconcile with the kanban TaskStore (if applicable)
+        """
+        # Cancel any existing timer first (safe if None)
+        self._cancel_task_timeout(task_id)
+
+        task_obj = self._tasks.get(task_id)
+        if task_obj is None:
+            logger.warning("Cannot schedule timeout for unknown task '%s'", task_id)
+            return
+
+        async def _timeout_worker() -> None:
+            try:
+                await asyncio.sleep(self._task_timeout)
+            except asyncio.CancelledError:
+                return
+
+            task = self._tasks.get(task_id)
+            if task is None:
+                self._task_timers.pop(task_id, None)
+                return
+
+            state = task.get("state", "")
+            if state in ("completed", "failed", "cancelled"):
+                self._task_timers.pop(task_id, None)
+                return
+
+            logger.warning(
+                "Task %s for agent '%s' timed out after %ds (state: %s)",
+                task_id, task.get("agent_id", "?"),
+                self._task_timeout, state,
+            )
+
+            task["state"] = "failed"
+            task["error"] = "timeout"
+            task["updated_at"] = time.time()
+
+            # Send task_cancel to the agent
+            agent_id = task.get("agent_id", "")
+            ws = self._ws_connections.get(agent_id)
+            if ws is not None and not ws.closed:
+                try:
+                    await ws.send_json({
+                        "type": "task_cancel",
+                        "id": task_id,
+                        "reason": "timeout",
+                        "dispatched_at": task.get("dispatched_at", 0),
+                    })
+                    logger.info("Sent task_cancel to agent '%s' for timed-out task '%s'",
+                                agent_id, task_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to send task_cancel to agent '%s' for task '%s'",
+                        agent_id, task_id,
+                    )
+
+            # Reconcile with kanban TaskStore
+            if self.task_store is not None and self._dispatched_ws_tasks is not None:
+                if task_id in self._dispatched_ws_tasks:
+                    try:
+                        self.task_store.update_task_status(
+                            task_id, TaskStatus.FAILED.value,
+                            result=f"Task timed out after {self._task_timeout}s",
+                        )
+                        logger.info("Kanban task %s -> failed (timeout via WS)", task_id)
+                    except Exception:
+                        logger.exception(
+                            "Failed to fail kanban task '%s' from timeout",
+                            task_id,
+                        )
+
+            self._task_timers.pop(task_id, None)
+
+        timer = asyncio.create_task(_timeout_worker())
+        self._task_timers[task_id] = timer
+        logger.debug("Scheduled timeout timer for task '%s' (%ds)",
+                     task_id, self._task_timeout)
+
+    def _cancel_task_timeout(self, task_id: str) -> None:
+        """Cancel the timeout timer for *task_id* (no-op if absent)."""
+        timer = self._task_timers.pop(task_id, None)
+        if timer is not None and not timer.done():
+            timer.cancel()
+            logger.debug("Cancelled timeout timer for task '%s'", task_id)
+
+    def _reset_task_timeout(self, task_id: str) -> None:
+        """Cancel and re-schedule the timeout for *task_id*.
+
+        Called when the agent sends ``task_ack`` or ``task_progress`` -
+        each act of progress resets the clock.
+        """
+        self._schedule_task_timeout(task_id)
+
+    # ------------------------------------------------------------------
+    # Task dispatch - client -> Registry -> Agent (via WS)
     # ------------------------------------------------------------------
 
     async def handle_dispatch(self, request: web.Request) -> web.Response:
@@ -787,6 +929,10 @@ class RegistryHandler:
                     detail=f"agent_id={agent_id} query_len={len(query)}",
                     success=True,
                 )
+
+            # P1.2: Start the timeout timer after successful dispatch
+            self._schedule_task_timeout(task_id)
+
         except Exception as e:
             task["state"] = "failed"
             task["error"] = f"Dispatch failed: {e}"

@@ -8,7 +8,9 @@ Tests cover:
   - Reconnect replaces old connection
   - Auth token validation on WS upgrade
   - Dispatch to non-existent / disconnected agent
-  - Admin WS comment push notification (WS-T5-TC4)
+  - WS disconnect auto-fails active tasks (P1.3)
+  - Agent isolation on disconnect (P1.3)
+  - No side effects on disconnect without active tasks (P1.3)
 """
 from __future__ import annotations
 
@@ -342,7 +344,7 @@ class TestWebSocketTaskDispatch:
             await ws.close()
 
     async def test_dispatch_multiple_agents(self, app_factory):
-        """Dispatch to different agents — each gets only its own tasks."""
+        """Dispatch to different agents - each gets only its own tasks."""
         async with await app_factory() as client:
             agent_a = await _register_agent(client, "agent-a")
             agent_b = await _register_agent(client, "agent-b")
@@ -498,7 +500,7 @@ class TestWebSocketAuth:
             assert "invalid" in json.dumps(data).lower()
 
     async def test_ws_auth_mismatched_sub(self, app_factory):
-        """Token for simple-a2a-registry can connect to any agent (it's admin)."""
+        """Token for simple-a2a-registry can connect to any agent (its admin)."""
         async with await app_factory(auth_enabled=True) as client:
             token = await self._get_token(client)
             agent_a = await self._register_with_token(client, token, "agent-a-ws")
@@ -535,7 +537,7 @@ class TestAdminWSCommentPush:
         return data["task"]["id"]
 
     async def test_comment_push_via_admin_ws(self, app_factory):
-        """WS-T5-TC4: add a comment → verify ``comment_added`` arrives via Admin WS."""
+        """WS-T5-TC4: add a comment -> verify ``comment_added`` arrives via Admin WS."""
         async with await app_factory() as client:
             # 1. Create a task
             task_id = await self._create_task(client)
@@ -650,3 +652,106 @@ class TestAdminWSCommentPush:
 
             await ws.send_json({"type": "close"})
             await ws.close()
+
+
+# ======================================================================
+# P1.3: WS disconnect auto-fail active tasks
+# ======================================================================
+
+
+class TestWebSocketDisconnectAutoFail:
+    """WS disconnect auto-fails active tasks for the disconnected agent (P1.3)."""
+
+    async def test_disconnect_fails_active_tasks(self, app_factory):
+        """Normal WS close -> auto-fail active tasks with agent_disconnected."""
+        async with await app_factory() as client:
+            agent_id = await _register_agent(client, "fail-test-agent")
+            ws = await client.ws_connect(f"/v1/agents/{agent_id}/ws")
+
+            # Dispatch a task
+            resp = await client.post(
+                f"/v1/agents/{agent_id}/dispatch",
+                json={"query": "will be failed on disconnect"},
+            )
+            assert resp.status == 202
+            data = await resp.json()
+            task_id = data["task_id"]
+
+            # Receive the task via WS
+            msg = await ws.receive()
+            msg_data = json.loads(msg.data)
+            assert msg_data["type"] == "task"
+            assert msg_data["id"] == task_id
+
+            # Close the WS connection gracefully
+            await ws.send_json({"type": "close"})
+            await ws.close()
+
+            # Verify the task is now failed with 'agent_disconnected'
+            resp = await client.get(f"/v1/tasks/{task_id}")
+            assert resp.status == 200
+            task = await resp.json()
+            assert task["state"] == "failed"
+            assert task["error"] == "agent_disconnected"
+
+    async def test_disconnect_only_fails_own_agent_tasks(self, app_factory):
+        """Disconnect one agent should not affect another agents tasks."""
+        async with await app_factory() as client:
+            agent_a = await _register_agent(client, "agent-a-fail")
+            agent_b = await _register_agent(client, "agent-b-fail")
+
+            ws_a = await client.ws_connect(f"/v1/agents/{agent_a}/ws")
+            ws_b = await client.ws_connect(f"/v1/agents/{agent_b}/ws")
+
+            # Dispatch to both agents
+            resp = await client.post(
+                f"/v1/agents/{agent_a}/dispatch",
+                json={"query": "for A"},
+            )
+            task_a = (await resp.json())["task_id"]
+
+            resp = await client.post(
+                f"/v1/agents/{agent_b}/dispatch",
+                json={"query": "for B"},
+            )
+            task_b = (await resp.json())["task_id"]
+
+            # Both receive their tasks
+            await ws_a.receive()
+            await ws_b.receive()
+
+            # Disconnect agent A only
+            await ws_a.send_json({"type": "close"})
+            await ws_a.close()
+
+            # Agent A's task should be failed
+            resp = await client.get(f"/v1/tasks/{task_a}")
+            assert resp.status == 200
+            task = await resp.json()
+            assert task["state"] == "failed"
+            assert task["error"] == "agent_disconnected"
+
+            # Agent B's task should still be in "working" state (dispatched)
+            resp = await client.get(f"/v1/tasks/{task_b}")
+            assert resp.status == 200
+            task = await resp.json()
+            assert task["state"] != "failed"
+
+            await ws_b.send_json({"type": "close"})
+            await ws_b.close()
+
+    async def test_disconnect_without_active_tasks(self, app_factory):
+        """Disconnecting an agent with no active tasks should be a no-op."""
+        async with await app_factory() as client:
+            agent_id = await _register_agent(client, "no-task-agent")
+            ws = await client.ws_connect(f"/v1/agents/{agent_id}/ws")
+
+            # Just close immediately — no tasks involved
+            await ws.send_json({"type": "close"})
+            await ws.close()
+
+            # No exception should occur, server should remain healthy
+            resp = await client.get("/health")
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["status"] == "healthy"

@@ -399,6 +399,45 @@ class A2ATask:
 _tasks: Dict[str, A2ATask] = {}
 _active_procs: Dict[str, subprocess.Popen] = {}
 
+# ── WS task lifecycle tracking ───────────────────────────────────────────────
+# asyncio.Event per task_id — set when a task_cancel is received
+_cancel_events: Dict[str, asyncio.Event] = {}
+# asyncio.Task for running process_ws_task — allows direct cancellation
+_running_ws_tasks: Dict[str, asyncio.Task] = {}
+
+
+async def _periodic_progress(
+    task_id: str,
+    cancel_event: asyncio.Event,
+    start_time: float,
+    *,
+    interval: float = 15.0,
+) -> None:
+    """Send ``task_progress`` every *interval* seconds while the task runs.
+
+    Percentage is estimated from elapsed time relative to ``CLI_TIMEOUT``
+    (capped at 99 % so it never claims completion before the real result).
+    Checks ``cancel_event`` on each tick and exits silently if cancellation
+    was requested.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        if cancel_event.is_set():
+            return
+        elapsed = time.time() - start_time
+        pct = min(int(elapsed / CLI_TIMEOUT * 100), 99)
+        ok = await _send_ws_json({
+            "type": "task_progress",
+            "id": task_id,
+            "status": "working",
+            "progress": pct,
+        })
+        if not ok:
+            logger.debug("periodic_progress[%s]: WS gone, stopping reporter", task_id)
+            return
+        logger.debug("periodic_progress[%s]: sent %d%%", task_id, pct)
+
+
 # ── WebSocket connection state ──────────────────────────────────────────────
 
 _ws_session: Optional[ClientSession] = None
@@ -490,6 +529,7 @@ def _parse_cli_output(raw: str, backend: str) -> Dict[str, Any]:
 
 
 async def run_cli_task(
+    task_id: str,
     query: str,
     backend_cfg: dict,
     *,
@@ -500,6 +540,7 @@ async def run_cli_task(
     """Execute a task via the backend CLI.
 
     Args:
+        task_id:      Unique task identifier (used for cancellation tracking).
         query:        The task query / prompt.
         backend_cfg:  Resolved backend configuration.
         cwd:          Default working directory.
@@ -536,6 +577,8 @@ async def run_cli_task(
         stderr=asyncio.subprocess.PIPE,
         cwd=work_dir,
     )
+    # Register for cancellation support
+    _active_procs[task_id] = proc
 
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -544,12 +587,20 @@ async def run_cli_task(
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
+        _active_procs.pop(task_id, None)
         return {
             "text": "",
             "error": f"CLI task timed out after {timeout}s",
             "returncode": -1,
             "sessionId": "",
         }
+    except asyncio.CancelledError:
+        proc.kill()
+        await proc.wait()
+        _active_procs.pop(task_id, None)
+        raise
+
+    _active_procs.pop(task_id, None)
 
     returncode = proc.returncode or 0
     stdout_text = stdout.decode("utf-8", errors="replace")
@@ -598,6 +649,13 @@ async def process_ws_task(
 ) -> None:
     """Process a task received via WebSocket and report results via WS.
 
+    Lifecycle (per spec):
+      1. task_ack  (immediate — 0.5s within receipt)  → status=accepted
+      2. task_progress  (on execution start, then every 15s)  → status=working + progress%
+      3. task_complete  (on success)  → status=completed + result + metrics
+      4. task_fail      (on error)    → status=failed + error + code
+      5. task_cancel    (external signal)  → stop execution, clean up, report canceled
+
     Supports two message formats:
 
     **A2A-style (direct query)** — ``tasks/send`` endpoint:
@@ -621,43 +679,110 @@ async def process_ws_task(
         logger.warning("Invalid WS task: missing id or query: %s", task_msg)
         return
 
-    # Report progress
+    # ── 1. task_ack: acknowledge receipt immediately ──────────────────────
+    await _send_ws_json({
+        "type": "task_ack",
+        "id": task_id,
+        "status": "accepted",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    logger.debug("WS task %s: sent task_ack (accepted)", task_id)
+
+    # ── 2. Set up cancellation tracking ───────────────────────────────────
+    cancel_event = asyncio.Event()
+    _cancel_events[task_id] = cancel_event
+    started_at = time.time()
+
+    # ── 3. task_progress: signal that work has started ────────────────────
     await _send_ws_json({
         "type": "task_progress",
         "id": task_id,
         "status": "working",
+        "progress": 0,
     })
 
-    # Execute via CLI backend
-    result = await run_cli_task(
-        query,
-        backend_cfg,
-        cwd=cwd,
-        task_workspace=workspace_path,
+    # ── 4. Periodic progress reporter (every 15s) ────────────────────────
+    progress_task = asyncio.create_task(
+        _periodic_progress(task_id, cancel_event, started_at, interval=15.0),
     )
 
-    error = result.get("error")
-    if error:
+    # ── 5. Execute via CLI backend ────────────────────────────────────────
+    try:
+        result = await run_cli_task(
+            task_id,
+            query,
+            backend_cfg,
+            cwd=cwd,
+            task_workspace=workspace_path,
+        )
+
+        # ── 6. Clean up progress reporter ────────────────────────────────
+        cancel_event.set()
+        await asyncio.wait_for(progress_task, timeout=5.0)
+        _cancel_events.pop(task_id, None)
+        _running_ws_tasks.pop(task_id, None)
+
+        elapsed = round(time.time() - started_at, 2)
+        error = result.get("error")
+        returncode = result.get("returncode", 0)
+
+        # Check if task was externally cancelled
+        if cancel_event.is_set():
+            await _send_ws_json({
+                "type": "task_fail",
+                "id": task_id,
+                "status": "canceled",
+                "error": "Task cancelled by server",
+                "code": "CANCELED",
+                "metrics": {"elapsed_seconds": elapsed},
+            })
+            logger.info("WS task %s was cancelled (%ss)", task_id, elapsed)
+            return
+
+        if error or returncode != 0:
+            await _send_ws_json({
+                "type": "task_fail",
+                "id": task_id,
+                "status": "failed",
+                "error": error or f"CLI exited with code {returncode}",
+                "code": f"EXIT_{returncode}" if returncode else "EXECUTION_ERROR",
+                "result": {"text": result.get("text", "")},
+                "metrics": {"elapsed_seconds": elapsed},
+            })
+            logger.warning("WS task %s failed after %ss", task_id, elapsed)
+        else:
+            await _send_ws_json({
+                "type": "task_complete",
+                "id": task_id,
+                "status": "completed",
+                "result": {
+                    "text": result.get("text", ""),
+                    "sessionId": result.get("sessionId", session_id),
+                },
+                "metrics": {
+                    "elapsed_seconds": elapsed,
+                    "output_chars": len(result.get("text", "")),
+                },
+            })
+            text_len = len(result.get("text", ""))
+            logger.info("WS task %s completed after %ss (output=%d chars)", task_id, elapsed, text_len)
+
+    except Exception as e:
+        logger.exception("WS task %s failed with exception", task_id)
+        cancel_event.set()
+        if not progress_task.done():
+            await asyncio.wait_for(progress_task, timeout=5.0)
+        _cancel_events.pop(task_id, None)
+        _running_ws_tasks.pop(task_id, None)
+        elapsed = round(time.time() - started_at, 2)
         await _send_ws_json({
-            "type": "task_result",
+            "type": "task_fail",
             "id": task_id,
             "status": "failed",
-            "error": error,
-            "result": {"text": result.get("text", "")},
+            "error": str(e)[:2000],
+            "code": "EXCEPTION",
+            "metrics": {"elapsed_seconds": elapsed},
         })
-        logger.warning("WS task %s failed: %s", task_id, error[:100])
-    else:
-        await _send_ws_json({
-            "type": "task_result",
-            "id": task_id,
-            "status": "completed",
-            "result": {
-                "text": result.get("text", ""),
-                "sessionId": result.get("sessionId", session_id),
-            },
-        })
-        text_len = len(result.get("text", ""))
-        logger.info("WS task %s completed (output=%d chars)", task_id, text_len)
 
 
 # ── HTTP Handlers ───────────────────────────────────────────────────────────
@@ -730,7 +855,7 @@ async def _process_http_task(
     task.state = TaskState.WORKING
     task.updated_at = time.time()
 
-    result = await run_cli_task(task.query, backend_cfg, cwd=cwd)
+    result = await run_cli_task(task.id, task.query, backend_cfg, cwd=cwd)
 
     error = result.get("error")
     if error:
@@ -1028,9 +1153,32 @@ async def _ws_connect_single(
                         "Received WS task '%s' for '%s'",
                         data.get("id", "?"), agent_id,
                     )
-                    asyncio.create_task(
+                    task = asyncio.create_task(
                         process_ws_task(data, backend_cfg, cwd=cwd)
                     )
+                    _running_ws_tasks[data.get("id", "")] = task
+                elif msg_type == "task_cancel":
+                    cancel_id = data.get("id", "")
+                    if cancel_id:
+                        logger.info(
+                            "Received task_cancel for '%s'", cancel_id,
+                        )
+                        # Signal cancellation via event
+                        cancel_ev = _cancel_events.get(cancel_id)
+                        if cancel_ev is not None:
+                            cancel_ev.set()
+                        # Also try to cancel the asyncio task directly
+                        running_task = _running_ws_tasks.pop(cancel_id, None)
+                        if running_task is not None and not running_task.done():
+                            running_task.cancel()
+                            logger.info("Cancelled WS task '%s'", cancel_id)
+                        # Kill subprocess if tracked
+                        proc = _active_procs.pop(cancel_id, None)
+                        if proc:
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
                 elif msg_type == "close":
                     break
             elif msg.type == WSMsgType.ERROR:

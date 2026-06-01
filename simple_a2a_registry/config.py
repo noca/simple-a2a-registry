@@ -77,6 +77,7 @@ class OrchestrationConfig:
     dispatcher_interval: int = 5
     claim_ttl: int = 900
     failure_limit: int = 3
+    task_timeout: int = 300  # Default task timeout in seconds (dispatch→ack→progress cascade)
     workspaces_root: str = "~/.simple-a2a-registry/workspaces"
     board_path: str = "~/.simple-a2a-registry/board.db"
 
