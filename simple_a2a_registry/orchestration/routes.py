@@ -128,6 +128,17 @@ class OrchestrationHandler:
                 400, "validation_error", "Missing required 'title' field"
             )
 
+        # Normalize priority: allow int (5) or string ("normal"→0, "low"→1, "high"→10)
+        raw_priority = body.get("priority", 0)
+        _priority_map = {"low": 1, "normal": 0, "high": 10, "critical": 20}
+        if isinstance(raw_priority, str):
+            priority = _priority_map.get(raw_priority.lower(), 0)
+        else:
+            try:
+                priority = int(raw_priority)
+            except (ValueError, TypeError):
+                priority = 0
+
         parents: Optional[List[str]] = body.get("parents")
 
         try:
@@ -135,7 +146,7 @@ class OrchestrationHandler:
                 title=title,
                 body=body.get("body"),
                 assignee=body.get("assignee"),
-                priority=body.get("priority", 0),
+                priority=priority,
                 parents=parents,
                 workspace_kind=body.get("workspace_kind"),
                 workspace_path=body.get("workspace_path"),
@@ -182,6 +193,20 @@ class OrchestrationHandler:
             )
 
         try:
+            # Normalize priority for both create and update
+            raw_priority = body.get("priority")
+            if raw_priority is not None:
+                _priority_map = {"low": 1, "normal": 0, "high": 10, "critical": 20}
+                if isinstance(raw_priority, str):
+                    priority = _priority_map.get(raw_priority.lower(), 0)
+                else:
+                    try:
+                        priority = int(raw_priority)
+                    except (ValueError, TypeError):
+                        priority = 0
+            else:
+                priority = None
+
             # Status transition — delegates to update_task_status (state machine)
             if "status" in body:
                 task = self.store.update_task_status(
@@ -194,7 +219,7 @@ class OrchestrationHandler:
                     title=body.get("title"),
                     body=body.get("body"),
                     assignee=body.get("assignee"),
-                    priority=body.get("priority"),
+                    priority=priority,
                 )
                 # Auto-promote TODO → READY when assignee is set on a root task
                 if (

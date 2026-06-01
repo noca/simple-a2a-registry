@@ -1,363 +1,1104 @@
 # Simple A2A Registry
 
-> **The Kubernetes for AI Agents — registration, orchestration, and governance for distributed agent ecosystems.**
+> **The Kubernetes for AI Agents** — registration, orchestration, and governance for distributed agent ecosystems.
 
-轻量级、符合 Google A2A (Agent-to-Agent) 协议的 Agent 注册中心与编排引擎。
-支持 Agent 注册/发现、心跳保活、WebSocket 长连接、任务分发与状态查询，
-以及 Kanban 编排引擎（Orchestration Engine）。
+A lightweight, production-ready Agent-to-Agent (A2A) Registry server that enables autonomous AI agents to discover each other, exchange tasks, and collaborate at scale. Built on the [Google A2A protocol](https://github.com/google/A2A) model while extending it with a full Kanban-style orchestration engine, OAuth 2.1 security, multi-tenant isolation, plugin hooks, and Prometheus observability.
 
-## 架构概览
+---
+
+## Features
+
+| Capability | Description |
+|------------|-------------|
+| **Agent Registry & Discovery** | Register, list, search agents by name/skill/tag. Agent Card aligned to A2A v1.0 protobuf. |
+| **WebSocket Persistent Connection** | Agents maintain long-lived WS connections; server pushes tasks in real-time. Auto-reconnect. |
+| **HTTP Heartbeat** | `POST /agents/{id}/heartbeat` — 120s timeout, 300s stale cleanup, Prometheus gauges. |
+| **Task Dispatch** | Distribute tasks to connected agents via WS; poll results via HTTP. Progress reporting. |
+| **Subprocess Pool** | Persistent subprocess workers per assignee; stdin JSON-line dispatch; auto-restart on crash. |
+| **Kanban Orchestration Engine (V2)** | Full 8-state state machine (todo → ready → running → completed / failed / blocked). DAG dependency chains, atomic claim locks, TTL release, retry promotion, auto-spawn. |
+| **Swarm Topology** | Create multi-agent coordination DAGs: N parallel workers → verifier → synthesizer, with shared blackboard. |
+| **OAuth 2.1 Auth** | JWT RS256/HS256, `client_credentials` grant, scope-based access control (`task:read`, `agent:register`, `registry:admin`, etc.). |
+| **Multi-Tenancy** | `X-Tenant-ID` header + `?tenant=` query param. Full data isolation per tenant. |
+| **Plugin System** | Hook-based architecture (lifecycle, request, event hooks). Load via `pyproject.toml` entry_points or `config.yaml`. |
+| **Rate Limiting** | Token-bucket algorithm. Memory (default) or MySQL-backed. Configurable per-key (IP or client_id). Whitelist support. |
+| **Prometheus Metrics** | `/metrics` endpoint with request count, latency histogram, auth operations, DB query duration, agent/WS gauges. |
+| **Audit Logging** | Append-only, tamper-evident event tracking with TTL retention. Every sensitive operation logged. |
+| **Admin WebSocket** | Real-time task updates to the Admin SPA. Selective task subscription. |
+| **Bootstrap Admin** | Auto-creates `simple-a2a-registry` admin client on first start with auto-generated secret. |
+| **Web Dashboard** | Built-in SPA at `http://localhost:8321` — Agent list, Kanban board (Board/List views), task detail with dependency chain. |
+| **Database Engine** | SQLite (dev, WAL mode) or MySQL (prod, QueuePool). RetryEngine for transient errors. Alembic migrations. |
+| **YAML Config** | `~/.simple-a2a-registry/config.yaml` with env override (`A2A_REGISTRY_*`). Sensitive fields auto-masked. |
+| **TLS/SSL** | `--certfile` / `--keyfile` for HTTPS. |
+| **CORS** | Configurable `Access-Control-Allow-Origin` via `cors_origins`. |
+
+---
+
+## Architecture
 
 ```
-┌─────────────┐      HTTP/WS       ┌──────────────────────────────────────────┐
-│   Client    │ ──────────────────→ │  A2A Registry (localhost:8321)          │
-│ (调用方)     │                     │                                          │
-└─────────────┘                     │  ┌────────────────────────────────────┐  │
-                                    │  │ Agent Registry & Dispatch          │  │
-                                    │  │ (注册/发现/WS/心跳/任务分发)        │  │
-                                    │  ├────────────────────────────────────┤  │
-                                    │  │ Orchestration Engine              │  │
-                                    │  │ (Kanban 编排/依赖/DAG/Worker 派发) │  │
-                                    │  ├────────────────────────────────────┤  │
-                                    │  ├────────────────────────────────────┤  │
-                                    │  │ Auth & Governance                 │  │
-                                    │  │ (OAuth 2.1/JWT RS256/Scope 鉴权/Admin) │  │
-                                    │  ├────────────────────────────────────┤  │
-                                    │  │ Store (统一 SQLite)                  │  │
-                                    │  │ registry.db: agents / oauth_clients │  │
-                                    │  │ / oauth_tokens / auth_codes         │  │
-                                    │  │ WAL 模式 + 线程安全 RLock            │  │
-                                    │  │ 自动迁移旧 JSON 数据                  │  │
-                                    │  └────────────────────────────────────┘  │
-                                    └──────────────────┬───────────────────────┘
-                                                        │
-                         ┌──────────────────────────────┼──────────────────────────────┐
-                         │                               │                              │
-                 ┌───────▼───────┐             ┌─────────▼────────┐      ┌─────────────▼──┐
-                 │  Agent A      │             │   Agent B        │      │  Worker       │
-                 │ (HTTP+WS)     │             │  (WS 长连接)      │      │ (Kanban Worker)│
-                 └───────────────┘             └──────────────────┘      └───────────────┘
+┌──────────────┐    HTTP/WS     ┌──────────────────────────────────────────────────────┐
+│   Client     │ ─────────────→ │  A2A Registry server (localhost:8321)                 │
+│  (caller)    │                │                                                        │
+└──────────────┘                │  ┌────────────────────────────────────────────────┐   │
+                                │  │  Agent Registry & Dispatch                     │   │
+                                │  │  Register/list/search/delete agents            │   │
+                                │  │  HTTP heartbeat + WebSocket long-connection    │   │
+                                │  │  Task push via WS + HTTP result polling        │   │
+                                │  ├────────────────────────────────────────────────┤   │
+                                │  │  Orchestration Engine (V2 Kanban)              │   │
+                                │  │  DAG dependency, state machine, dispatching    │   │
+                                │  │  Swarm topology, blackboard, workspace mgmt    │   │
+                                │  ├────────────────────────────────────────────────┤   │
+                                │  │  Auth & Governance                             │   │
+                                │  │  OAuth 2.1 / JWT RS256+HS256 / Scope / Admin   │   │
+                                │  │  Multi-tenant, rate limiting, audit logging    │   │
+                                │  ├────────────────────────────────────────────────┤   │
+                                │  │  Observability                                 │   │
+                                │  │  Prometheus metrics, JSON logging, Admin WS    │   │
+                                │  ├────────────────────────────────────────────────┤   │
+                                │  │  Store (unified DB engine)                     │   │
+                                │  │  SQLite (dev)  ←→  MySQL (prod)                │   │
+                                │  │  WAL mode + RetryEngine + Alembic migrations   │   │
+                                │  └────────────────────────────────────────────────┘   │
+                                └────────────────────────┬─────────────────────────────┘
+                                                         │
+          ┌──────────────────────────────────────────────┼────────────────────────────────┐
+          │                                              │                                │
+   ┌──────▼──────┐                               ┌──────▼──────┐                  ┌──────▼──────┐
+   │  Agent A    │                               │  Agent B    │                  │  Worker     │
+   │(HTTP + WS)  │                               │ (WS long)   │                  │ (Kanban)    │
+   └─────────────┘                               └─────────────┘                  └─────────────┘
 ```
 
-## 核心能力
+### Internal Module Map
 
-### 1. Agent 注册与发现
+```
+simple_a2a_registry/
+  server.py        — aiohttp app factory, middleware stack, route registration
+  cli.py           — argparse CLI entry point
+  store.py         — Agent registry + OAuth client/token persistence
+  models.py        — Agent Card data models (A2A v1.0 alignment)
+  auth.py          — OAuth 2.1: JWT issue/verify, middleware, Admin client CRUD
+  config.py        — YAML config loader with env override
+  errors.py        — Unified error response format + exception hierarchy
+  log.py           — JSON/text structured logging with request_id context
+  metrics.py       — Prometheus metrics middleware + endpoint
+  rate_limiter.py  — Token bucket rate limiter (memory/MySQL)
+  audit.py         — Append-only event audit store
+  users.py         — User registry + session management for Web Dashboard
+  validation.py    — Input validation helpers
+  plugin.py        — Plugin ABC + PluginRegistry (load/dispatch hooks)
+  client.py        — A2A Python SDK (sync + async)
+  ws_admin.py      — Admin WebSocket hub for real-time task updates
+  database/
+    engine.py      — DatabaseEngine ABC, SQLiteEngine, MySQLEngine, RetryEngine
+  orchestration/
+    __init__.py    — Module exports
+    models.py      — Task/run/event/comment data models
+    store.py       — TaskStore: SQLite task persistence
+    state_machine.py — 8-state state machine
+    routes.py      — V2 REST API routes
+    swarm.py       — Swarm topology creation + blackboard
+    swarm_routes.py — Swarm REST API routes
+    dispatcher.py  — Background worker dispatcher (poll loop)
+    workspace.py   — Workspace allocation/cleanup
+    dependency.py  — Cycle detection, dependency resolution
+    pool.py        — Worker subprocess pool (P1.5 dispatch)
+  static/          — Web Dashboard SPA (HTML + JS)
+```
 
-Agent 通过 REST API 注册，通过 HTTP 心跳或 WebSocket 保活。支持按技能、标签、全文搜索 Agent。
+---
 
-- **Agent Card v1.0** — 数据模型对齐 A2A v1.0 protobuf 规范
-- **HTTP 心跳** — `POST /v1/agents/{id}/heartbeat`，120s 超时 / 300s 清理
-- **WebSocket 长连接** — Agent 通过 WS 建立持久连接，支持主动任务推送
-- **健康检查** — `GET /health`，返回总 Agent 数、活跃数、WS 连接数等统计
+## Quick Start
 
-### 2. 任务分发
-
-客户端通过 Registry 向已连接的 Agent 分发任务，Agent 通过 WebSocket 实时接收，处理完成后返回结果。
-
-**工作流：**
-1. 客户端 `POST /agents/{id}/dispatch` 提交任务
-2. Registry 通过 WebSocket 推送 `{"type": "task", ...}` 给 Agent
-3. Agent 处理中，可上报 `task_progress` 进度
-4. Agent 完成后上报 `task_result`
-5. 客户端 `GET /tasks/{id}` 轮询结果
-
-### 3. 编排引擎（Orchestration Engine）
-
-完整的 Kanban 级任务编排能力，提供任务生命周期管理、依赖链、Worker 自动派发、人机协同。
-
-| 能力 | 说明 |
-|------|------|
-| **任务生命周期管理** | 从创建到归档的完整 8 状态状态机，依赖链、重试、超时释放 |
-| **Worker 自动派发** | 基于 Profile 的原子化任务认领与派发，防重复执行 |
-| **多 Agent 协调** | 通过依赖链（DAG）和 Workspace 隔离，多 Agent 分阶段协作 |
-| **人机协同** | Block/Unblock 机制、评论线程，Human-in-the-Loop |
-| **可观测性** | 全事件审计日志、任务运行记录、结构化元数据 |
-| **非侵入集成** | 不改动 Agent 发现和 WS Hub 模块 |
-
-详见 [docs/architecture.md](docs/architecture.md)。
-
-### 4. OAuth 2.1 认证与授权
-
-所有 API 端点可选 JWT Bearer Token 保护，基于 Scope 的细粒度鉴权。
-
-| 模式 | 说明 |
-|------|------|
-| 开发模式 | `--auth-enabled false`（默认），所有端点无需认证 |
-| 生产模式 | `--auth-enabled true`，受保护端点需 Bearer Token |
-
-**Scope 体系：**
-
-| Scope | 权限 | 适用端点 |
-|-------|------|---------|
-| `task:read` | 读取任务 | 任务查询 |
-| `task:write` | 创建/修改任务 | 任务操作、分发 |
-| `agent:read` | 读取 Agent | Agent 查询 |
-| `agent:register` | 注册 Agent | 注册端点 |
-| `agent:admin` | 删除/禁用 Agent | Agent 管理 |
-| `registry:admin` | Registry 管理 | Admin 客户端管理 |
-
-**认证流程（方案C — Admin 预创建模式）：**
-1. Admin 通过 CLI/API/Web UI 预创建 OAuth 客户端凭据
-2. Admin 将 `client_id` / `client_secret` 分发给 Agent
-3. Agent 凭 credentials 调用 `POST /auth/token` 获取 JWT Bearer Token
-4. Agent 使用 Token（需要 `agent:register` scope）调用 `POST /v1/agents` 注册
-5. Token 用于调用其他受保护端点
-
-公开端点（无需认证）：`/health`、`/.well-known/*`、`/auth/*`
-
-## 快速开始
+### 1. Install
 
 ```bash
 pip install simple-a2a-registry
+```
+
+Or from source:
+
+```bash
+git clone <repo-url>
+cd simple-a2a-registry
+pip install -e .
+```
+
+### 2. Start the server
+
+```bash
 a2a-registry
 ```
 
-打开 http://localhost:8321 查看 Dashboard。
+Opens on `http://localhost:8321`. Log shows the bootstrap admin secret:
 
-### 开启认证（生产环境）
+```
+INFO  Simple A2A Registry starting on 0.0.0.0:8321 (data: ~/.simple-a2a-registry) 🔓 auth disabled (dev) | V2: defaults
+INFO  Bootstrap admin client created:
+      client_id:    simple-a2a-registry
+      client_secret: auto-generated-xxx
+```
+
+### 3. Register an agent (no auth mode)
+
+```bash
+curl -s -X POST http://localhost:8321/v1/agents \
+  -H "Content-Type: application/json" \
+  -d '{"name": "My Agent", "description": "A test agent"}'
+```
+
+Response:
+
+```json
+{"id": "a2a-xxx", "name": "My Agent", "status": "alive", ...}
+```
+
+### 4. List agents
+
+```bash
+curl -s http://localhost:8321/v1/agents
+```
+
+### 5. Enable auth (production)
 
 ```bash
 a2a-registry --auth-enabled true
 ```
-启动后日志会显示 `🔐 auth enabled`。
 
-### 注册 Agent（无认证模式）
+### 6. Stopping
+
+`Ctrl+C` triggers graceful shutdown: WS agents notified, in-flight tasks cancelled, DB closed.
+
+---
+
+## Configuration
+
+The server accepts configuration from three sources (highest priority first):
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | CLI arguments | `--port 9000 --auth-enabled true` |
+| 2 | Environment variables | `A2A_REGISTRY_SERVER__PORT=9000` |
+| 3 | YAML config file | `~/.simple-a2a-registry/config.yaml` |
+| 4 | Code defaults | port 8321, auth disabled |
+
+### CLI Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--host` | `0.0.0.0` | Bind address |
+| `--port` | `8321` | Bind port |
+| `--data-dir` | `~/.simple-a2a-registry` | Data directory |
+| `--auth-enabled` | `false` | Enable OAuth 2.1 authentication |
+| `--bootstrap-secret` | auto-generated | Bootstrap admin client secret |
+| `--board-path` | `<data-dir>/board.db` | V2 orchestration board DB path |
+| `--dispatcher-enabled` | `true` | Background worker dispatcher |
+| `--dispatcher-interval` | `5` | Dispatcher poll interval (s) |
+| `--claim-ttl` | `900` | Claim lock TTL (15 min) |
+| `--failure-limit` | `3` | Default retry limit |
+| `--workspaces-root` | `<data-dir>/workspaces` | Workspace root directory |
+| `--log-format` | `text` | `json` (production) or `text` (dev) |
+| `--log-level` | `INFO` | DEBUG / INFO / WARNING / ERROR |
+| `--log-file` | stderr | Log file path |
+| `--certfile` | — | TLS certificate path |
+| `--keyfile` | — | TLS private key path |
+| `--version` | — | Show version and exit |
+
+### Environment Variables
+
+Use the `A2A_REGISTRY_` prefix. Nesting uses `__` (double underscore):
+
+```bash
+export A2A_REGISTRY_SERVER__PORT=9000
+export A2A_REGISTRY_DATABASE__DRIVER=mysql
+export A2A_REGISTRY_DATABASE__MYSQL_DSN=mysql+pymysql://user:pass@host/db
+export A2A_REGISTRY_AUTH__BOOTSTRAP_SECRET=my-secret
+```
+
+### YAML Config File
+
+Place at `~/.simple-a2a-registry/config.yaml`:
+
+```yaml
+server:
+  host: "0.0.0.0"
+  port: 8321
+  cors_origins: "*"
+
+auth:
+  enabled: false
+  bootstrap_secret: ""
+
+database:
+  driver: sqlite                    # or "mysql"
+  sqlite_path: "~/.simple-a2a-registry/registry.db"
+  mysql_dsn: ""                     # mysql+pymysql://user:pass@host/dbname
+  pool_size: 5
+  max_overflow: 10
+
+rate_limit:
+  enabled: false
+  default_unauthenticated: 60
+  default_authenticated: 300
+  storage: memory                   # or "mysql"
+  whitelist: []
+
+monitoring:
+  metrics_enabled: true
+
+dispatcher:
+  poll_interval: 5
+  claim_ttl: 900
+  failure_limit: 3
+
+plugins:
+  my-plugin:
+    module: my_package.my_plugin
+    config:
+      key: value
+```
+
+---
+
+## Authentication & Authorization
+
+### Modes
+
+| Mode | Flag | Use Case |
+|------|------|----------|
+| Dev (default) | `--auth-enabled false` | Local dev, no tokens required |
+| Production | `--auth-enabled true` | All endpoints require Bearer token |
+
+### OAuth 2.1 Flow (client_credentials)
+
+```
+Admin pre-creates OAuth client → Agent gets client_id/client_secret
+  → POST /auth/token → JWT Bearer → use for all API calls
+```
+
+### Scope Reference
+
+| Scope | Permission | Endpoints |
+|-------|------------|-----------|
+| `agent:read` | List/read agents | `GET /v1/agents` |
+| `agent:register` | Register agents | `POST /v1/agents` |
+| `agent:admin` | Delete/disable agents | `DELETE /v1/agents/{id}` |
+| `task:read` | Read tasks | `GET /v1/tasks`, `GET /v2/tasks` |
+| `task:write` | Create/modify tasks | Task dispatch, v2 CRUD |
+| `registry:admin` | Registry admin | Admin client management, WebSocket |
+| `user:read` | Read users | User endpoints |
+| `user:write` | Modify users | User CRUD |
+
+### Public endpoints (no auth required)
+
+- `GET /health`
+- `GET /.well-known/*`
+- `POST /auth/token`
+
+### Key type
+
+- **HS256** (default) — symmetric, auto-generated key. For single-instance deployments.
+- **RS256** — asymmetric key pair. Enable by setting `auth.public_key` in config. Required for multi-instance or when agents need to verify tokens without the server.
+
+---
+
+## API Overview
+
+### Agent Management (V1)
+
+| Method | Path | Auth Scope | Description |
+|--------|------|------------|-------------|
+| GET | `/v1/agents` | `agent:read` | List/search agents (query: `?q=`, `?skill=`, `?tag=`) |
+| GET | `/v1/agents/{id}` | `agent:read` | Agent detail |
+| POST | `/v1/agents` | `agent:register` | Register agent |
+| POST | `/v1/agents/{id}/toggle` | `agent:admin` | Toggle agent disabled/enabled status |
+| DELETE | `/v1/agents/{id}` | `agent:admin` | Deregister agent |
+
+### Heartbeat & Connectivity
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/agents/{id}/heartbeat` | HTTP heartbeat (updates timestamp, resets timeout) |
+| GET | `/v1/agents/{id}/ws` | WebSocket upgrade — persistent connection |
+
+### Task Dispatch (V1)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/agents/{id}/dispatch` | Dispatch task to a WS-connected agent |
+| POST | `/v1/agents/{id}/task` | Proxy task (fallback HTTP transport for WS-dispatched agents) |
+| GET | `/v1/tasks` | List all tasks |
+| GET | `/v1/tasks/{id}` | Task status & result |
+
+### Orchestration Engine (V2 Kanban)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v2/tasks` | Create task (with optional parent dependencies) |
+| GET | `/v2/tasks` | List tasks (`?status=`, `?assignee=`, `?q=`, `?sort=`) |
+| GET | `/v2/tasks/{id}` | Task detail (parents, children, runs, comments, events) |
+| PATCH | `/v2/tasks/{id}` | Update title/body/assignee/priority/status |
+| POST | `/v2/tasks/{id}/claim` | Atomically claim task (worker lock) |
+| POST | `/v2/tasks/{id}/complete` | Mark task complete with summary + result |
+| POST | `/v2/tasks/{id}/block` | Block task (human-in-the-loop) |
+| POST | `/v2/tasks/{id}/unblock` | Unblock task back to running |
+| POST | `/v2/tasks/{id}/heartbeat` | Extend claim TTL |
+| POST | `/v2/tasks/{id}/comment` | Add comment to task thread |
+| DELETE | `/v2/tasks/{id}` | Archive task |
+| POST | `/v2/tasks/{id}/depend` | Add parent dependency |
+| DELETE | `/v2/tasks/{id}/depend/{parent_id}` | Remove parent dependency |
+| GET | `/v2/stats` | Orchestration statistics |
+
+### Swarm (Multi-Agent Topology)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v2/swarm` | Create swarm topology (workers → verifier → synthesizer) |
+| GET | `/v2/swarm/{root_id}` | Get swarm status |
+| POST | `/v2/swarm/{root_id}/comment` | Write to swarm blackboard |
+| GET | `/v2/swarm/{root_id}/blackboard` | Read swarm blackboard |
+
+### OAuth & Admin
+
+| Method | Path | Auth Scope | Description |
+|--------|------|------------|-------------|
+| POST | `/auth/token` | public | Acquire JWT token (client_credentials) |
+| POST | `/auth/register` | public | Register new OAuth client |
+| GET | `/.well-known/oauth-authorization-server` | public | OAuth metadata JSON |
+| GET | `/.well-known/jwks.json` | public | JWT public keys |
+| POST | `/admin/clients` | `registry:admin` | Create OAuth client |
+| GET | `/admin/clients` | `registry:admin` | List OAuth clients |
+| GET | `/admin/audit` | `registry:admin` | List audit log entries |
+| DELETE | `/admin/clients/{id}` | `registry:admin` | Delete OAuth client |
+
+### Users (Web Dashboard Authentication)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/auth/users` | Create user account |
+| POST | `/auth/login` | Login (returns session cookie) |
+| POST | `/auth/logout` | Logout |
+| GET | `/auth/me` | Current user info |
+
+### System
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check (`{"agents_alive": N, "agents_stale": N, ...}`) |
+| GET | `/.well-known/agent-card.json` | Registry's own Agent Card |
+| GET | `/metrics` | Prometheus metrics (when `monitoring.metrics_enabled`) |
+| GET | `/ws/admin` | Admin WebSocket (real-time task updates) |
+
+Full API reference: [docs/API.md](docs/API.md)
+
+---
+
+## Agent Lifecycle
+
+### Registration
 
 ```bash
 curl -s -X POST http://localhost:8321/v1/agents \
   -H "Content-Type: application/json" \
-  -d '{"name": "My Agent", "description": "A test agent"}'
+  -d '{
+    "name": "Coder Agent",
+    "description": "AI coding assistant",
+    "skills": ["Python", "JavaScript"],
+    "tags": ["coding", "devops"],
+    "agent_card": {
+      "url": "http://agent-host:9001/.well-known/agent-card.json"
+    }
+  }'
 ```
 
-### 注册 Agent（认证模式）
+Response returns an `id` (e.g. `a2a-xxxx`) which is used in all subsequent calls.
+
+### Heartbeat
 
 ```bash
-# Admin 预创建客户端
-curl -s -X POST http://localhost:8321/admin/clients \
-  -H "Authorization: Bearer <ADMIN_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"description": "My Agent", "allowed_scopes": ["agent:register", "agent:read"]}'
-
-# Agent 获取 Token
-TOKEN=$(curl -s -X POST http://localhost:8321/auth/token \
-  -d "grant_type=client_credentials" \
-  -d "client_id=<CLIENT_ID>" \
-  -d "client_secret=<CLIENT_SECRET>" \
-  -d "scope=agent:register agent:read" | jq -r '.access_token')
-
-# Agent 注册
-curl -s -X POST http://localhost:8321/v1/agents \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "My Agent", "description": "A test agent"}'
+curl -s -X POST http://localhost:8321/v1/agents/a2a-xxxx/heartbeat
+# → {"id":"a2a-xxxx","status":"alive","stale_timeout":120}
 ```
 
-## 命令行参数
+- If no heartbeat for **120 seconds**, the agent is marked `stale`.
+- If no heartbeat for **300 seconds**, the agent is garbage-collected.
+- The `/v1/agents` endpoint supports `?status=alive`, `?status=stale` filters.
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--host` | `0.0.0.0` | 监听地址 |
-| `--port` | `8321` | 监听端口 |
-| `--data-dir` | `~/.simple-a2a-registry` | 数据目录 |
-| `--auth-enabled` | `false` | 开启 OAuth 2.1 认证 |
-| `--bootstrap-secret` | 自动生成 | 指定 Registry 服务账号（simple-a2a-registry）的 client_secret；不传则自动生成并打印到日志 |
-| `--board-path` | `<data-dir>/board.db` | 编排引擎 SQLite 数据库路径 |
-| `--dispatcher-enabled` | `true` | 后台 Worker 派发器开关 |
-| `--dispatcher-interval` | `5` | 派发器轮询间隔（秒） |
-| `--claim-ttl` | `900` | 认领锁 TTL（15 分钟） |
-| `--failure-limit` | `3` | 全局默认重试次数 |
-| `--workspaces-root` | `<data-dir>/workspaces` | 工作区根目录 |
+### WebSocket Connection
 
-## API 端点速览
+Agent upgrades to WebSocket for real-time task push:
 
-### Agent 管理
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/v1/agents` | 列出/搜索 Agent |
-| GET | `/v1/agents/{id}` | Agent 详情 |
-| POST | `/v1/agents` | 注册 Agent |
-| DELETE | `/v1/agents/{id}` | 注销 Agent |
+```python
+import aiohttp
 
-### 心跳与连接
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/v1/agents/{id}/heartbeat` | HTTP 心跳 |
-| GET | `/v1/agents/{id}/ws` | WebSocket 持久连接 |
-
-### 任务
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/v1/agents/{id}/dispatch` | 分发任务到 WS 连接的 Agent |
-| GET | `/v1/tasks` | 任务列表 |
-| GET | `/v1/tasks/{id}` | 任务状态与结果 |
-
-### 编排引擎
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/v2/tasks` | 创建编排任务 |
-| GET | `/v2/tasks` | 任务列表查询 |
-| GET | `/v2/tasks/{id}` | 任务详情（含依赖链、运行记录、事件流） |
-| POST | `/v2/tasks/{id}/claim` | Worker 原子认领 |
-| POST | `/v2/tasks/{id}/complete` | 完成任务 |
-| POST | `/v2/tasks/{id}/block` | 阻塞任务（HITL） |
-| POST | `/v2/tasks/{id}/unblock` | 解除阻塞 |
-| POST | `/v2/tasks/{id}/heartbeat` | 任务级心跳 |
-| POST | `/v2/tasks/{id}/comment` | 添加评论 |
-| DELETE | `/v2/tasks/{id}` | 归档任务 |
-| POST | `/v2/tasks/{id}/depend` | 添加依赖关系 |
-| DELETE | `/v2/tasks/{id}/depend/{parent_id}` | 移除依赖关系 |
-| GET | `/v2/stats` | 编排引擎统计 |
-
-### OAuth 与 Admin
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/auth/token` | 获取 JWT Token |
-| POST | `/auth/register` | 注册 OAuth 客户端 |
-| GET | `/.well-known/oauth-authorization-server` | OAuth 元数据 |
-| GET | `/.well-known/jwks.json` | JWT 公钥 |
-| POST | `/admin/clients` | Admin 创建客户端 |
-| GET | `/admin/clients` | Admin 列出客户端 |
-| DELETE | `/admin/clients/{id}` | Admin 删除客户端 |
-
-### 系统
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/health` | 健康检查 |
-| GET | `/.well-known/agent-card.json` | Registry 自身 Agent Card |
-
-完整 API 参考请参见 [docs/API.md](docs/API.md)。
-
-## Dashboard
-
-打开 http://localhost:8321 查看 Web Dashboard：
-
-- Agent 列表（状态、标签、技能、WS 连接标识）
-- Agent 详情展开面板
-- Kanban 看板（Board / List 双视图）
-- 任务详情弹窗（依赖链、运行记录、事件流、评论）
-- 实时统计与刷新（每 15 秒）
-
-## 使用示例
-
-### 列出 Agent
-
-```bash
-curl -s http://localhost:8321/v1/agents
-curl -s "http://localhost:8321/v1/agents?skill=Software+Development"
-curl -s "http://localhost:8321/v1/agents?q=test"
+async with aiohttp.ClientSession() as session:
+    async with session.ws_connect(
+        "http://localhost:8321/v1/agents/a2a-xxxx/ws"
+    ) as ws:
+        async for msg in ws:
+            data = msg.json()
+            if data["type"] == "task":
+                task_id = data["id"]
+                query = data["query"]
+                print(f"Received task {task_id}: {query}")
+                # Process task...
+                await ws.send_json({
+                    "type": "task_result",
+                    "id": task_id,
+                    "result": {"status": "completed", "output": "..."},
+                })
 ```
 
-### 发送心跳
+---
 
-```bash
-curl -s -X POST http://localhost:8321/v1/agents/AGENT_ID/heartbeat
-# 响应: {"id":"...","status":"alive","stale_timeout":120}
+## Orchestration Engine (V2)
+
+The Orchestration Engine provides a full Kanban-style task lifecycle with SQLite-persisted state, DAG dependency chains, atomic worker claiming, and an auto-spawn dispatcher.
+
+### State Machine
+
+```
+          ┌────────────────────────────────────────────┐
+          │                                            │
+          v                                            │
+    ┌──────────┐    ┌─────────┐    ┌──────────┐       │
+    │   TODO   │───→│  READY  │───→│ RUNNING  │       │
+    └──────────┘    └─────────┘    └──────────┘       │
+                      │    ▲           │    │          │
+                      │    │           │    │          │
+                      │    │     ┌─────▼────▼──┐      │
+                      │    │     │  COMPLETED  │      │
+                      │    │     └─────────────┘      │
+                      │    │                          │
+                      │    │     ┌──────────┐         │
+                      │    └─────│  FAILED  │         │
+                      │          └──────────┘         │
+                      │              │                │
+                      │         ┌────▼────┐           │
+                      │         │ BLOCKED │           │
+                      │         └─────────┘           │
+                      │           │    ▲              │
+                      │           │    │              │
+                      │     ┌─────▼────▼──┐           │
+                      │     │  ARCHIVED  │            │
+                      │     └────────────┘            │
+                      │                               │
+                      └───────────────────────────────┘
 ```
 
-### 分发任务并轮询结果
+### Task States
+
+| State | Meaning |
+|-------|---------|
+| `todo` | Created; waiting for dependencies to complete |
+| `ready` | All parents done; assignee set; waiting to be claimed |
+| `running` | Claimed by a worker; actively being processed |
+| `completed` | Successfully finished |
+| `failed` | Terminated with error (may retry) |
+| `blocked` | Human-in-the-loop intervention |
+| `archived` | Soft-deleted; retained in DB for audit |
+| `cancelled` | Explicitly cancelled |
+
+### Key Concepts
+
+**Claim Lock** — When a worker claims a task, it gets an exclusive lock identified by `claim_lock` (a UUID). All subsequent status transitions require this lock. Expired locks (default 15 min TTL) are released by the dispatcher.
+
+**DAG Dependencies** — A task with `parents` automatically stays in `todo` until all parents reach `completed`. The dispatcher then promotes it to `ready`.
+
+**Retry** — Failed tasks below `max_retries` are auto-promoted back to `ready`. Each attempt creates a `TaskRun` record.
+
+**Worker Dispatcher** — Background loop (default 5s interval) that:
+1. Releases expired claim locks (running → failed)
+2. Promotes retryable tasks (failed → ready)
+3. Claims and spawns processes for ready tasks
+
+### API Example
 
 ```bash
-# 分发
-TASK_ID=$(curl -s -X POST http://localhost:8321/v1/agents/AGENT_ID/dispatch \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Write hello world in Python"}' | jq -r '.task_id')
-
-# 轮询结果
-curl -s "http://localhost:8321/v1/tasks/$TASK_ID" | jq .
-```
-
-### 创建编排任务
-
-```bash
+# Create task
 curl -s -X POST http://localhost:8321/v2/tasks \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "实现登录模块",
-    "body": "## 需求\n实现用户登录功能...",
+    "title": "Implement login module",
+    "body": "Requirements...",
     "assignee": "coder-agent",
     "priority": 1
   }'
 
-# 带依赖的任务
-curl -s -X POST http://localhost:8321/v2/tasks \
+# Task is now TODO. When assignee is set on a root task (no parents),
+# it auto-promotes to READY.
+
+# List ready tasks
+curl -s "http://localhost:8321/v2/tasks?status=ready"
+
+# Claim (worker)
+curl -s -X POST http://localhost:8321/v2/tasks/t_xxx/claim \
+  -H "Content-Type: application/json" \
+  -d '{"worker_id": "coder-1", "pid": 12345}'
+# → {"claim_lock": "uuid-xxx", "task": {...}}
+
+# Complete
+curl -s -X POST http://localhost:8321/v2/tasks/t_xxx/complete \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "编写测试",
-    "parents": ["t_parent_id"]
+    "claim_lock": "uuid-xxx",
+    "summary": "Login module implemented",
+    "result": {"files": ["auth.py"]}
   }'
 ```
 
-### Python 示例
+---
 
-```python
-import requests
-import os
+## Swarm Topology
 
-# 认证模式：从环境变量读取凭据
-CLIENT_ID = os.environ.get("OAUTH_CLIENT_ID", "client-xxx")
-CLIENT_SECRET = os.environ.get("OAUTH_CLIENT_SECRET", "***")
+The Swarm system lets you create multi-agent coordination workflows on top of the V2 task engine. It reuses the same dependency graph, state machine, and store — no new tables.
 
-# 获取 Token
-resp = requests.post(
-    "http://localhost:8321/auth/token",
-    data={
-        "grant_type": "client_credentials",
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "scope": "agent:register agent:read",
-    },
-)
-token = resp.json()["access_token"]
+### Topology
 
-# 注册 Agent
-headers = {"Authorization": f"Bearer {token}"}
-resp = requests.post(
-    "http://localhost:8321/v1/agents",
-    headers=headers,
-    json={"name": "My Agent", "description": "A test agent"},
-)
-agent_id = resp.json()["id"]
-print(f"Registered as: {agent_id}")
+```
+     ┌───────────────────────────────────────────────┐
+     │         Swarm Root (immediately completed)     │
+     │         Shared Blackboard (comments)           │
+     └──────────┬──────────┬──────────┬──────────────┘
+                │          │          │
+         ┌──────▼──┐ ┌─────▼────┐ ┌──▼────────┐
+         │Worker 1 │ │Worker 2  │ │Worker N...│   ← parallel execution
+         └─────┬───┘ └─────┬────┘ └────┬──────┘
+               │           │           │
+               └───────────┼───────────┘
+                           ▼
+                    ┌──────────────┐
+                    │   Verifier   │   ← gates: pass → synthesizer / block
+                    └──────┬───────┘
+                           ▼
+                    ┌──────────────┐
+                    │ Synthesizer  │   ← final consolidation
+                    └──────────────┘
 ```
 
-## A2A Coder Agent（示例）
+### Blackboard
 
-`examples/a2a_coder_agent.py` 是一个完整的 A2A 协议兼容 Agent 示例，用于 Hermes Coder Profile：
+Workers share intermediate results through structured comments on the root task, prefixed with `[swarm:blackboard]`. The `read_blackboard()` function aggregates all entries by key.
 
-- **OAuth Client Credentials 认证** — 从配置文件/环境变量加载凭据，自动获取并刷新 JWT Token
-- **AgentCard 注册** — 启动时向 Registry 注册 AgentCard，30 秒心跳保活
-- **WebSocket 长连接** — 接收 Registry 推送任务（type: "task"），完成后上报结果
-- **A2A JSONRPC over HTTP** — 提供 `POST /tasks/send`、`GET /tasks/{id}` 等 A2A 标准端点（端口 9001）
-- **自动重连** — WebSocket 断开时自动重连，指数退避
+### API
 
 ```bash
-# 启动 Coder Agent
-export OAUTH_CLIENT_ID=client-xxx OAUTH_CLIENT_SECRET=*** && python examples/a2a_coder_agent.py
+# Create swarm
+curl -s -X POST http://localhost:8321/v2/swarm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "goal": "Research and implement OAuth module",
+    "workers": [
+      {"profile": "researcher", "title": "Research OAuth protocols", "body": "..."},
+      {"profile": "coder", "title": "Implement OAuth endpoints", "body": "..."}
+    ],
+    "verifier_profile": "reviewer",
+    "synthesizer_profile": "writer"
+  }'
+
+# Check status
+curl -s http://localhost:8321/v2/swarm/t_root_id
+
+# Read blackboard
+curl -s http://localhost:8321/v2/swarm/t_root_id/blackboard
+
+# Write to blackboard
+curl -s -X POST http://localhost:8321/v2/swarm/t_root_id/comment \
+  -H "Content-Type: application/json" \
+  -d '{"author": "worker-1", "key": "phase1_result", "value": {...}}'
 ```
 
-## 项目结构
+---
+
+## Subprocess Pool Manager
+
+Orchestration supports an alternative dispatch path for agents that maintain long-lived subprocess workers — the **Subprocess Pool**. Instead of dispatching tasks one-per-process (P3), the pool keeps N persistent workers running and feeds them task assignments via stdin as JSON-lines.
+
+### Dispatch Priority
+
+| Priority | Path | Description |
+|----------|------|-------------|
+| **P1** | WebSocket | Agent connected via WS; task pushed in real-time |
+| **P1.5** | Subprocess Pool | Assignee in `pool_assignees`; task dispatched to persistent subprocess worker |
+| **P2** | Blocked | Agent known but not connected (task held until agent reconnects) |
+| **P3** | Legacy Worker Command | One-shot subprocess spawned per task (`worker_command` template) |
+
+### How It Works
+
+```python
+# server startup
+pool = SubprocessPoolManager(
+    pool_assignees=["coder-agent", "reviewer"],
+    worker_command="hermes chat --profile {assignee} --pool-worker",
+    store=task_store,
+    workspace_manager=ws_mgr,
+)
+await pool.start()
+```
+
+Each configured assignee gets one persistent subprocess. The pool manager:
+1. Sends task assignments as JSON-lines on the worker's `stdin`
+2. Monitors worker health via background watch tasks
+3. Auto-restarts workers on crash with a 1s backoff
+4. Sends a `{"type": "shutdown"}` message on graceful server shutdown
+
+### Worker Protocol
+
+Pool workers receive task assignments on stdin as JSON:
+
+```json
+{"type": "task", "task_id": "t_xxx", "title": "...", "body": "...",
+ "assignee": "coder-agent", "workspace_path": "/tmp/workspaces/t_xxx"}
+```
+
+Worker responds by calling back to the Orchestration API (`POST /v2/tasks/{id}/claim`, `POST /v2/tasks/{id}/complete`, etc.) over HTTP.
+
+### Configuration
+
+Configure pool assignees via the server's `SubprocessPoolManager` constructor. Pool workers are started during `on_startup` and gracefully shut down during `on_cleanup` with a 5s grace period.
+
+---
+
+## Plugin System
+
+The plugin system allows third-party code to extend the registry at well-defined lifecycle points.
+
+### Available Hooks
+
+**Lifecycle:** `load(config)` → `init(app)` → `before_shutdown(app)`
+**Request:** `before_request(request)` → `after_request(request, response)`
+**Events:** `on_agent_register`, `on_agent_deregister`, `on_agent_heartbeat`, `on_task_created`, `on_task_completed`, `on_token_issued`, `on_server_start`, `on_server_stop`
+
+### Loading Methods
+
+1. **Entry points** (via `pyproject.toml`):
+   ```toml
+   [project.entry-points."simple_a2a_registry.plugins"]
+   my-plugin = "my_package:MyPlugin"
+   ```
+
+2. **Config file** (`config.yaml`):
+   ```yaml
+   plugins:
+     my-plugin:
+       module: my_package.my_plugin
+       config:
+         api_key: "xxx"
+   ```
+
+### Minimal Plugin
+
+```python
+from simple_a2a_registry.plugin import Plugin
+
+class MyPlugin(Plugin):
+    @property
+    def name(self) -> str:
+        return "my-plugin"
+
+    async def before_request(self, request):
+        # Called before every HTTP request
+        return None  # let request continue
+
+    async def on_agent_register(self, agent_id: str, card: dict):
+        print(f"Agent registered: {agent_id}")
+```
+
+---
+
+## Monitoring & Observability
+
+### Prometheus Metrics
+
+Available at `GET /metrics` when `monitoring.metrics_enabled=true` (default).
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `a2a_registry_requests_total` | Counter | `endpoint`, `method`, `status` | HTTP request count |
+| `a2a_registry_request_duration_seconds` | Histogram | `endpoint`, `method` | Request latency |
+| `a2a_registry_auth_operations_total` | Counter | `operation`, `success` | Auth operations |
+| `a2a_registry_agents_alive` | Gauge | — | Active agents count |
+| `a2a_registry_agents_stale` | Gauge | — | Stale agents count |
+| `a2a_registry_ws_connections` | Gauge | — | Active WS connections |
+| `a2a_registry_admin_ws_connections` | Gauge | — | Admin WS connections |
+| `a2a_registry_db_pool_size` | Gauge | — | DB pool size |
+| `a2a_registry_db_query_duration_seconds` | Histogram | `operation` | DB query latency |
+
+### Structured Logging
+
+- **JSON format** (`--log-format json`): machine-parseable for ELK/Loki
+- **Text format** (`--log-format text`, default): human-readable for development
+- Each log entry includes `request_id` for request tracing across middleware handlers
+
+### Audit Logging
+
+All sensitive operations (auth events, admin actions, agent CRUD, task state changes) are written to an append-only `audit_log` table with:
+- `event_type` — classification (e.g., `agent_register`, `token_issue`, `admin_action`)
+- `actor` — who performed the action
+- `target` — what was acted upon
+- `timestamp` — when it happened
+- `success` — whether the operation succeeded
+
+Configurable retention TTL (default 90 days).
+
+---
+
+## Database
+
+### SQLite (Development)
+
+Default driver. Single file at `~/.simple-a2a-registry/registry.db` with WAL mode, 5s busy timeout, and foreign keys enabled.
+
+```bash
+a2a-registry  # uses SQLite by default
+```
+
+### MySQL (Production)
+
+Set in config or env:
+
+```yaml
+database:
+  driver: mysql
+  mysql_dsn: "mysql+pymysql://user:pass@host:3306/a2a_registry"
+  pool_size: 5
+  max_overflow: 10
+```
+
+Or via env variable:
+
+```bash
+export A2A_REGISTRY_DATABASE__DRIVER=mysql
+export A2A_REGISTRY_DATABASE__MYSQL_DSN=mysql+pymysql://user:pass@host:3306/a2a_registry
+```
+
+The engine layer automatically translates SQLite placeholders (`?` → `%s`) and dialect-specific syntax (`INSERT OR REPLACE` → `REPLACE INTO`, skips `PRAGMA`).
+
+### RetryEngine
+
+A transparent wrapper around the database engine that retries transient errors (database locked, connection lost, timeout) with exponential backoff (3 attempts by default).
+
+### Migrations
+
+Alembic migrations are in `migrations/versions/`. Run with:
+
+```bash
+alembic upgrade head
+```
+
+Migration script utility: `scripts/migrate_sqlite_to_mysql.py` helps migrate from SQLite to MySQL.
+
+---
+
+## Multi-Tenancy
+
+Every V2 task and agent supports tenant-level isolation:
+
+- **`?tenant=<value>`** query parameter on API calls
+- **`X-Tenant-ID`** header for client identity propagation
+- Tasks from different tenants are fully isolated in the store
+- Tenant is propagated through claims, dispatches, and audits
+
+---
+
+## Rate Limiting
+
+Token bucket algorithm with two backends:
+
+| Backend | Use Case | Description |
+|---------|----------|-------------|
+| `memory` | Dev / single instance | In-memory dict with `asyncio.Lock` |
+| `mysql` | Production / multi-instance | MySQL-backed with `rate_limit_buckets` table |
+
+Key derivation priority:
+1. `client_id` from auth token (if authenticated)
+2. `X-Forwarded-For` / `X-Real-IP` headers
+3. TCP connection `remote`
+
+```yaml
+rate_limit:
+  enabled: true
+  default_unauthenticated: 60    # req/min for public endpoints
+  default_authenticated: 300     # req/min for authenticated
+  storage: mysql                 # or "memory"
+  whitelist: ["my-super-agent"]  # exempted client IDs
+```
+
+---
+
+## Python SDK
+
+The [`simple_a2a_registry.client`](simple_a2a_registry/client.py) module provides `A2AClient` — a full-featured SDK for agents to interact with the Registry.
+
+### Sync Usage
+
+```python
+from simple_a2a_registry.client import A2AClient
+
+client = A2AClient(
+    registry_url="http://localhost:8321",
+    client_id="my-agent",
+    client_secret="secret-xxx",
+)
+
+# Register
+agent_id = client.register_agent(
+    name="My Agent",
+    description="A useful agent",
+    skills=["Python"],
+)
+
+# Heartbeat
+client.heartbeat(agent_id)
+
+# WebSocket (handles auto-reconnect + exponential backoff)
+client.dispatch_handler = lambda task: print(f"Got task: {task['id']}")
+client.connect_websocket(agent_id)
+```
+
+### Async Usage
+
+```python
+async with A2AClient(
+    registry_url="http://localhost:8321",
+    client_id="my-agent",
+    client_secret="secret-xxx",
+) as client:
+    agent_id = await client.async_register_agent(
+        name="My Agent", description="Async agent",
+    )
+    await client.async_connect_websocket(agent_id)
+```
+
+Full example: [examples/a2a_coder_agent.py](examples/a2a_coder_agent.py)
+
+---
+
+## Web Dashboard
+
+Open `http://localhost:8321` in a browser for the built-in Dashboard SPA:
+
+- **Agent List** — status (alive/stale), skills, tags, WS connection indicator
+- **Agent Detail** — expandable panel with full Agent Card
+- **Kanban Board** — Board view (columns by status) and List view (sortable table)
+- **Task Detail** — modal with dependency chain, run history, event stream, comment thread
+- **Stats** — real-time agent counts and orchestration statistics (refreshed every 15s)
+
+To authenticate Dashboard access (when auth is enabled), use the session-based login via `POST /auth/login`.
+
+---
+
+## Examples
+
+### Full Examples
+
+| File | Description |
+|------|-------------|
+| `examples/a2a_coder_agent.py` | Full-featured A2A agent: OAuth, WS, AgentCard, Hermes integration |
+| `examples/a2a_opencode_agent.py` | OpenCode agent variant with similar protocol |
+| `examples/sdk_usage.py` | SDK feature demos |
+| `examples/simple_a2a_agent.py` | Minimal agent example |
+| `examples/run_agent.py` | Quick-start agent runner |
+| `examples/run_a2a_agent.sh` | Shell script to launch agent |
+| `examples/test_int_priority.sh` | Integration test for task priority |
+
+### Coder Agent (Full Example)
+
+The [examples/a2a_coder_agent.py](examples/a2a_coder_agent.py) demonstrates a production-grade A2A agent:
+
+- OAuth client credentials with auto-refresh
+- WebSocket connection with exponential backoff reconnection
+- AgentCard registration and 30s heartbeat
+- A2A JSON-RPC over HTTP (port 9001): `POST /tasks/send`, `GET /tasks/{id}`
+- Task execution via Hermes CLI (coder profile)
+
+```bash
+export OAUTH_CLIENT_ID=client-xxx OAUTH_CLIENT_SECRET=secret-xxx
+python examples/a2a_coder_agent.py
+```
+
+---
+
+## Development
+
+### Install development dependencies
+
+```bash
+pip install -e ".[dev]"
+```
+
+### Run tests
+
+```bash
+pytest tests/ -v                        # All tests
+pytest tests/test_store.py -v           # Storage layer
+pytest tests/test_orchestration_api.py  # V2 API
+pytest tests/test_server.py             # Integration tests
+pytest tests/test_swarm.py              # Swarm tests
+pytest -m slow                          # Slow tests (soak, benchmarks)
+```
+
+Test categories:
+
+| Test File | What It Covers |
+|-----------|----------------|
+| `tests/test_store.py` | Agent + OAuth persistence |
+| `tests/test_models.py` | Agent Card data models |
+| `tests/test_server.py` | HTTP API integration |
+| `tests/test_auth.py` | OAuth 2.1 flow |
+| `tests/test_orchestration_api.py` | V2 REST API |
+| `tests/test_orchestration_store.py` | TaskStore CRUD |
+| `tests/test_orchestration_state_machine.py` | State transitions |
+| `tests/test_orchestration_e2e.py` | End-to-end orchestration |
+| `tests/test_orchestration_integration.py` | Integration tests |
+| `tests/test_swarm.py` | Swarm topology |
+| `tests/test_dispatcher.py` | Background dispatcher |
+| `tests/test_rate_limiter.py` | Token bucket |
+| `tests/test_validation.py` | Input validation |
+| `tests/test_errors.py` | Error handling |
+| `tests/test_log.py` | Logging |
+| `tests/test_config.py` | Config loading |
+| `tests/test_cors.py` | CORS middleware |
+| `tests/test_concurrency.py` | Thread safety |
+| `tests/test_users.py` | User management |
+| `tests/test_tenant_isolation.py` | Multi-tenant isolation |
+| `tests/test_tenant_e2e.py` | Tenant E2E tests |
+| `tests/test_token_scope_tenant.py` | Token+scope+tenant |
+| `tests/test_token_tenant_bc.py` | Backward compat |
+| `tests/test_user_auth_e2e.py` | User auth E2E |
+| `tests/test_websocket.py` | WebSocket protocol |
+| `tests/test_workspace.py` | Workspace management |
+| `tests/test_metrics.py` | (in test_server.py) |
+| `tests/test_mysql_compat.py` | MySQL dialect compat |
+| `tests/test_tls.py` | TLS/SSL |
+| `tests/test_bootstrap_admin.py` | Bootstrap admin client |
+| `tests/test_performance_benchmark.py` | Benchmarks |
+| `tests/benchmarks/` | Benchmark suites |
+
+### Coverage
+
+```bash
+pytest tests/ --cov=simple_a2a_registry --cov-report=html
+```
+
+### Code Style
+
+```bash
+pip install ruff   # or flake8
+ruff check simple_a2a_registry/ tests/
+```
+
+### Project Conventions
+
+- Python ≥ 3.10 with `from __future__ import annotations`
+- Type hints on all public APIs
+- Docstrings in Google-style (or reStructuredText with `Args:`/`Returns:` sections)
+- Async everywhere for I/O-bound operations
+- Chinese-friendly: docstrings and comments in Chinese for internal modules
+
+---
+
+## Project Structure
 
 ```
-simple_a2a_registry/
-  cli.py          — argparse CLI 入口
-  server.py       — aiohttp REST API + WebSocket + 编排引擎
-  store.py        — 统一 SQLite 持久化（Store 类：Agent 注册 + OAuth 客户端管理）
-  models.py       — A2A Agent Card 数据模型
-  orchestration/  — 编排引擎模块
-    task_store.py   — SQLite 任务存储
-    dispatcher.py   — Worker 派发器
-    state_machine.py— 8 状态状态机
-    routes.py       — API 路由
-    workspace.py    — 工作区管理器
-  static/         — Web Dashboard（HTML+JS）
-  examples/
-    a2a_coder_agent.py — A2A 兼容 Coder Agent（OAuth 认证 + WS 长连接 + A2A JSONRPC）
-tests/
-  test_store.py   — 存储层测试
-  test_models.py  — 数据模型测试
-  test_server.py  — HTTP API 集成测试
-docs/
-  architecture.md — 系统架构设计
-  API.md          — API 参考
-  oauth-design.md — OAuth 2.1 认证设计
+simple-a2a-registry/
+├── simple_a2a_registry/
+│   ├── __init__.py          — Package exports
+│   ├── __main__.py          — `python -m simple_a2a_registry`
+│   ├── server.py            — aiohttp app factory (core)
+│   ├── cli.py               — argparse CLI entry
+│   ├── store.py             — Agent + OAuth persistence
+│   ├── models.py            — A2A Agent Card models
+│   ├── auth.py              — OAuth 2.1 (JWT, scopes, admin)
+│   ├── config.py            — YAML config + env override
+│   ├── errors.py            — Unified error response
+│   ├── log.py               — Structured logging
+│   ├── metrics.py           — Prometheus middleware
+│   ├── rate_limiter.py      — Token bucket rate limiter
+│   ├── audit.py             — Append-only audit store
+│   ├── users.py             — User registry + sessions
+│   ├── validation.py        — Input validation
+│   ├── plugin.py            — Plugin ABC + registry
+│   ├── client.py            — Python SDK (sync+async)
+│   ├── ws_admin.py          — Admin WS hub
+│   ├── database/
+│   │   └── engine.py        — SQLiteEngine + MySQLEngine + RetryEngine
+│   ├── orchestration/
+│   │   ├── models.py        — Task/run/event/comment models
+│   │   ├── store.py         — TaskStore (SQLite)
+│   │   ├── state_machine.py — 8-state state machine
+│   │   ├── routes.py        — V2 REST API
+│   │   ├── swarm.py         — Swarm topology + blackboard
+│   │   ├── swarm_routes.py  — Swarm REST API
+│   │   ├── dispatcher.py    — Background worker dispatcher
+│   │   ├── workspace.py     — Workspace management
+│   │   ├── dependency.py    — Cycle detection + DAG resolution
+│   │   └── pool.py          — Worker process pool
+│   └── static/              — Web Dashboard SPA
+├── examples/
+│   ├── a2a_coder_agent.py         — Full Coder Agent
+│   ├── a2a_opencode_agent.py      — OpenCode Agent
+│   ├── a2a_opencode_agent_README.md
+│   ├── sdk_usage.py               — SDK demos
+│   ├── simple_a2a_agent.py        — Minimal agent
+│   ├── run_agent.py               — Quick runner
+│   ├── run_a2a_agent.sh           — Shell runner
+│   └── test_int_priority.sh       — Priority test
+├── tests/
+│   ├── test_store.py              — Storage tests
+│   ├── test_server.py             — Integration tests
+│   ├── ... (30+ test files)
+│   └── benchmarks/                — Benchmark suites
+├── migrations/                    — Alembic migrations
+├── scripts/
+│   └── migrate_sqlite_to_mysql.py — Migration utility
+├── docs/
+│   ├── API.md                     — Full API reference
+│   ├── architecture.md            — System architecture
+│   ├── oauth-design.md            — OAuth 2.1 design
+│   ├── enterprise-architecture.md — Enterprise deployment
+│   ├── plugin-system.md           — Plugin documentation
+│   ├── fix-spec.md                — Fix specification
+│   └── qa-report.md              — QA report
+├── pyproject.toml
+└── README.md
 ```
+
+---
+
+## Design Documents
+
+| Document | Description |
+|----------|-------------|
+| [docs/architecture.md](docs/architecture.md) | System architecture and design decisions |
+| [docs/API.md](docs/API.md) | Complete REST API reference |
+| [docs/oauth-design.md](docs/oauth-design.md) | OAuth 2.1 authentication design |
+| [docs/enterprise-architecture.md](docs/enterprise-architecture.md) | Enterprise deployment architecture |
+| [docs/plugin-system.md](docs/plugin-system.md) | Plugin system documentation |
+| [docs/fix-spec.md](docs/fix-spec.md) | Bug fix specification |
+| [docs/qa-report.md](docs/qa-report.md) | QA test report |
+
+---
+
+## License
+
+MIT License — see [LICENSE](LICENSE) (or the `license` field in `pyproject.toml`).
+
+---
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feat/my-feature`)
+3. Commit changes (`git commit -am 'feat: add awesome feature'`)
+4. Push to the branch (`git push origin feat/my-feature`)
+5. Open a Pull Request
+
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/):
+- `feat:` new feature
+- `fix:` bug fix
+- `docs:` documentation changes
+- `refactor:` code restructuring
+- `test:` testing improvements
+- `chore:` maintenance tasks

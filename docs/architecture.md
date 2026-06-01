@@ -35,11 +35,27 @@ Simple A2A Registry 是一个轻量级的 Agent 注册与编排服务，基于 G
 │           │                      │         │ · 审计日志     │ │
 │           │                      │         └───────┬───────┘ │
 │  ┌────────┴──────────────────────┴─────────────────┴────────┐ │
-│  │               Store Layer (统一 SQLite)                    │ │
+│  │             Store Layer (Dual Database Engine)             │ │
+│  │   SQLite (WAL) ←→ MySQL (QueuePool) — 运行时切换          │ │
+│  │   RetryEngine: 指数退避重试, Alembic 迁移管理              │ │
 │  │   Store 类: agents / oauth_clients / oauth_tokens /       │ │
-│  │   auth_codes (4 表, WAL 模式, 线程安全 RLock)             │ │
+│  │   auth_codes / audit_log (WAL 模式, 线程安全 RLock)        │ │
 │  │   启动时自动从旧 registry.json / auth.json 迁移            │ │
 │  └───────────────────────────────────────────────────────────┘ │
+│                                                               │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  Plugin System                                          │  │
+│  │  · 生命周期钩子: load/init/before_shutdown              │  │
+│  │  · 请求钩子: before_request/after_request               │  │
+│  │  · 事件钩子: on_agent_register/task_created 等          │  │
+│  │  · 加载方式: entry_points / config.yaml 声明            │  │
+│  └────────────────────────────────────────────────────────┘  │
+│                                                               │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  Rate Limiting · Audit · Multi-Tenancy                  │  │
+│  │  Token Bucket (memory/MySQL) · Append-only Audit        │  │
+│  │  X-Tenant-ID Header · Tenant 数据隔离                    │  │
+│  └────────────────────────────────────────────────────────┘  │
 │                                                               │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │               Auth & Governance                           │  │
@@ -57,21 +73,72 @@ Simple A2A Registry 是一个轻量级的 Agent 注册与编排服务，基于 G
 simple_a2a_registry/
   cli.py          — argparse CLI 入口（含全部参数）
   server.py       — aiohttp REST API + WebSocket + 认证中间件 + 编排路由
-  store.py        — 统一 SQLite 持久化（Store 类: Agent 注册、心跳 + OAuth 客户端/Token 管理）
+  store.py        — Agent + OAuth 持久化（Store 类: Agent/心跳 + OAuth 客户端/Token）
   models.py       — A2A Agent Card 数据模型（无 Pydantic 依赖）
+  auth.py         — OAuth 2.1: JWT 签发/校验、中间件、Admin 客户端 CRUD
+  config.py       — YAML 配置加载器（CLI > ENV > YAML 三优先级）
+  errors.py       — 统一错误响应格式 + 异常类层次
+  log.py          — 结构化日志（JSON/Text 双模式 + request_id contextvars）
+  metrics.py      — Prometheus 指标中间件 + /metrics 端点
+  rate_limiter.py — Token Bucket 限流器（memory/MySQL 双后端）
+  audit.py        — Append-only 审计事件存储
+  users.py        — 用户注册与会话管理（Web Dashboard 认证）
+  validation.py   — 输入校验辅助函数
+  plugin.py       — Plugin ABC + PluginRegistry（钩子加载/派发）
+  client.py       — A2A Python SDK（sync + async）
+  ws_admin.py     — Admin WebSocket Hub（实时任务更新推送）
+  database/
+    engine.py     — DatabaseEngine ABC + SQLiteEngine + MySQLEngine + RetryEngine
   orchestration/  — 编排引擎模块
-    task_store.py   — SQLite 任务存储（5 张表）
+    task_store.py   — SQLite/MySQL 任务存储（5 张表）
     dispatcher.py   — 后台 Worker 派发器
     state_machine.py— 8 状态状态机
     routes.py       — 编排 API 路由
+    swarm.py        — Swarm 拓扑 + 黑板
+    swarm_routes.py — Swarm REST API 路由
     workspace.py    — 工作区管理器
+    dependency.py   — 循环依赖检测 + DAG 解析
+    pool.py         — Worker 进程池
   static/         — Web Dashboard（HTML+JS）
 examples/
-  a2a_coder_agent.py — A2A 兼容 Coder Agent（OAuth 认证 + WS 长连接 + A2A JSONRPC）
+  a2a_coder_agent.py — A2A 兼容 Coder Agent（OAuth + WS 长连接 + A2A JSONRPC）
+  a2a_opencode_agent.py — OpenCode Agent 变体
+  sdk_usage.py        — SDK 功能演示
+  simple_a2a_agent.py — 最小 Agent 示例
+  run_agent.py        — 快速启动脚本
 tests/
   test_store.py   — 存储层单元测试
   test_models.py  — 数据模型单元测试
   test_server.py  — HTTP API 集成测试
+  test_auth.py    — OAuth 2.1 流程测试
+  test_orchestration_api.py  — V2 REST API 测试
+  test_orchestration_store.py — TaskStore CRUD 测试
+  test_orchestration_state_machine.py — 状态转换测试
+  test_orchestration_e2e.py   — 端到端编排测试
+  test_swarm.py   — Swarm 拓扑测试
+  test_dispatcher.py  — Dispatcher 测试
+  test_rate_limiter.py— Token Bucket 测试
+  test_validation.py  — 输入校验测试
+  test_errors.py      — 错误处理测试
+  test_log.py         — 日志测试
+  test_config.py      — 配置加载测试
+  test_cors.py        — CORS 中间件测试
+  test_concurrency.py — 线程安全测试
+  test_users.py       — 用户管理测试
+  test_tenant_isolation.py  — 多租户隔离测试
+  test_tenant_e2e.py        — 租户端到端测试
+  test_token_scope_tenant.py— Token+Scope+租户组合测试
+  test_token_tenant_bc.py   — 向后兼容测试
+  test_user_auth_e2e.py     — 用户认证端到端测试
+  test_websocket.py   — WebSocket 协议测试
+  test_workspace.py   — 工作区管理测试
+  test_metrics.py     — Prometheus 指标（在 test_server.py 中）
+  test_mysql_compat.py— MySQL 方言兼容测试
+  test_tls.py         — TLS/SSL 测试
+  test_bootstrap_admin.py   — 启动管理客户端测试
+  test_performance_benchmark.py — 性能基准测试
+  benchmarks/         — 基准测试套件
+```
 ```
 
 ---
@@ -522,6 +589,263 @@ poll_cycle()
 | 认证 | OAuth 2.1 JWT (RS256/HS256) | A2A v1.0 规范要求 SecurityScheme 集成 |
 | 任务分发 | WebSocket 推送 | 低延迟、双向通信，优于 HTTP 轮询 |
 | 编排派发 | 原子 UPDATE + 后台轮询 | 防双重派发，Worker 无状态可水平扩展 |
+
+---
+
+## 数据库引擎层
+
+Registry 使用双数据库引擎架构，支持运行时在 SQLite（开发）和 MySQL（生产）之间切换。
+
+### 引擎架构
+
+```python
+# simple_a2a_registry/database/engine.py
+DatabaseEngine (ABC)
+  ├── SQLiteEngine    — 开发/单机部署，WAL 模式，线程安全 RLock
+  └── MySQLEngine     — 生产/集群部署，QueuePool，utf8mb4
+
+RetryEngine          — 透明包装器，指数退避重试（3 次默认）
+```
+
+### 引擎选择机制
+
+| 场景 | 驱动 | 配置示例 |
+|------|------|---------|
+| 开发/测试 | `sqlite+aiosqlite` | `database.driver: sqlite` |
+| 生产/集群 | `mysql+aiomysql` | `database.driver: mysql` |
+
+引擎通过 `DatabaseEngine.create(config)` 工厂方法在启动时根据配置选择。
+
+### RetryEngine
+
+透明包装器，拦截瞬态错误（数据库锁定、连接断开、超时）并自动重试：
+
+- 指数退避策略：`2^attempt` 秒（1s, 2s, 4s）
+- 默认最多 3 次尝试
+- 超出限制则抛出自定义异常
+
+### Alembic 迁移
+
+```
+migrations/
+  env.py              — 支持 SQLite + MySQL 双目标
+  versions/
+    0001_initial_schema.py
+    ...
+```
+
+迁移工作流：
+```bash
+alembic upgrade head                          # 应用所有迁移
+ALEMBIC_DATABASE_URL="mysql+aiomysql://..." alembic upgrade head  # 应用到 MySQL
+```
+
+数据迁移脚本 `scripts/migrate_sqlite_to_mysql.py` 提供从 SQLite → MySQL 的增量迁移，采用批量事务 + 断点续传策略。
+
+---
+
+## 插件系统
+
+插件系统允许第三方代码在定义好的生命周期点扩展 Registry 功能。
+
+### 架构概览
+
+```
+Plugin (ABC)
+  ├── name() → str                    — 唯一插件标识
+  ├── load(config)                    — 加载阶段：读取配置
+  ├── init(app)                       — 初始化阶段：注册路由/中间件
+  ├── before_request(request)         — 请求前钩子
+  ├── after_request(request, response)— 请求后钩子
+  └── before_shutdown(app)            — 关闭前清理
+
+PluginRegistry
+  ├── discover()                      — 扫描 entry_points + config.yaml
+  ├── dispatch(hook, *args)           — 按优先级依次派发钩子
+  └── get_plugin(name) → Plugin       — 获取已加载的插件实例
+```
+
+### 钩子类型
+
+| 类别 | 钩子 | 触发时机 |
+|------|------|---------|
+| 生命周期 | `load(config)` | 服务启动时 |
+| | `init(app)` | router 注册完成后 |
+| | `before_shutdown(app)` | 服务关闭时 |
+| 请求拦截 | `before_request(request)` | 每个 HTTP 请求前 |
+| | `after_request(request, response)` | 每个 HTTP 请求后 |
+| 事件通知 | `on_agent_register(agent_id, card)` | Agent 注册时 |
+| | `on_agent_deregister(agent_id)` | Agent 注销时 |
+| | `on_agent_heartbeat(agent_id)` | Agent 心跳时 |
+| | `on_task_created(task)` | 任务创建时 |
+| | `on_task_completed(task, result)` | 任务完成时 |
+| | `on_token_issued(token, client_id)` | Token 签发时 |
+| | `on_server_start()` | 服务就绪时 |
+| | `on_server_stop()` | 服务停止时 |
+
+### 加载方式
+
+1. **Entry Points**（`pyproject.toml`）— 显式声明
+2. **Config 文件**（`config.yaml`）— 运行时动态加载
+
+---
+
+## Admin WebSocket Hub
+
+为 Admin Dashboard 提供实时任务状态更新推送，由 `ws_admin.py` 实现。
+
+### 连接管理
+
+- 独立于 Agent WS Hub，专用于 Admin SPA 监控
+- 支持多个 Admin 客户端同时订阅
+- 每个客户端可选择关注特定任务或接收全部事件
+
+### 推送事件
+
+| 事件类型 | 触发条件 | 说明 |
+|----------|---------|------|
+| `task_created` | 任务创建 | 推送任务摘要 |
+| `task_updated` | 状态变更 | 推送新旧状态 + assignee |
+| `task_completed` | 任务完成 | 推送任务 ID + 结果 |
+| `task_comment` | 新评论 | 推送评论内容和作者 |
+| `ping` | 每 30 秒 | 服务端保活心跳 |
+
+### 认证
+
+Admin WS 通过查询参数 `?token=<jwt>` 传递 Bearer Token，要求 `registry:admin` scope。
+
+---
+
+## 限流系统
+
+基于 Token Bucket 算法，支持双后端存储。
+
+### 架构
+
+```
+RateLimiter (ABC)
+  ├── MemoryRateLimiter     — 内存字典 + asyncio.Lock
+  └── MySQLRateLimiter      — MySQL 表 + 行级锁
+```
+
+### Key 推导优先级
+
+1. `client_id`（认证 Token 中的 sub 字段）
+2. `X-Forwarded-For` / `X-Real-IP` 头
+3. TCP 连接远端地址
+
+### 限流配置
+
+```yaml
+rate_limit:
+  enabled: true
+  default_unauthenticated: 60    # 未认证端点每分钟 60 次
+  default_authenticated: 300     # 认证端点每分钟 300 次
+  storage: mysql                 # memory / mysql
+  whitelist: ["my-super-agent"]  # 豁免客户端 ID
+```
+
+### 响应头
+
+限流后的 HTTP 响应包含以下头：
+- `X-RateLimit-Limit` — 每分钟配额
+- `X-RateLimit-Remaining` — 剩余配额
+- `X-RateLimit-Reset` — 配额重置时间戳
+- `Retry-After` — 超出配额后的建议等待时间（秒）
+
+---
+
+## 审计日志系统
+
+所有敏感操作写入 `audit_log` 表，采用 Append-only 设计。
+
+### 事件记录字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `event_type` | string | 分类标识（如 `agent_register`、`token_issue`、`admin_action`） |
+| `actor` | string | 操作者标识（client_id 或 user_id） |
+| `target` | string | 操作目标（agent_id、task_id、client_id） |
+| `timestamp` | float | 操作时间戳 |
+| `success` | bool | 操作是否成功 |
+| `detail` | string | 操作详情描述 |
+
+### 记录的事件
+
+| 事件类型 | 触发条件 |
+|----------|---------|
+| `agent_register` | Agent 注册成功/失败 |
+| `agent_deregister` | Agent 注销 |
+| `token_issue` | JWT Token 签发 |
+| `token_revoke` | Token 吊销 |
+| `task_create` | 编排任务创建 |
+| `task_complete` | 任务完成 |
+| `task_block` | 任务阻塞 |
+| `admin_action` | Admin 管理操作（创建/删除客户端） |
+
+### 保留策略
+
+默认保留 90 天，通过 `audit.ttl_days` 配置项可调。到期事件由后台任务清理。
+
+---
+
+## 多租户隔离
+
+支持在多项目环境中隔离 Agent 和任务数据。
+
+### 租户标识传递
+
+- **HTTP Header**：`X-Tenant-ID` — 请求级租户标签
+- **查询参数**：`?tenant=<value>` — API 显式指定
+- **Token 属性**：JWT Token 中可附加 `tenant` 声明
+
+### 隔离范围
+
+| 资源 | 隔离方式 | 说明 |
+|------|---------|------|
+| Agent | `tenant` 列过滤 | 每个 Agent 所属租户，查询时自动过滤 |
+| V2 任务 | `tenant` 列过滤 | 任务创建时记录租户，查询/调度按租户隔离 |
+| OAuth Token | `tenant` 声明 | Token 签发时记录请求中的租户 |
+| 审计日志 | `tenant` 字段 | 审计事件带租户标签 |
+
+### 租户传播
+
+- 创建任务时，通过请求头或查询参数设定租户
+- 子任务（Swarm Worker、依赖链）自动继承父任务的租户
+- Dispatcher 按租户过滤 ready 任务
+- 审计日志记录每条事件所属租户
+
+### 兼容性
+
+未指定租户时（`tenant=""`），行为等同于传统单租户模式。向后兼容所有现有客户端。
+
+---
+
+## 用户系统
+
+Web Dashboard 使用基于 Session 的认证体系，与 OAuth 2.1 API 认证独立。
+
+### 架构
+
+```
+UserRegistry
+  ├── create_user(username, password, ...)  — 创建账户
+  ├── authenticate(username, password)       — 密码验证
+  ├── create_session(user_id) → session_id  — 创建 Session
+  └── validate_session(session_id) → user    — 验证 Session
+
+SessionStore
+  └── user_sessions (内存/SQLite 持久化)
+```
+
+### 用户-API 认证关系
+
+| 认证方式 | 使用场景 | Token 类型 |
+|----------|---------|-----------|
+| OAuth 2.1 (client_credentials) | Agent/Client API 调用 | JWT Bearer Token |
+| Session Cookie | Web Dashboard SPA | 服务端 Session |
+
+两个认证体系并行运行，互不干扰。
 
 ---
 

@@ -8,6 +8,7 @@ Tests cover:
   - Reconnect replaces old connection
   - Auth token validation on WS upgrade
   - Dispatch to non-existent / disconnected agent
+  - Admin WS comment push notification (WS-T5-TC4)
 """
 from __future__ import annotations
 
@@ -509,5 +510,143 @@ class TestWebSocketAuth:
                 f"/v1/agents/{agent_b}/ws?token={token}"
             )
             assert ws.closed is False
+            await ws.send_json({"type": "close"})
+            await ws.close()
+
+
+# ======================================================================
+# WS-T5-TC4: Admin WebSocket — comment push notification
+# ======================================================================
+
+
+class TestAdminWSCommentPush:
+    """Admin WebSocket comment push notification tests (WS-T5-TC4).
+
+    When a comment is added to a task (POST /v2/tasks/{id}/comment),
+    the AdminWSHub should broadcast a ``comment_added`` event to every
+    subscribed Admin WebSocket client.
+    """
+
+    async def _create_task(self, client: TestClient, title: str = "WS-T5-TC4") -> str:
+        """Helper: create a task and return its id."""
+        resp = await client.post("/v2/tasks", json={"title": title})
+        assert resp.status in (200, 201), await resp.text()
+        data = await resp.json()
+        return data["task"]["id"]
+
+    async def test_comment_push_via_admin_ws(self, app_factory):
+        """WS-T5-TC4: add a comment → verify ``comment_added`` arrives via Admin WS."""
+        async with await app_factory() as client:
+            # 1. Create a task
+            task_id = await self._create_task(client)
+
+            # 2. Connect to Admin WebSocket and subscribe to this task
+            ws = await client.ws_connect("/v2/ws/admin")
+            await ws.send_json({"type": "subscribe", "task_ids": [task_id]})
+
+            # 3. Add a comment via HTTP
+            comment_body = "需要代码审查 — WS-T5-TC4 推送测试"
+            resp = await client.post(
+                f"/v2/tasks/{task_id}/comment",
+                json={"author": "reviewer", "body": comment_body},
+            )
+            assert resp.status == 201
+            comment_data = await resp.json()
+            assert comment_data["comment_id"] > 0
+
+            # 4. Receive the ``comment_added`` event on Admin WS
+            msg = await ws.receive(timeout=5)
+            import json
+            push = json.loads(msg.data)
+
+            assert push["type"] == "task_update"
+            assert push["event"] == "comment_added"
+            assert push["task"]["id"] == task_id
+            assert push["task"]["comment"]["body"] == comment_body
+            assert push["task"]["comment"]["author"] == "reviewer"
+
+            # 5. Cleanup
+            await ws.send_json({"type": "close"})
+            await ws.close()
+
+    async def test_comment_push_subscribe_all(self, app_factory):
+        """WS-T5-TC4 variant: subscribe_all should also receive comment pushes."""
+        async with await app_factory() as client:
+            task_id = await self._create_task(client, "WS-T5-TC4-sub-all")
+
+            ws = await client.ws_connect("/v2/ws/admin")
+            await ws.send_json({"type": "subscribe_all"})
+
+            resp = await client.post(
+                f"/v2/tasks/{task_id}/comment",
+                json={"author": "bot", "body": "All-sub test"},
+            )
+            assert resp.status == 201
+
+            msg = await ws.receive(timeout=5)
+            import json
+            push = json.loads(msg.data)
+
+            assert push["type"] == "task_update"
+            assert push["event"] == "comment_added"
+            assert push["task"]["id"] == task_id
+
+            await ws.send_json({"type": "close"})
+            await ws.close()
+
+    async def test_comment_push_unsubscribed(self, app_factory):
+        """WS-T5-TC4 variant: unsubscribed task should NOT receive the push."""
+        async with await app_factory() as client:
+            task_a = await self._create_task(client, "task-a")
+            task_b = await self._create_task(client, "task-b")
+
+            ws = await client.ws_connect("/v2/ws/admin")
+            # Subscribe only to task_a
+            await ws.send_json({"type": "subscribe", "task_ids": [task_a]})
+
+            # Add comment to task_b (not subscribed)
+            resp = await client.post(
+                f"/v2/tasks/{task_b}/comment",
+                json={"author": "x", "body": "Should not arrive"},
+            )
+            assert resp.status == 201
+
+            # The unsubscribed comment should NOT reach us within a reasonable wait
+            import json
+            with pytest.raises(Exception):
+                msg = await ws.receive(timeout=2)
+                push = json.loads(msg.data)
+                if push.get("type") == "task_update" and push.get("event") == "comment_added":
+                    assert push["task"]["id"] != task_b, "Unsubscribed task comment arrived!"
+
+            await ws.send_json({"type": "close"})
+            await ws.close()
+
+    async def test_comment_push_ping_pong_afterwards(self, app_factory):
+        """WS-T5-TC4: comment push should not break subsequent ping/pong."""
+        async with await app_factory() as client:
+            task_id = await self._create_task(client)
+
+            ws = await client.ws_connect("/v2/ws/admin")
+            await ws.send_json({"type": "subscribe", "task_ids": [task_id]})
+
+            # Add comment
+            await client.post(
+                f"/v2/tasks/{task_id}/comment",
+                json={"author": "alice", "body": "Ping test"},
+            )
+
+            # Receive push
+            msg = await ws.receive(timeout=5)
+            import json
+            push = json.loads(msg.data)
+            assert push["event"] == "comment_added"
+
+            # Ping-pong must still work
+            await ws.send_json({"type": "ping"})
+            pong = await ws.receive(timeout=5)
+            pong_data = json.loads(pong.data)
+            assert pong_data["type"] == "pong"
+
             await ws.send_json({"type": "close"})
             await ws.close()

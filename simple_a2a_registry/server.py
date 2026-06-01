@@ -566,6 +566,8 @@ class RegistryHandler:
                             or card_name.endswith(card_id)
                             or card_id_norm in card_name
                             or card_name.endswith(card_id_norm)
+                            # agent_card_id may be the agent UUID (auto-created client)
+                            or card_id == agent_id.lower()
                         )
                 if not sub_ok:
                     return web.json_response(

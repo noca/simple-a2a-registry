@@ -887,6 +887,7 @@ async def _ensure_registered() -> str:
             async with _ws_session.post(
                 f"{REGISTRY_URL}/v1/agents",
                 json=payload,
+                headers=_auth_header(),
             ) as resp:
                 if resp.status == 200 or resp.status == 201:
                     data = await resp.json()

@@ -27,7 +27,7 @@ const KanbanBoard: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [showCreate, setShowCreate] = useState(false);
-  const [newTask, setNewTask] = useState({ title: '', status: 'todo', priority: 'normal', assignee: '' });
+  const [newTask, setNewTask] = useState({ title: '', body: '', status: 'todo', priority: 'normal', assignee: '' });
 
   // Detail drawer state
   const [selectedTask, setSelectedTask] = useState<any>(null);
@@ -41,6 +41,8 @@ const KanbanBoard: React.FC = () => {
   useEffect(() => { selectedTaskRef.current = selectedTask; }, [selectedTask]);
 
   const [wsConnected, setWsConnected] = useState(false);
+  const [resultExpanded, setResultExpanded] = useState(false);
+  const [errorExpanded, setErrorExpanded] = useState(false);
   const wsRef = useRef<AdminWsClient | null>(null);
 
   const fetchTasks = useCallback(async () => {
@@ -131,7 +133,7 @@ const KanbanBoard: React.FC = () => {
       await taskAPI.createV2(newTask);
       addToast('success', '任务创建成功');
       setShowCreate(false);
-      setNewTask({ title: '', status: 'todo', priority: 'normal', assignee: '' });
+      setNewTask({ title: '', body: '', status: 'todo', priority: 'normal', assignee: '' });
       fetchTasks();
     } catch (e: any) {
       addToast('error', `创建失败: ${e.message}`);
@@ -162,6 +164,8 @@ const KanbanBoard: React.FC = () => {
       const data = await taskAPI.getV2(id);
       const task = data.task || data;
       setSelectedTask({ ...task, comments: data.comments || [] });
+      setResultExpanded(false);
+      setErrorExpanded(false);
       setEditForm({
         title: task.title || '',
         description: task.description || task.body || '',
@@ -262,6 +266,126 @@ const KanbanBoard: React.FC = () => {
       <div style={{ fontSize: 13 }}>{value}</div>
     </div>
   );
+
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      addToast('success', '已复制到剪贴板');
+    } catch {
+      // Fallback for non-HTTPS
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      addToast('success', '已复制到剪贴板');
+    }
+  };
+
+  const copyBtn = (text: string, label = '复制') => (
+    <button onClick={(e) => { e.stopPropagation(); copyToClipboard(text); }}
+      style={{
+        background: 'transparent', border: '1px solid var(--separator)', borderRadius: 6,
+        padding: '2px 8px', fontSize: 11, color: 'var(--text-tertiary)', cursor: 'pointer',
+        marginLeft: 'auto',
+      }}>{label}</button>
+  );
+
+  const unwrapResult = (result: any): { display: string; isJson: boolean } => {
+    if (!result) return { display: '', isJson: false };
+    // If result is a string, use it directly
+    if (typeof result === 'string') return { display: result, isJson: false };
+    // Common pattern: agent returns {"text": "..."} — unwrap
+    if (typeof result === 'object' && !Array.isArray(result) && Object.keys(result).length === 1 && typeof result.text === 'string') {
+      return { display: result.text, isJson: false };
+    }
+    // Structured JSON object — pretty-print
+    return { display: JSON.stringify(result, null, 2), isJson: true };
+  };
+
+  const renderResultBlock = (result: any) => {
+    const { display, isJson } = unwrapResult(result);
+    if (!display) return null;
+    const needsExpand = display.length > 500;
+    const preview = needsExpand ? display.slice(0, 500) + '…' : display;
+
+    return (
+      <div style={{ borderTop: '1px solid var(--separator)', paddingTop: 16, marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+          <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--green)', textTransform: 'uppercase', letterSpacing: '0.3px' }}>
+            ✅ 执行结果
+          </div>
+          <div style={{ flex: 1 }} />
+          {copyBtn(display, '复制结果')}
+        </div>
+        <div style={{ position: 'relative' }}>
+          <pre style={{
+            background: 'rgba(52,199,89,0.06)',
+            border: '1px solid rgba(52,199,89,0.15)',
+            borderRadius: 8,
+            padding: '10px 12px',
+            fontSize: 12,
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            overflow: 'auto',
+            maxHeight: resultExpanded ? 'none' : 120,
+            color: 'var(--fg)',
+            margin: 0,
+            fontFamily: isJson ? 'ui-monospace, "Cascadia Code", monospace' : undefined,
+          }}>{resultExpanded ? display : preview}</pre>
+          {needsExpand && (
+            <button onClick={() => setResultExpanded(!resultExpanded)}
+              style={{
+                background: 'rgba(52,199,89,0.08)', border: '1px solid rgba(52,199,89,0.2)',
+                borderRadius: 6, padding: '2px 10px', fontSize: 11, cursor: 'pointer',
+                color: 'var(--green)', marginTop: 6,
+              }}>{resultExpanded ? '收起 ↑' : '展开全部 ↓'}</button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderErrorBlock = (errMsg: string) => {
+    const needsExpand = errMsg.length > 500;
+
+    return (
+      <div style={{ borderTop: '1px solid var(--separator)', paddingTop: 16, marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+          <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--red)', textTransform: 'uppercase', letterSpacing: '0.3px' }}>
+            ❌ 错误信息
+          </div>
+          <div style={{ flex: 1 }} />
+          {copyBtn(errMsg, '复制错误')}
+        </div>
+        <pre style={{
+          background: 'rgba(255,69,58,0.06)',
+          border: '1px solid rgba(255,69,58,0.15)',
+          borderRadius: 8,
+          padding: '10px 12px',
+          fontSize: 12,
+          lineHeight: 1.5,
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+          overflow: 'auto',
+          maxHeight: errorExpanded ? 'none' : 120,
+          color: 'var(--fg)',
+          margin: 0,
+        }}>{errorExpanded ? errMsg : errMsg.slice(0, 500) + '…'}</pre>
+        {needsExpand && (
+          <button onClick={() => setErrorExpanded(!errorExpanded)}
+            style={{
+              background: 'rgba(255,69,58,0.08)', border: '1px solid rgba(255,69,58,0.2)',
+              borderRadius: 6, padding: '2px 10px', fontSize: 11, cursor: 'pointer',
+              color: 'var(--red)', marginTop: 6,
+            }}>{errorExpanded ? '收起 ↑' : '展开全部 ↓'}</button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div>
@@ -497,47 +621,11 @@ const KanbanBoard: React.FC = () => {
                   )}
 
                   {/* Kanban task result — from A2A agent WS output */}
-                  {(selectedTask.status === 'completed' && selectedTask.result) ? (
-                    <div style={{ borderTop: '1px solid var(--separator)', paddingTop: 16, marginBottom: 16 }}>
-                      <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--green)', textTransform: 'uppercase', letterSpacing: '0.3px', marginBottom: 8 }}>
-                        ✅ 执行结果
-                      </div>
-                      <pre style={{
-                        background: 'rgba(52,199,89,0.06)',
-                        border: '1px solid rgba(52,199,89,0.15)',
-                        borderRadius: 8,
-                        padding: '10px 12px',
-                        fontSize: 12,
-                        lineHeight: 1.5,
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word',
-                        overflow: 'auto',
-                        maxHeight: 300,
-                        color: 'var(--fg)',
-                        margin: 0,
-                      }}>{typeof selectedTask.result === 'string' ? selectedTask.result : JSON.stringify(selectedTask.result, null, 2)}</pre>
-                    </div>
-                  ) : (selectedTask.status === 'failed' && selectedTask.last_failure_error) ? (
-                    <div style={{ borderTop: '1px solid var(--separator)', paddingTop: 16, marginBottom: 16 }}>
-                      <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--red)', textTransform: 'uppercase', letterSpacing: '0.3px', marginBottom: 8 }}>
-                        ❌ 错误信息
-                      </div>
-                      <pre style={{
-                        background: 'rgba(255,69,58,0.06)',
-                        border: '1px solid rgba(255,69,58,0.15)',
-                        borderRadius: 8,
-                        padding: '10px 12px',
-                        fontSize: 12,
-                        lineHeight: 1.5,
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word',
-                        overflow: 'auto',
-                        maxHeight: 300,
-                        color: 'var(--fg)',
-                        margin: 0,
-                      }}>{selectedTask.last_failure_error}</pre>
-                    </div>
-                  ) : null}
+                  {(selectedTask.status === 'completed' && selectedTask.result)
+                    ? renderResultBlock(selectedTask.result)
+                    : (selectedTask.status === 'failed' && selectedTask.last_failure_error)
+                      ? renderErrorBlock(selectedTask.last_failure_error)
+                      : null}
 
                   {/* Parent / Children info */}
                   {(selectedTask.parents?.length > 0 || selectedTask.children?.length > 0) && (
@@ -617,6 +705,9 @@ const KanbanBoard: React.FC = () => {
               <input placeholder="Task Title *" value={newTask.title}
                 onChange={(e) => setNewTask({ ...newTask, title: e.target.value })}
                 style={inputStyle} />
+              <textarea placeholder="Description (optional)" value={newTask.body}
+                onChange={(e) => setNewTask({ ...newTask, body: e.target.value })}
+                rows={3} style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit' }} />
               <select value={newTask.status} onChange={(e) => setNewTask({ ...newTask, status: e.target.value })}
                 style={inputStyle}>
                 {COLUMNS.map((c) => <option key={c} value={c}>{c}</option>)}

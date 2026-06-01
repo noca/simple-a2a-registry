@@ -888,7 +888,7 @@ async def _register_with_registry(
     logger.error(
         "Failed to register agent: HTTP %s: %s", status, body.get("detail", body)
     )
-    return agent_id or ""
+    return ""
 
 
 async def _heartbeat_loop(agent_id: str) -> None:

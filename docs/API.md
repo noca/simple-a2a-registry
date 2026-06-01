@@ -392,7 +392,204 @@ GET /v1/tasks/{task_id}
 | DELETE | `/v2/tasks/{id}` | 归档任务 | ✅ | `task:write` |
 | POST | `/v2/tasks/{id}/depend` | 添加依赖关系 | ✅ | `task:write` |
 | DELETE | `/v2/tasks/{id}/depend/{parent_id}` | 移除依赖关系 | ✅ | `task:write` |
+| PATCH | `/v2/tasks/{id}` | 更新任务（title/body/assignee/priority/status） | ✅ | `task:write` |
 | GET | `/v2/stats` | 编排引擎统计 | ✅ | `task:read` |
+
+---
+
+## Swarm 多 Agent 拓扑 API
+
+Swarm 系统在 V2 编排引擎之上构建多 Agent 协作工作流。复用相同的状态机、依赖链和存储层。
+
+### Swarm 端点一览
+
+| 方法 | 路径 | 说明 | 认证 | Scope |
+|------|------|------|------|-------|
+| POST | `/v2/swarm` | 创建 Swarm 拓扑（Worker→Verifier→Synthesizer） | ✅ | `task:write` |
+| GET | `/v2/swarm/{root_id}` | 查询 Swarm 状态 | ✅ | `task:read` |
+| POST | `/v2/swarm/{root_id}/comment` | 写入 Swarm 黑板（Blackboard） | ✅ | `task:write` |
+| GET | `/v2/swarm/{root_id}/blackboard` | 读取 Swarm 黑板 | ✅ | `task:read` |
+
+### 创建 Swarm
+
+```
+POST /v2/swarm
+```
+
+**请求体：**
+```json
+{
+  "goal": "实现 OAuth 模块",
+  "workers": [
+    {"profile": "researcher", "title": "研究 OAuth 协议", "body": "..."},
+    {"profile": "coder", "title": "实现 OAuth 端点", "body": "..."}
+  ],
+  "verifier_profile": "reviewer",
+  "synthesizer_profile": "writer"
+}
+```
+
+**字段说明：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `goal` | string | 是 | Swarm 任务目标（创建为根任务） |
+| `workers` | array | 是 | Worker 任务数组，每个包含 `profile`/`title`/`body` |
+| `verifier_profile` | string | 否 | 校验者 Profile，验证 Worker 输出后决定是否继续 |
+| `synthesizer_profile` | string | 否 | 合成者 Profile，汇总所有输出为最终结果 |
+
+**响应：** `201 Created`
+```json
+{
+  "root_id": "t_root_id",
+  "worker_ids": ["t_w1", "t_w2"],
+  "verifier_id": "t_verifier",
+  "synthesizer_id": "t_synthesizer",
+  "status": "running"
+}
+```
+
+### 查询 Swarm
+
+```
+GET /v2/swarm/{root_id}
+```
+
+返回 Swarm 的完整状态，包括所有子任务的进度和黑板内容。
+
+### Swarm 黑板
+
+Worker 通过结构化评论在根任务上共享中间结果，前缀为 `[swarm:blackboard]`。
+
+```
+# 写入黑板
+POST /v2/swarm/{root_id}/comment
+{
+  "author": "worker-1",
+  "key": "phase1_result",
+  "value": {"findings": "..."}
+}
+
+# 读取黑板
+GET /v2/swarm/{root_id}/blackboard
+# → {"phase1_result": {"findings": "..."}}
+```
+
+---
+
+## 用户管理 API（Web Dashboard 认证）
+
+Dashboard 使用基于 Session 的认证体系。用户端点为前端 SPA 提供登录/注册功能。
+
+### 用户端点一览
+
+| 方法 | 路径 | 说明 | 认证 |
+|------|------|------|------|
+| POST | `/auth/users` | 创建用户账户 | ❌ 公开（首次注册） |
+| POST | `/auth/login` | 登录（返回 Session Cookie） | ❌ 公开 |
+| POST | `/auth/logout` | 登出 | ✅ Session |
+| GET | `/auth/me` | 获取当前用户信息 | ✅ Session |
+
+### 创建用户
+
+```
+POST /auth/users
+Content-Type: application/json
+```
+
+**请求体：**
+```json
+{
+  "username": "admin",
+  "password": "secure-password",
+  "display_name": "管理员"
+}
+```
+
+**响应：** `201 Created`
+```json
+{
+  "user_id": "u_abc123",
+  "username": "admin",
+  "display_name": "管理员",
+  "created_at": 1712345678.0
+}
+```
+
+### 登录
+
+```
+POST /auth/login
+Content-Type: application/json
+```
+
+**请求体：**
+```json
+{
+  "username": "admin",
+  "password": "secure-password"
+}
+```
+
+**响应：** `200 OK` — 设置 Session Cookie
+
+### 获取当前用户
+
+```
+GET /auth/me
+Cookie: session=...
+```
+
+**响应：** `200 OK`
+```json
+{
+  "user_id": "u_abc123",
+  "username": "admin",
+  "display_name": "管理员"
+}
+```
+
+---
+
+### 更新任务
+
+```
+PATCH /v2/tasks/{id}
+```
+
+部分更新任务字段。仅传入需要修改的字段即可。
+
+**请求体：**
+```json
+{
+  "title": "新的标题",
+  "body": "更新的描述",
+  "assignee": "new-agent",
+  "priority": 2,
+  "status": "blocked"
+}
+```
+
+**可更新字段：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `title` | string | 任务标题 |
+| `body` | string | 任务描述（Markdown） |
+| `assignee` | string | 指派的 Worker Profile 名 |
+| `priority` | int | 优先级 |
+| `status` | string | 直接设置状态（需符合状态机转换规则） |
+
+**认证：** ✅ `task:write`
+
+**响应：** `200 OK`
+
+**错误码：**
+
+| 状态码 | error | 说明 |
+|--------|-------|------|
+| 400 | `validation_error` | 无效字段值 |
+| 400 | `invalid_transition` | 状态转换不被允许 |
 
 ### 创建任务
 
@@ -796,6 +993,42 @@ Authorization: Bearer *** (need registry:admin scope)
 | 404 | `client_not_found` | 客户端不存在 |
 | 403 | `insufficient_scope` | Token 缺少 `registry:admin` scope |
 
+### 管理审计日志
+
+> 以下端点需 `registry:admin` scope。
+
+```
+GET /admin/audit
+Authorization: Bearer *** (need registry:admin scope)
+```
+
+**查询参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `event_type` | string | 按事件类型过滤（如 `agent_register`、`token_issue`、`admin_action`） |
+| `actor` | string | 按操作者过滤 |
+| `limit` | int | 分页大小（默认 50，最大 200） |
+| `offset` | int | 分页偏移（默认 0） |
+
+**响应：** `200 OK`
+```json
+{
+  "total": 128,
+  "entries": [
+    {
+      "id": 1,
+      "event_type": "agent_register",
+      "actor": "client-abc",
+      "target": "agent-xyz",
+      "timestamp": 1712345678.0,
+      "success": true,
+      "detail": "Agent 'coder-agent' registered"
+    }
+  ]
+}
+```
+
 ---
 
 ## 系统端点
@@ -834,3 +1067,47 @@ GET /.well-known/agent-card.json
 返回 Registry 自身的 A2A Agent Card，供 Agent 发现使用。
 
 **认证：** ❌ 公开
+
+### Prometheus 指标
+
+```
+GET /metrics
+```
+
+返回 Prometheus 格式的运行时指标（当 `monitoring.metrics_enabled=true` 时可用）。
+
+**认证：** ❌ 公开（建议在独立端口暴露，或使用防火墙限制访问）
+
+**包含的指标：**
+
+| 指标名 | 类型 | 说明 |
+|--------|------|------|
+| `a2a_registry_requests_total` | Counter | 总请求计数 |
+| `a2a_registry_request_duration_seconds` | Histogram | 请求处理延迟分布 |
+| `a2a_registry_auth_operations_total` | Counter | 认证操作计数 |
+| `a2a_registry_agents_alive` | Gauge | 当前活跃 Agent 数 |
+| `a2a_registry_agents_stale` | Gauge | 当前过期 Agent 数 |
+| `a2a_registry_ws_connections` | Gauge | 当前 Agent WS 连接数 |
+| `a2a_registry_admin_ws_connections` | Gauge | 当前 Admin WS 连接数 |
+| `a2a_registry_db_pool_size` | Gauge | 数据库连接池大小 |
+| `a2a_registry_db_query_duration_seconds` | Histogram | 数据库查询延迟分布 |
+
+### Admin WebSocket
+
+```
+GET /ws/admin
+```
+
+为 Admin Dashboard 提供实时的任务状态更新推送。通过 WebSocket 订阅感兴趣的任务变更事件。
+
+**认证：** ✅ 需 `registry:admin` scope（通过查询参数 `?token=<jwt>` 传递）
+
+**Admin WS 消息协议：**
+
+| type | 说明 |
+|------|------|
+| `task_created` | 新任务创建：`{"type":"task_created","task":{"id":"t_xxx","title":"...","status":"todo"}}` |
+| `task_updated` | 任务状态变更：`{"type":"task_updated","task_id":"t_xxx","status":"running","assignee":"coder-agent"}` |
+| `task_completed` | 任务完成：`{"type":"task_completed","task_id":"t_xxx","result":{...}}` |
+| `task_comment` | 新评论：`{"type":"task_comment","task_id":"t_xxx","comment":{"author":"reviewer","body":"..."}}` |
+| `ping` | 服务端心跳：`{"type":"ping"}` |

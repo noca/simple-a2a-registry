@@ -1362,6 +1362,131 @@ cors:
 
 ---
 
+## 8. 多租户隔离
+
+> 企业级多项目隔离方案，确保不同租户间的 Agent、任务和数据完全隔离。
+
+### 8.1 设计目标
+
+| 目标 | 说明 |
+|------|------|
+| 数据隔离 | 不同租户的 Agent、任务、Token 在存储层自动隔离 |
+| 身份传播 | 租户标识在请求链中自动传播（API → 编排 → 审计） |
+| 最小依赖 | 不引入外部租户管理系统，自包含实现 |
+| 向后兼容 | 未指定租户时行为不变 |
+
+### 8.2 租户标识与传递
+
+**三类传递方式：**
+
+| 方式 | 优先级 | 说明 |
+|------|--------|------|
+| HTTP Header `X-Tenant-ID` | 高 | 请求级租户标签，适合中间件自动注入 |
+| 查询参数 `?tenant=<value>` | 中 | API 显式指定，适合 CLI 和脚本 |
+| JWT Token `tenant` claim | 低 | Token 签发时记录，用于长期认证 |
+
+**传递优先级：** Header > 查询参数 > Token claim。同时多个来源时，高优先级覆盖低优先级。
+
+### 8.3 隔离范围
+
+```sql
+-- agent 表：tenant 列过滤
+SELECT * FROM agents WHERE tenant = ? OR tenant = '' OR tenant IS NULL;
+
+-- task 表：tenant 列隔离
+SELECT * FROM tasks WHERE tenant = ?;
+
+-- audit_log 表：租户标签
+INSERT INTO audit_log (...) VALUES (..., tenant);
+```
+
+| 资源 | 隔离粒度 | 存储字段 |
+|------|---------|---------|
+| Agent 注册 | 按 tenant 列过滤 | `agents.tenant VARCHAR(64)` |
+| V2 编排任务 | 按 tenant 列隔离 | `tasks.tenant VARCHAR(64)` |
+| OAuth Token | 签发时记录 tenant claim | Token payload 中的 `tenant` |
+| 审计日志 | 每条事件带租户标签 | `audit_log.tenant VARCHAR(64)` |
+
+### 8.4 租户传播链
+
+```
+                请求带入 X-Tenant-ID
+                        │
+                        ▼
+               ┌──────────────────┐
+               │   Auth 中间件     │
+               │   验证 Token +    │
+               │   提取 tenant     │
+               └────────┬─────────┘
+                        │ tenant 存入 request
+                        ▼
+               ┌──────────────────┐
+               │   Store 层        │
+               │   Agent/Task CRUD │
+               │   自动过滤 tenant │
+               └────────┬─────────┘
+                        │
+          ┌─────────────┼─────────────┐
+          ▼             ▼             ▼
+   ┌────────────┐ ┌──────────┐ ┌──────────┐
+   │ Dispatcher  │ │ Swarm    │ │ Audit    │
+   │ 按 tenant   │ │ 自动继承  │ │ 记录     │
+   │ 过滤任务    │ │ 父tenant │ │ tenant   │
+   └────────────┘ └──────────┘ └──────────┘
+```
+
+### 8.5 多租户下的 Dispatcher 行为
+
+Dispatcher 在轮询 ready 任务时，自动按当前请求的 tenant 过滤。Worker 认领任务时，claim_lock 中包含 tenant 信息，确保跨租户的 Worker 不会认领错误的任务。
+
+### 8.6 与 MySQL 集成
+
+MySQL 部署下的租户隔离使用 InnoDB 行级锁和索引过滤：
+
+```sql
+CREATE INDEX idx_agents_tenant ON agents(tenant);
+CREATE INDEX idx_tasks_tenant ON tasks(tenant);
+CREATE INDEX idx_audit_log_tenant ON audit_log(tenant);
+```
+
+分区建议：对于大规模多租户场景，可考虑按 tenant 列做 MySQL 分区表：
+
+```sql
+CREATE TABLE tasks (
+    ...
+    tenant VARCHAR(64) NOT NULL,
+    ...
+) ENGINE=InnoDB
+PARTITION BY LIST COLUMNS(tenant) (
+    PARTITION p_tenant_a VALUES IN ('tenant-a'),
+    PARTITION p_tenant_b VALUES IN ('tenant-b'),
+    PARTITION p_default VALUES IN ('default')
+);
+```
+
+### 8.7 测试覆盖
+
+多租户隔离有专门的测试套件：
+
+| 测试文件 | 覆盖内容 |
+|----------|---------|
+| `tests/test_tenant_isolation.py` | 基础隔离功能 |
+| `tests/test_tenant_e2e.py` | 端到端租户流程 |
+| `tests/test_token_scope_tenant.py` | Token+Scope+租户组合 |
+| `tests/test_token_tenant_bc.py` | 向后兼容测试 |
+
+### 8.8 配置示例
+
+```yaml
+# 默认配置 — 单租户模式（无需改动）
+# tenant 字段可选，不填则等效于传统单租户
+
+# 多租户模式下，客户端在请求头中传递 X-Tenant-ID
+# 服务端自动按 tenant 过滤和隔离数据
+```
+
+---
+
 ## 附录：更新计划 — 已存在的文件修改
 
 ### server.py 中的 TODO 标记（对应实现位置）
