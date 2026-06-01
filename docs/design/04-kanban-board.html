@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kanban V2 — macOS 风格看板</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif;
+  background: #F5F5F7;
+  color: #1D1D1F;
+  min-height: 100vh;
+  display: flex;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ===== Sidebar ===== */
+.sidebar {
+  width: 220px;
+  min-height: 100vh;
+  background: rgba(255,255,255,0.72);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-right: 1px solid rgba(0,0,0,0.06);
+  padding: 20px 0;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+.sidebar-logo {
+  padding: 0 16px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1D1D1F;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid rgba(0,0,0,0.05);
+  margin-bottom: 8px;
+}
+.sidebar-logo .logo-square {
+  width: 28px; height: 28px;
+  background: linear-gradient(135deg, #007AFF, #BF5AF2);
+  border-radius: 7px;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 12px; font-weight: 700;
+}
+.sidebar-item {
+  display: flex; align-items: center;
+  padding: 9px 16px;
+  font-size: 13px;
+  color: #86868B;
+  gap: 10px;
+  cursor: default;
+  transition: background .15s;
+}
+.sidebar-item:hover { background: rgba(0,0,0,0.03); }
+.sidebar-item.active {
+  color: #1D1D1F;
+  font-weight: 500;
+  background: rgba(0,122,255,0.06);
+  border-right: 2px solid #007AFF;
+}
+.sidebar-item .badge-red {
+  margin-left: auto;
+  background: #FF453A;
+  color: #fff;
+  font-size: 10px; font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  min-width: 18px;
+  text-align: center;
+  line-height: 1.5;
+}
+.sidebar-divider {
+  height: 1px;
+  background: rgba(0,0,0,0.05);
+  margin: 8px 16px;
+}
+.sidebar-section-label {
+  padding: 8px 16px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #86868B;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+/* ===== Main Content ===== */
+.main {
+  flex: 1;
+  padding: 24px 32px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Header Row */
+.header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.header-row h1 {
+  font-size: 22px;
+  font-weight: 600;
+  color: #1D1D1F;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.btn-new-task {
+  background: linear-gradient(135deg, #007AFF, #BF5AF2);
+  border: none;
+  border-radius: 7px;
+  padding: 7px 16px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: default;
+  white-space: nowrap;
+  transition: opacity .2s;
+}
+.btn-new-task:hover { opacity: 0.85; }
+
+/* Filter Row */
+.filter-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.filter-select {
+  background: rgba(255,255,255,0.8);
+  border: 1px solid rgba(0,0,0,0.08);
+  border-radius: 7px;
+  padding: 6px 28px 6px 10px;
+  font-size: 12px;
+  color: #1D1D1F;
+  font-family: inherit;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='8' height='6' viewBox='0 0 8 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1.5L4 4.5L7 1.5' stroke='%2386868B' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  cursor: default;
+  outline: none;
+}
+.filter-select:focus { border-color: #007AFF; }
+
+/* ===== Kanban Board ===== */
+.kb-board {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex: 1;
+  padding-bottom: 8px;
+  min-height: 0;
+}
+.kb-board::-webkit-scrollbar { height: 6px; }
+.kb-board::-webkit-scrollbar-track { background: transparent; }
+.kb-board::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.08); border-radius: 3px; }
+.kb-board::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.14); }
+
+/* Column */
+.kb-col {
+  min-width: 260px;
+  width: 260px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: rgba(255,255,255,0.5);
+  border-radius: 10px;
+  border-top: 3px solid #86868B;
+}
+.kb-col-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 12px 0;
+}
+.kb-col-header .col-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1D1D1F;
+}
+.kb-col-header .col-count {
+  font-size: 11px;
+  font-weight: 500;
+  color: #86868B;
+  background: rgba(0,0,0,0.04);
+  padding: 1px 8px;
+  border-radius: 10px;
+  line-height: 1.6;
+}
+.kb-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  flex: 1;
+  min-height: 80px;
+}
+.kb-empty-hint {
+  font-size: 11px;
+  color: rgba(134,134,139,0.5);
+  text-align: center;
+  padding: 20px 0;
+  border: 1px dashed rgba(0,0,0,0.06);
+  border-radius: 6px;
+  display: none;
+}
+
+/* Column color variants */
+.kb-col-todo    { border-top-color: #86868B; }
+.kb-col-ready   { border-top-color: #007AFF; }
+.kb-col-running { border-top-color: #BF5AF2; }
+.kb-col-blocked { border-top-color: #FF9F0A; }
+.kb-col-completed { border-top-color: #30D158; }
+.kb-col-failed  { border-top-color: #FF453A; }
+.kb-col-archived { border-top-color: #86868B; }
+.kb-col-cancelled { border-top-color: #FF453A; }
+
+/* Card */
+.kb-card {
+  background: #FFFFFF;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: default;
+  transition: box-shadow .2s, transform .15s;
+}
+.kb-card:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.10), 0 1px 3px rgba(0,0,0,0.04);
+  transform: translateY(-1px);
+}
+.kb-card .card-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #1D1D1F;
+  line-height: 1.35;
+}
+.kb-card .card-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.kb-card .card-tag {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 6px;
+  line-height: 1.4;
+}
+.kb-card .card-tag.blue {
+  background: rgba(0,122,255,0.08);
+  color: #007AFF;
+}
+.kb-card .card-tag.gray {
+  background: rgba(0,0,0,0.05);
+  color: #86868B;
+}
+.kb-card .card-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 2px;
+}
+.kb-card .card-time {
+  font-size: 11px;
+  color: #86868B;
+}
+.kb-card .card-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.05);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+</style>
+</head>
+<body>
+
+<!-- ===== Sidebar ===== -->
+<div class="sidebar">
+  <div class="sidebar-logo">
+    <span class="logo-square">A2</span>
+    A2A Registry
+  </div>
+
+  <div class="sidebar-item">📊 Dashboard</div>
+  <div class="sidebar-item">🤖 Agents <span style="margin-left:auto;color:#86868B;font-size:11px;">12</span></div>
+  <div class="sidebar-item active">📋 Kanban V2 <span class="badge-red">8</span></div>
+  <div class="sidebar-item">📋 Tasks</div>
+  <div class="sidebar-item">🔑 Clients</div>
+  <div class="sidebar-item">📝 Audit Log</div>
+  <div class="sidebar-item">⚙️ Settings</div>
+
+  <div class="sidebar-divider"></div>
+  <div class="sidebar-section-label">Filters</div>
+  <div class="sidebar-item">⭐ Starred</div>
+  <div class="sidebar-item">👤 Assigned to me</div>
+  <div class="sidebar-item">🏷️ Labels</div>
+</div>
+
+<!-- ===== Main Content ===== -->
+<div class="main">
+
+  <!-- Header -->
+  <div class="header-row">
+    <h1>Kanban V2</h1>
+    <div class="header-actions">
+      <button class="btn-new-task">+ New Task</button>
+    </div>
+  </div>
+
+  <!-- Filter Row -->
+  <div class="filter-row">
+    <select class="filter-select">
+      <option>All Assignees</option>
+      <option>agent-alpha</option>
+      <option>agent-beta</option>
+      <option>agent-delta</option>
+      <option>ops</option>
+    </select>
+    <select class="filter-select">
+      <option>All Labels</option>
+      <option>frontend</option>
+      <option>backend</option>
+      <option>infra</option>
+      <option>design</option>
+      <option>bug</option>
+    </select>
+    <select class="filter-select">
+      <option>All Priorities</option>
+      <option>High</option>
+      <option>Medium</option>
+      <option>Low</option>
+    </select>
+  </div>
+
+  <!-- Kanban Board -->
+  <div class="kb-board">
+
+    <!-- 1. Todo -->
+    <div class="kb-col kb-col-todo">
+      <div class="kb-col-header">
+        <span class="col-name">Todo</span>
+        <span class="col-count">6</span>
+      </div>
+      <div class="kb-cards">
+        <div class="kb-card">
+          <div class="card-title">Design system v2 review</div>
+          <div class="card-tags">
+            <span class="card-tag blue">design</span>
+            <span class="card-tag gray">high</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due May 30</span>
+            <span class="card-avatar">🎨</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">API rate limit spec</div>
+          <div class="card-tags">
+            <span class="card-tag blue">backend</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due Jun 2</span>
+            <span class="card-avatar">⚙️</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Migration script for v1→v2</div>
+          <div class="card-tags">
+            <span class="card-tag gray">infra</span>
+            <span class="card-tag blue">backend</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due Jun 5</span>
+            <span class="card-avatar">🔄</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Write onboarding docs for new agents</div>
+          <div class="card-tags">
+            <span class="card-tag gray">docs</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due Jun 7</span>
+            <span class="card-avatar">📝</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Set up staging environment</div>
+          <div class="card-tags">
+            <span class="card-tag gray">infra</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due Jun 3</span>
+            <span class="card-avatar">🛠️</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Performance benchmark suite</div>
+          <div class="card-tags">
+            <span class="card-tag blue">backend</span>
+            <span class="card-tag gray">high</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due Jun 10</span>
+            <span class="card-avatar">📊</span>
+          </div>
+        </div>
+      </div>
+      <div class="kb-empty-hint">+ Drop tasks here</div>
+    </div>
+
+    <!-- 2. Ready -->
+    <div class="kb-col kb-col-ready">
+      <div class="kb-col-header">
+        <span class="col-name">Ready</span>
+        <span class="col-count">6</span>
+      </div>
+      <div class="kb-cards">
+        <div class="kb-card">
+          <div class="card-title">OAuth token refresh</div>
+          <div class="card-tags">
+            <span class="card-tag blue">backend</span>
+            <span class="card-tag gray">high</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due May 28</span>
+            <span class="card-avatar">🔑</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">WS heartbeat fix</div>
+          <div class="card-tags">
+            <span class="card-tag blue">backend</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due May 29</span>
+            <span class="card-avatar">💓</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Agent card drag-and-drop</div>
+          <div class="card-tags">
+            <span class="card-tag blue">frontend</span>
+            <span class="card-tag gray">ux</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due Jun 1</span>
+            <span class="card-avatar">🖱️</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Implement task reassignment API</div>
+          <div class="card-tags">
+            <span class="card-tag blue">backend</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due Jun 2</span>
+            <span class="card-avatar">🔄</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Add search filters for task list</div>
+          <div class="card-tags">
+            <span class="card-tag blue">frontend</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due Jun 4</span>
+            <span class="card-avatar">🔍</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Notification preferences UI</div>
+          <div class="card-tags">
+            <span class="card-tag gray">design</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due Jun 6</span>
+            <span class="card-avatar">🔔</span>
+          </div>
+        </div>
+      </div>
+      <div class="kb-empty-hint">+ Drop tasks here</div>
+    </div>
+
+    <!-- 3. Running -->
+    <div class="kb-col kb-col-running">
+      <div class="kb-col-header">
+        <span class="col-name">Running</span>
+        <span class="col-count">5</span>
+      </div>
+      <div class="kb-cards">
+        <div class="kb-card">
+          <div class="card-title">Kanban backend API</div>
+          <div class="card-tags">
+            <span class="card-tag blue">backend</span>
+            <span class="card-tag gray">high</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due May 30</span>
+            <span class="card-avatar">📡</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Audit log SSE</div>
+          <div class="card-tags">
+            <span class="card-tag blue">backend</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due Jun 1</span>
+            <span class="card-avatar">📋</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">User management CRUD</div>
+          <div class="card-tags">
+            <span class="card-tag blue">backend</span>
+            <span class="card-tag gray">auth</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due Jun 3</span>
+            <span class="card-avatar">👥</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Kanban column reordering</div>
+          <div class="card-tags">
+            <span class="card-tag blue">frontend</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due Jun 2</span>
+            <span class="card-avatar">📐</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Agent status indicator component</div>
+          <div class="card-tags">
+            <span class="card-tag blue">frontend</span>
+            <span class="card-tag gray">design</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due Jun 5</span>
+            <span class="card-avatar">🟢</span>
+          </div>
+        </div>
+      </div>
+      <div class="kb-empty-hint">+ Drop tasks here</div>
+    </div>
+
+    <!-- 4. Blocked -->
+    <div class="kb-col kb-col-blocked">
+      <div class="kb-col-header">
+        <span class="col-name">Blocked</span>
+        <span class="col-count">2</span>
+      </div>
+      <div class="kb-cards">
+        <div class="kb-card">
+          <div class="card-title">WebSocket reconnect</div>
+          <div class="card-tags">
+            <span class="card-tag blue">backend</span>
+            <span class="card-tag gray">blocker</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due May 25</span>
+            <span class="card-avatar">🔌</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Docker compose debug</div>
+          <div class="card-tags">
+            <span class="card-tag gray">infra</span>
+            <span class="card-tag gray">blocker</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">Due May 26</span>
+            <span class="card-avatar">🐳</span>
+          </div>
+        </div>
+      </div>
+      <div class="kb-empty-hint" style="display:none;">+ Drop tasks here</div>
+    </div>
+
+    <!-- 5. Completed -->
+    <div class="kb-col kb-col-completed">
+      <div class="kb-col-header">
+        <span class="col-name">Completed</span>
+        <span class="col-count">8</span>
+      </div>
+      <div class="kb-cards">
+        <div class="kb-card">
+          <div class="card-title">Agent registration endpoint</div>
+          <div class="card-tags">
+            <span class="card-tag gray">done</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 22</span>
+            <span class="card-avatar">✅</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Initial WebSocket auth flow</div>
+          <div class="card-tags">
+            <span class="card-tag gray">done</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 22</span>
+            <span class="card-avatar">✅</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">SQLite store migration</div>
+          <div class="card-tags">
+            <span class="card-tag gray">done</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 23</span>
+            <span class="card-avatar">✅</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Agent skill manager API</div>
+          <div class="card-tags">
+            <span class="card-tag gray">done</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 24</span>
+            <span class="card-avatar">✅</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Create dashboard widgets</div>
+          <div class="card-tags">
+            <span class="card-tag gray">done</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 25</span>
+            <span class="card-avatar">✅</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">API endpoint documentation</div>
+          <div class="card-tags">
+            <span class="card-tag gray">done</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 26</span>
+            <span class="card-avatar">✅</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Unit test coverage for core module</div>
+          <div class="card-tags">
+            <span class="card-tag gray">done</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 27</span>
+            <span class="card-avatar">✅</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Rate limiter middleware</div>
+          <div class="card-tags">
+            <span class="card-tag gray">done</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 28</span>
+            <span class="card-avatar">✅</span>
+          </div>
+        </div>
+      </div>
+      <div class="kb-empty-hint" style="display:none;">+ Drop tasks here</div>
+    </div>
+
+    <!-- 6. Failed -->
+    <div class="kb-col kb-col-failed">
+      <div class="kb-col-header">
+        <span class="col-name">Failed</span>
+        <span class="col-count">1</span>
+      </div>
+      <div class="kb-cards">
+        <div class="kb-card">
+          <div class="card-title">Multi-region task routing</div>
+          <div class="card-tags">
+            <span class="card-tag gray">retry</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 28</span>
+            <span class="card-avatar">❌</span>
+          </div>
+        </div>
+      </div>
+      <div class="kb-empty-hint" style="display:none;">+ Drop tasks here</div>
+    </div>
+
+    <!-- 7. Archived -->
+    <div class="kb-col kb-col-archived">
+      <div class="kb-col-header">
+        <span class="col-name">Archived</span>
+        <span class="col-count">3</span>
+      </div>
+      <div class="kb-cards">
+        <div class="kb-card">
+          <div class="card-title">Legacy JSON store migration</div>
+          <div class="card-tags">
+            <span class="card-tag gray">archived</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 15</span>
+            <span class="card-avatar">📦</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Old agent status polling</div>
+          <div class="card-tags">
+            <span class="card-tag gray">archived</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 16</span>
+            <span class="card-avatar">📦</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">v1 compatibility shim</div>
+          <div class="card-tags">
+            <span class="card-tag gray">archived</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 18</span>
+            <span class="card-avatar">📦</span>
+          </div>
+        </div>
+      </div>
+      <div class="kb-empty-hint" style="display:none;">+ Drop tasks here</div>
+    </div>
+
+    <!-- 8. Cancelled -->
+    <div class="kb-col kb-col-cancelled">
+      <div class="kb-col-header">
+        <span class="col-name">Cancelled</span>
+        <span class="col-count">2</span>
+      </div>
+      <div class="kb-cards">
+        <div class="kb-card">
+          <div class="card-title">Custom SMTP notification</div>
+          <div class="card-tags">
+            <span class="card-tag gray">cancelled</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 20</span>
+            <span class="card-avatar">🚫</span>
+          </div>
+        </div>
+        <div class="kb-card">
+          <div class="card-title">Self-hosted runner setup</div>
+          <div class="card-tags">
+            <span class="card-tag gray">cancelled</span>
+          </div>
+          <div class="card-bottom">
+            <span class="card-time">May 21</span>
+            <span class="card-avatar">🚫</span>
+          </div>
+        </div>
+      </div>
+      <div class="kb-empty-hint" style="display:none;">+ Drop tasks here</div>
+    </div>
+
+  </div><!-- /kb-board -->
+
+</div><!-- /main -->
+
+</body>
+</html>

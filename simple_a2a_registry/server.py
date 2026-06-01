@@ -68,7 +68,10 @@ from simple_a2a_registry.orchestration import (
     DispatcherConfig,
     WorkspaceManager,
     _maybe_create_schema as _maybe_create_board_schema,
+    SwarmHandler,
+    register_swarm_routes,
 )
+from simple_a2a_registry.ws_admin import AdminWSHub
 
 logger = logging.getLogger("a2a_registry.server")
 
@@ -346,6 +349,11 @@ class RegistryHandler:
                 success=True,
             )
 
+        # Broadcast agent registration event to Admin UI
+        admin_ws_hub = request.app.get("admin_ws_hub")
+        if admin_ws_hub:
+            admin_ws_hub.broadcast_to_all({"type": "agent_registered", "agent_id": agent_id, "name": name})
+
         return web.json_response(response, status=201)
 
     async def handle_unregister(self, request: web.Request) -> web.Response:
@@ -388,10 +396,16 @@ class RegistryHandler:
                 success=True,
             )
 
+        # Broadcast agent unregistration event to Admin UI
+        admin_ws_hub = request.app.get("admin_ws_hub")
+        if admin_ws_hub:
+            admin_ws_hub.broadcast_to_all({"type": "agent_removed", "agent_id": agent_id})
+
         return web.json_response({
             "message": "Agent unregistered successfully",
             "id": agent_id,
         })
+
     # ------------------------------------------------------------------
     # Heartbeat
     # ------------------------------------------------------------------
@@ -459,6 +473,28 @@ class RegistryHandler:
                 "disabled": card["disabled"] if card else False,
             }
         )
+    # ------------------------------------------------------------------
+    # Admin WebSocket — real-time status broadcast to Admin UI
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Admin WebSocket — real-time status broadcast to Admin UI
+    # ------------------------------------------------------------------
+
+    async def handle_admin_ws(self, request: web.Request) -> web.WebSocketResponse:
+        """GET /v2/ws/admin — delegate to AdminWSHub.register().
+
+        The AdminWSHub is stored in app['admin_ws_hub'] and provides
+        subscription-based WebSocket management with heartbeat support.
+        """
+        admin_ws_hub = request.app.get("admin_ws_hub")
+        if admin_ws_hub is None:
+            return web.json_response(
+                {"error": "service_unavailable", "detail": "Admin WebSocket hub not initialized"},
+                status=503,
+            )
+        return await admin_ws_hub.register(request)
+
     # ------------------------------------------------------------------
     # WebSocket — persistent agent connection
     # ------------------------------------------------------------------
@@ -1396,6 +1432,17 @@ def create_app(
     store = Store(_shared_engine if _shared_engine is not None else data_dir, bootstrap_secret=bootstrap_secret)
     handler = RegistryHandler(store, base_url, audit_store=audit_store)
 
+    # OAuth 2.1 Authentication — generate keys EARLY so UserHandler can create Bearer tokens on login
+    # Generate RSA key pair at startup (RS256 primary, HS256 dev fallback)
+    if auth_enabled:
+        private_key, public_key = _generate_rsa_keypair()
+        algorithm = "RS256"
+        logger.info("OAuth 2.1 auth enabled — generated RS256 key pair")
+    else:
+        private_key, public_key = "dev-secret-not-for-production", "dev-secret-not-for-production"
+        algorithm = "HS256"
+        logger.info("OAuth 2.1 auth disabled — dev mode (HS256 fallback)")
+
     # User authentication — password login, session management, user CRUD
     if _shared_engine is not None:
         user_store = UserStore(_shared_engine)
@@ -1406,7 +1453,8 @@ def create_app(
         _user_engine.connect()
         user_store = UserStore(_user_engine)
     session_manager = SessionManager()
-    user_handler = UserHandler(user_store, session_manager, audit_store=audit_store)
+    user_handler = UserHandler(user_store, session_manager, audit_store=audit_store,
+                                auth_private_key=private_key, auth_algorithm=algorithm)
 
     # V2 Orchestration Engine
     if _shared_engine is not None:
@@ -1422,17 +1470,6 @@ def create_app(
         workspaces_root = str(Path(data_dir).expanduser() / "workspaces")
     ws_mgr = WorkspaceManager(workspaces_root)
 
-    # OAuth 2.1 Authentication
-    # Generate RSA key pair at startup (RS256 primary, HS256 dev fallback)
-    if auth_enabled:
-        private_key, public_key = _generate_rsa_keypair()
-        algorithm = "RS256"
-        logger.info("OAuth 2.1 auth enabled — generated RS256 key pair")
-    else:
-        private_key, public_key = "dev-secret-not-for-production", "dev-secret-not-for-production"
-        algorithm = "HS256"
-        logger.info("OAuth 2.1 auth disabled — dev mode (HS256 fallback)")
-
     auth_handler = AuthHandler(
         store,  # same Store instance handles both registry and auth persistence
         private_key=private_key,
@@ -1446,6 +1483,23 @@ def create_app(
     handler._auth_public_key = public_key
     handler._auth_algorithm = algorithm
     handler._auth_enabled = auth_enabled
+
+    # Admin WebSocket Hub — live task updates for the Admin SPA
+    admin_ws_hub = AdminWSHub()
+    admin_ws_hub._auth_public_key = public_key
+    admin_ws_hub._auth_algorithm = algorithm
+    admin_ws_hub._auth_enabled = auth_enabled
+    logger.info("Admin WebSocket Hub ready (%d task subscriptions)",
+                admin_ws_hub.active_connections)
+
+    # Wire OrchestrationHandler broadcast callback to AdminWSHub
+    async def _broadcast_task_event(event_type: str, data: dict) -> None:
+        """Bridge orch_handler._broadcast_fn → AdminWSHub.broadcast_task_update."""
+        task_id = data.get("id", "")
+        await admin_ws_hub.broadcast_task_update(task_id, event_type, data)
+
+    orch_handler._broadcast_fn = _broadcast_task_event
+    logger.info("OrchestrationHandler broadcast callback wired to AdminWSHub")
 
     # V2 Dispatcher (background worker dispatch)
     disp_config = DispatcherConfig(
@@ -1474,6 +1528,7 @@ def create_app(
             public_key=public_key,
             algorithm=algorithm,
             audit_store=audit_store,
+            session_manager=session_manager,
         ),
         metrics_middleware_factory(),
         rate_limit_middleware_factory(
@@ -1499,6 +1554,7 @@ def create_app(
     app["dispatcher"] = dispatcher
     app["config"] = config
     app["audit_store"] = audit_store
+    app["admin_ws_hub"] = admin_ws_hub
 
     # Health / well-known
     app.router.add_get("/health", handler.handle_health)
@@ -1565,9 +1621,14 @@ def create_app(
         require_scope("task:write")(handler.handle_proxy_task),
     )
 
-    # Static dashboard
-    static_dir = Path(__file__).parent / "static"
+    # Static dashboard — a2a-admin React SPA
+    static_dir = Path(__file__).parent.parent / "data" / "web"
     if static_dir.is_dir():
+        # Serve built assets (JS, CSS, images)
+        assets_dir = static_dir / "assets"
+        if assets_dir.is_dir():
+            app.router.add_static("/assets", assets_dir, name="static_assets")
+
         async def _dashboard(request: web.Request) -> web.StreamResponse:
             html_path = static_dir / "index.html"
             html = html_path.read_text(encoding="utf-8")
@@ -1593,6 +1654,16 @@ def create_app(
 
     # V2 Orchestration routes
     register_v2_routes(app, orch_handler)
+
+    # V2 Swarm routes (parallel topology on top of v2/tasks)
+    swarm_handler = SwarmHandler(task_store)
+    register_swarm_routes(app, swarm_handler)
+    app["swarm_handler"] = swarm_handler
+    # Wire SwarmHandler broadcast callback to AdminWSHub (shares the same bridge)
+    swarm_handler._broadcast_fn = _broadcast_task_event
+
+    # Admin WebSocket — real-time task updates via AdminWSHub
+    app.router.add_get("/v2/ws/admin", admin_ws_hub.register)
 
     # OAuth 2.1 Token / Registration endpoints (always registered, public)
     app.router.add_post("/auth/token", auth_handler.handle_token)
@@ -1749,7 +1820,13 @@ def create_app(
             disp.stop()
             logger.info("  Dispatcher stopped")
 
-        # 4. Close TaskStore
+        # 4. Close Admin WebSocket Hub (notify all connected admin clients)
+        admin_hub: Optional[AdminWSHub] = app.get("admin_ws_hub")
+        if admin_hub:
+            await admin_hub.close_all()
+            logger.info("  Admin WebSocket Hub closed")
+
+        # 5. Close TaskStore
         ts: TaskStore = app.get("task_store")
         if ts:
             try:
@@ -1758,7 +1835,7 @@ def create_app(
             except Exception as e:
                 logger.warning("  TaskStore close error: %s", e)
 
-        # 5. Close Store (DB connection pool)
+        # 6. Close Store (DB connection pool)
         store: Store = app.get("store")
         if store:
             try:
@@ -1767,7 +1844,7 @@ def create_app(
             except Exception as e:
                 logger.warning("  Store close error: %s", e)
 
-        # 6. Close WS connections
+        # 7. Close WS connections
         for aid, ws in list(ws_connections.items()):
             if ws and not ws.closed:
                 try:
@@ -1776,7 +1853,7 @@ def create_app(
                     pass
         ws_connections.clear()
 
-        # 7. Flush log handlers
+        # 8. Flush log handlers
         for h in logger.handlers:
             try:
                 h.flush()

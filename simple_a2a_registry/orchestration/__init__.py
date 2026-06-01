@@ -34,6 +34,18 @@ from simple_a2a_registry.orchestration.dispatcher import (
     Dispatcher,
     DispatcherConfig,
 )
+from simple_a2a_registry.orchestration.swarm import (
+    SwarmWorkerSpec,
+    SwarmCreated,
+    create_swarm,
+    post_blackboard,
+    read_blackboard,
+    get_swarm_status,
+)
+from simple_a2a_registry.orchestration.swarm_routes import (
+    SwarmHandler,
+    register_swarm_routes,
+)
 
 __all__ = [
     "Task",
@@ -58,4 +70,12 @@ __all__ = [
     "WorkspaceError",
     "Dispatcher",
     "DispatcherConfig",
+    "SwarmWorkerSpec",
+    "SwarmCreated",
+    "create_swarm",
+    "post_blackboard",
+    "read_blackboard",
+    "get_swarm_status",
+    "SwarmHandler",
+    "register_swarm_routes",
 ]

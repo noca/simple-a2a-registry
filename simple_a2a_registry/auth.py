@@ -33,6 +33,10 @@ from simple_a2a_registry.metrics import record_auth_operation
 
 logger = logging.getLogger("a2a_registry.auth")
 
+# Session cookie name — duplicated here (from users.py) to keep auth.py
+# self-contained for the session-fallback logic below.
+SESSION_COOKIE_NAME = "a2a_session"
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -299,6 +303,7 @@ def _auth_middleware_factory(
     algorithm: str = "RS256",
     issuer: str = ISSUER,
     audit_store: Optional[AuditStore] = None,
+    session_manager: Optional[Any] = None,
 ) -> Callable:
     """Create an aiohttp auth middleware.
 
@@ -313,8 +318,14 @@ def _auth_middleware_factory(
 
     When ``enabled=False``, the middleware is a no-op pass-through.
 
+    When no Bearer token is present, falls back to checking the
+    ``a2a_session`` cookie (for browser users).  If a valid admin/operator
+    session is found, the appropriate scopes are injected so ``require_scope``
+    and downstream handlers work correctly.
+
     Args:
         audit_store: Optional :class:`AuditStore` for logging AUTH_FAILURE events.
+        session_manager: Optional :class:`SessionManager` for session-cookie fallback.
     """
 
     @web.middleware
@@ -334,6 +345,7 @@ def _auth_middleware_factory(
         if (
             path.startswith("/auth/")
             or path.startswith("/.well-known/")
+            or path.startswith("/assets/")
             or path == "/health"
             or path == "/"
             or path == "/metrics"
@@ -344,6 +356,7 @@ def _auth_middleware_factory(
             or path == "/favicon.ico"
             or path == "/static/login.html"
             # WebSocket upgrade — token passed via ?token=xxx query param
+            or path.startswith("/v2/ws/")
             or path.endswith("/ws")
             # JWKS endpoint — public key distribution
             or path == "/.well-known/jwks.json"
@@ -353,6 +366,34 @@ def _auth_middleware_factory(
         # Bearer token validation
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
+            # Session-cookie fallback: browser users don't send Bearer tokens
+            if session_manager is not None:
+                session_token = request.cookies.get(SESSION_COOKIE_NAME, "")
+                if session_token:
+                    session_payload = session_manager.verify_session(session_token)
+                    if session_payload is not None:
+                        role = session_payload.get("role", "viewer")
+                        if role == "admin":
+                            request["agent_id"] = f"user:{session_payload.get('sub', '')}"
+                            request["token_scopes"] = (
+                                "registry:admin agent:admin agent:register "
+                                "agent:read task:write task:read"
+                            )
+                            request["token_payload"] = session_payload
+                            request["tenant"] = ""
+                            request["user_session"] = session_payload
+                            return await handler(request)
+                        elif role == "operator":
+                            request["agent_id"] = f"user:{session_payload.get('sub', '')}"
+                            request["token_scopes"] = (
+                                "agent:register agent:read task:write task:read"
+                            )
+                            request["token_payload"] = session_payload
+                            request["tenant"] = ""
+                            request["user_session"] = session_payload
+                            return await handler(request)
+                        # viewer — no scopes, let require_scope reject
+            # No valid session or no session_manager — return 401
             record_auth_operation("token_validate", success=False)
             if audit_store is not None:
                 audit_store.log(

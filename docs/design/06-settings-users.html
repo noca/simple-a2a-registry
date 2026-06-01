@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A2A Registry — Settings 系统设置 + 用户管理</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  background: #F5F5F7;
+  color: #1D1D1F;
+  min-height: 100vh;
+}
+/* Layout */
+.layout { display: flex; min-height: 100vh; }
+/* Sidebar */
+.sidebar {
+  width: 220px;
+  min-width: 220px;
+  background: rgba(255,255,255,0.72);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  height: 100vh;
+  position: sticky;
+  top: 0;
+  border-right: 1px solid rgba(0,0,0,0.06);
+  padding: 20px 12px;
+  display: flex;
+  flex-direction: column;
+}
+.sidebar-logo {
+  font-size: 15px;
+  font-weight: 600;
+  padding: 8px 12px 20px;
+  color: #1D1D1F;
+  letter-spacing: -0.2px;
+}
+.sidebar-nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #515154;
+  text-decoration: none;
+  transition: background 0.15s;
+  cursor: default;
+}
+.sidebar-item:hover { background: rgba(0,0,0,0.035); }
+.sidebar-item.active {
+  background: rgba(0,122,255,0.08);
+  color: #007AFF;
+  font-weight: 500;
+}
+.sidebar-item .icon { font-size: 15px; width: 20px; text-align: center; }
+/* Main */
+.main {
+  flex: 1;
+  padding: 24px 32px;
+  max-width: 1000px;
+}
+.page-title {
+  font-size: 22px;
+  font-weight: 600;
+  color: #1D1D1F;
+  margin-bottom: 16px;
+}
+/* Subtab */
+.subtab-bar {
+  display: flex;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+  margin-bottom: 24px;
+}
+.subtab-item {
+  padding: 8px 20px;
+  font-size: 13px;
+  color: #86868B;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.subtab-item.active {
+  color: #1D1D1F;
+  border-bottom-color: #007AFF;
+  font-weight: 500;
+}
+.subtab-item:hover { color: #1D1D1F; }
+/* Settings Layout */
+.settings-layout { display: flex; gap: 20px; }
+/* Category List */
+.category-list {
+  width: 180px;
+  min-width: 180px;
+}
+.category-item {
+  height: 32px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #515154;
+  cursor: pointer;
+  transition: background 0.15s;
+  margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+}
+.category-item:hover { background: rgba(0,0,0,0.035); }
+.category-item.active {
+  background: rgba(0,122,255,0.08);
+  color: #007AFF;
+  font-weight: 500;
+}
+/* Config Panel */
+.config-panel {
+  flex: 1;
+  background: #FFFFFF;
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.config-row {
+  display: flex;
+  align-items: center;
+}
+.config-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #1D1D1F;
+  width: 160px;
+  min-width: 160px;
+}
+.config-control { flex: 1; }
+/* Form Controls */
+.input-field {
+  width: 100%;
+  max-width: 320px;
+  background: #F5F5F7;
+  border: 1px solid rgba(0,0,0,0.1);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #1D1D1F;
+  outline: none;
+  transition: border-color 0.15s;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+.input-field:focus { border-color: #007AFF; }
+.input-field::placeholder { color: #86868B; }
+.select-field {
+  width: 100%;
+  max-width: 320px;
+  background: #F5F5F7;
+  border: 1px solid rgba(0,0,0,0.1);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #1D1D1F;
+  outline: none;
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='%2386868B' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+}
+.select-field:focus { border-color: #007AFF; }
+/* Toggle Switch */
+.toggle {
+  width: 34px;
+  height: 20px;
+  background: #C7C7CC;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  position: relative;
+}
+.toggle.active { background: #30D158; }
+.toggle .knob {
+  width: 16px;
+  height: 16px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+}
+.toggle.active .knob { transform: translateX(14px); }
+/* Save Button */
+.save-btn {
+  align-self: flex-end;
+  margin-top: 8px;
+  padding: 10px 24px;
+  background: linear-gradient(135deg, #007AFF, #5856D6);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+.save-btn:hover { opacity: 0.85; }
+/* Users Tab */
+.users-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.search-input {
+  width: 240px;
+  background: #F5F5F7;
+  border: 1px solid rgba(0,0,0,0.1);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  color: #1D1D1F;
+  outline: none;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  transition: border-color 0.15s;
+}
+.search-input:focus { border-color: #007AFF; }
+.search-input::placeholder { color: #86868B; }
+.add-user-btn {
+  padding: 8px 18px;
+  background: linear-gradient(135deg, #007AFF, #5856D6);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+.add-user-btn:hover { opacity: 0.85; }
+/* User Table */
+.table-wrap { overflow-x: auto; }
+.user-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.user-table thead th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  color: #86868B;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+.user-table tbody td {
+  padding: 12px;
+  font-size: 13px;
+  color: #1D1D1F;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+.user-table tbody tr:last-child td { border-bottom: none; }
+.user-table tbody tr:hover { background: rgba(0,0,0,0.035); }
+/* Role Badges */
+.role-badge {
+  display: inline-block;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.role-badge.admin {
+  background: rgba(191,90,242,0.1);
+  color: #8B3DB8;
+}
+.role-badge.dev {
+  background: rgba(0,122,255,0.1);
+  color: #007AFF;
+}
+.role-badge.viewer {
+  background: rgba(134,134,139,0.1);
+  color: #86868B;
+}
+/* Status Tags */
+.status-tag {
+  display: inline-block;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.status-tag.active {
+  background: rgba(48,209,88,0.1);
+  color: #30D158;
+}
+.status-tag.disabled {
+  background: rgba(255,69,58,0.1);
+  color: #BF3A2E;
+}
+/* Ghost Buttons */
+.ghost-btn {
+  background: transparent;
+  border: none;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #86868B;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.15s;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+.ghost-btn:hover { background: rgba(0,0,0,0.05); color: #1D1D1F; }
+.ghost-btn.danger:hover { color: #BF3A2E; background: rgba(255,69,58,0.08); }
+/* Hidden tab content */
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+</style>
+</head>
+<body>
+
+<div class="layout">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">A2A Registry</div>
+    <nav class="sidebar-nav">
+      <a class="sidebar-item"><span class="icon">📊</span> Dashboard</a>
+      <a class="sidebar-item"><span class="icon">🤖</span> Agents</a>
+      <a class="sidebar-item"><span class="icon">📋</span> Tasks</a>
+      <a class="sidebar-item"><span class="icon">🔑</span> Clients</a>
+      <a class="sidebar-item"><span class="icon">📝</span> Audit Log</a>
+      <a class="sidebar-item active"><span class="icon">⚙️</span> Settings</a>
+    </nav>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main">
+
+    <h1 class="page-title">Settings</h1>
+
+    <!-- Subtab Bar -->
+    <div class="subtab-bar">
+      <span class="subtab-item active" data-tab="settings-tab" onclick="switchSubtab('settings-tab', this)">Settings</span>
+      <span class="subtab-item" data-tab="users-tab" onclick="switchSubtab('users-tab', this)">Users</span>
+    </div>
+
+    <!-- === Settings Tab === -->
+    <div id="settings-tab" class="tab-content active">
+      <div class="settings-layout">
+
+        <!-- Category List (Left) -->
+        <div class="category-list">
+          <div class="category-item active" data-category="general" onclick="switchCategory('general', this)">General</div>
+          <div class="category-item" data-category="network" onclick="switchCategory('network', this)">Network</div>
+          <div class="category-item" data-category="agent-config" onclick="switchCategory('agent-config', this)">Agent Config</div>
+          <div class="category-item" data-category="oauth" onclick="switchCategory('oauth', this)">OAuth</div>
+          <div class="category-item" data-category="notifications" onclick="switchCategory('notifications', this)">Notifications</div>
+          <div class="category-item" data-category="advanced" onclick="switchCategory('advanced', this)">Advanced</div>
+        </div>
+
+        <!-- Config Panels (Right) -->
+        <div style="flex:1;">
+
+          <!-- General Panel -->
+          <div id="panel-general" class="config-panel" style="display:flex;">
+            <div class="config-row">
+              <span class="config-label">Registry Name</span>
+              <div class="config-control">
+                <input class="input-field" type="text" value="A2A Registry">
+              </div>
+            </div>
+            <div class="config-row">
+              <span class="config-label">API Endpoint</span>
+              <div class="config-control">
+                <input class="input-field" type="text" value="http://localhost:8080">
+              </div>
+            </div>
+            <div class="config-row">
+              <span class="config-label">Heartbeat Timeout</span>
+              <div class="config-control">
+                <select class="select-field">
+                  <option>15s</option>
+                  <option selected>30s</option>
+                  <option>60s</option>
+                  <option>120s</option>
+                </select>
+              </div>
+            </div>
+            <div class="config-row">
+              <span class="config-label">Enable Auto-Cleanup</span>
+              <div class="config-control">
+                <div class="toggle active" onclick="toggleSwitch(this)">
+                  <div class="knob"></div>
+                </div>
+              </div>
+            </div>
+            <div class="config-row">
+              <span class="config-label">Enable Audit Log</span>
+              <div class="config-control">
+                <div class="toggle active" onclick="toggleSwitch(this)">
+                  <div class="knob"></div>
+                </div>
+              </div>
+            </div>
+            <div class="config-row">
+              <span class="config-label">Max Task Age</span>
+              <div class="config-control">
+                <input class="input-field" type="text" value="72h" style="max-width:120px;">
+              </div>
+            </div>
+            <button class="save-btn">Save Changes</button>
+          </div>
+
+          <!-- Other panels (hidden) -->
+          <div id="panel-network" class="config-panel" style="display:none;">
+            <div style="font-size:13px;color:#86868B;padding:40px 0;text-align:center;">Network settings panel</div>
+          </div>
+          <div id="panel-agent-config" class="config-panel" style="display:none;">
+            <div style="font-size:13px;color:#86868B;padding:40px 0;text-align:center;">Agent Config settings panel</div>
+          </div>
+          <div id="panel-oauth" class="config-panel" style="display:none;">
+            <div style="font-size:13px;color:#86868B;padding:40px 0;text-align:center;">OAuth settings panel</div>
+          </div>
+          <div id="panel-notifications" class="config-panel" style="display:none;">
+            <div style="font-size:13px;color:#86868B;padding:40px 0;text-align:center;">Notifications settings panel</div>
+          </div>
+          <div id="panel-advanced" class="config-panel" style="display:none;">
+            <div style="font-size:13px;color:#86868B;padding:40px 0;text-align:center;">Advanced settings panel</div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- === Users Tab === -->
+    <div id="users-tab" class="tab-content">
+
+      <div class="users-toolbar">
+        <input class="search-input" type="text" placeholder="Search users...">
+        <button class="add-user-btn">+ Add User</button>
+      </div>
+
+      <div class="table-wrap">
+        <table class="user-table">
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Email</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span style="font-weight:500;">admin</span></td>
+              <td>admin@a2a.io</td>
+              <td><span class="role-badge admin">Admin</span></td>
+              <td><span class="status-tag active">Active</span></td>
+              <td>
+                <button class="ghost-btn">Edit</button>
+                <button class="ghost-btn danger">Disable</button>
+              </td>
+            </tr>
+            <tr>
+              <td>dev-1</td>
+              <td>dev1@a2a.io</td>
+              <td><span class="role-badge dev">Developer</span></td>
+              <td><span class="status-tag active">Active</span></td>
+              <td>
+                <button class="ghost-btn">Edit</button>
+                <button class="ghost-btn danger">Disable</button>
+              </td>
+            </tr>
+            <tr>
+              <td>dev-2</td>
+              <td>dev2@a2a.io</td>
+              <td><span class="role-badge dev">Developer</span></td>
+              <td><span class="status-tag active">Active</span></td>
+              <td>
+                <button class="ghost-btn">Edit</button>
+                <button class="ghost-btn danger">Disable</button>
+              </td>
+            </tr>
+            <tr>
+              <td>viewer</td>
+              <td>viewer@a2a.io</td>
+              <td><span class="role-badge viewer">Viewer</span></td>
+              <td><span class="status-tag active">Active</span></td>
+              <td>
+                <button class="ghost-btn">Edit</button>
+                <button class="ghost-btn danger">Disable</button>
+              </td>
+            </tr>
+            <tr>
+              <td>guest</td>
+              <td>guest@a2a.io</td>
+              <td><span class="role-badge viewer">Viewer</span></td>
+              <td><span class="status-tag disabled">Disabled</span></td>
+              <td>
+                <button class="ghost-btn">Edit</button>
+                <button class="ghost-btn danger">Disable</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+
+  </main>
+</div>
+
+<script>
+function switchSubtab(tabId, el) {
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.subtab-item').forEach(i => i.classList.remove('active'));
+  document.getElementById(tabId).classList.add('active');
+  el.classList.add('active');
+}
+
+function switchCategory(catId, el) {
+  document.querySelectorAll('.category-item').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  document.querySelectorAll('.config-panel').forEach(p => p.style.display = 'none');
+  document.getElementById('panel-' + catId).style.display = 'flex';
+}
+
+function toggleSwitch(el) {
+  el.classList.toggle('active');
+}
+</script>
+
+</body>
+</html>

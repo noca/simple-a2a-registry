@@ -107,6 +107,9 @@ class OrchestrationHandler:
                  registry_store: Any = None) -> None:
         self.store = store
         self.registry_store = registry_store
+        # Callback for broadcasting events to Admin UI WebSocket clients.
+        # Wired up by create_app in server.py.
+        self._broadcast_fn = None  # async callable(event_type: str, data: dict)
 
     # ----------------------------------------------------------
     # POST /v2/tasks — Create
@@ -148,6 +151,10 @@ class OrchestrationHandler:
             if "not found" in msg.lower():
                 return _json_error(400, "parent_not_found", msg)
             return _json_error(400, "validation_error", msg)
+
+        # Broadcast to Admin UI WebSocket clients
+        if self._broadcast_fn:
+            await self._broadcast_fn("created", _task_to_detail(task))
 
         return web.json_response(
             {"task": _task_to_detail(task)},
@@ -208,6 +215,11 @@ class OrchestrationHandler:
         except Exception as e:
             # Wrap state machine errors (InvalidTransitionError etc.)
             return _json_error(400, "status_error", str(e))
+
+        # Broadcast to Admin UI WebSocket clients
+        event_type = "status_changed" if "status" in body else "updated"
+        if self._broadcast_fn:
+            await self._broadcast_fn(event_type, _task_to_detail(task))
 
         return web.json_response({"task": _task_to_detail(task)})
 
@@ -311,6 +323,12 @@ class OrchestrationHandler:
                 f"Task '{task_id}' is not ready or already claimed",
             )
 
+        # Broadcast to Admin UI WebSocket clients
+        if self._broadcast_fn:
+            task_data = self.store.get_task(task_id)
+            if task_data:
+                await self._broadcast_fn("status_changed", _task_to_detail(task_data))
+
         return web.json_response(result)
 
     # ----------------------------------------------------------
@@ -357,6 +375,12 @@ class OrchestrationHandler:
                 return _json_error(404, "task_not_found", str(e))
             return _json_error(400, "validation_error", str(e))
 
+        # Broadcast to Admin UI WebSocket clients
+        if self._broadcast_fn:
+            task_data = self.store.get_task(task_id)
+            if task_data:
+                await self._broadcast_fn("status_changed", _task_to_detail(task_data))
+
         return web.json_response({
             "task_id": task_id,
             "status": TaskStatus.COMPLETED.value,
@@ -402,6 +426,12 @@ class OrchestrationHandler:
             except Exception:
                 pass
 
+        # Broadcast to Admin UI WebSocket clients
+        if self._broadcast_fn:
+            task_data = self.store.get_task(task_id)
+            if task_data:
+                await self._broadcast_fn("status_changed", _task_to_detail(task_data))
+
         return web.json_response({
             "task_id": task_id,
             "status": TaskStatus.BLOCKED.value,
@@ -442,6 +472,12 @@ class OrchestrationHandler:
                 )
             except Exception:
                 pass
+
+        # Broadcast to Admin UI WebSocket clients
+        if self._broadcast_fn:
+            task_data = self.store.get_task(task_id)
+            if task_data:
+                await self._broadcast_fn("status_changed", _task_to_detail(task_data))
 
         return web.json_response({
             "task_id": task_id,
@@ -509,6 +545,15 @@ class OrchestrationHandler:
                 return _json_error(404, "task_not_found", str(e))
             return _json_error(400, "validation_error", str(e))
 
+        # Broadcast to Admin UI WebSocket clients
+        if self._broadcast_fn:
+            task_data = self.store.get_task(task_id)
+            if task_data:
+                await self._broadcast_fn("comment_added", {
+                    **{"comment": {"id": comment.id, "author": author, "body": comment_body, "created_at": comment.created_at}},
+                    **_task_to_detail(task_data),
+                })
+
         return web.json_response(
             {"comment_id": comment.id, "created_at": comment.created_at},
             status=201,
@@ -551,6 +596,10 @@ class OrchestrationHandler:
         except InvalidTransitionError as e:
             return _json_error(400, "invalid_status", str(e))
 
+        # Broadcast to Admin UI WebSocket clients
+        if self._broadcast_fn:
+            await self._broadcast_fn("deleted", {"id": task_id, "title": task.title, "status": TaskStatus.ARCHIVED.value})
+
         return web.json_response({
             "task_id": task_id,
             "status": TaskStatus.ARCHIVED.value,
@@ -588,6 +637,12 @@ class OrchestrationHandler:
                 return _json_error(404, "task_not_found", msg)
             return _json_error(400, "validation_error", msg)
 
+        # Broadcast to Admin UI WebSocket clients
+        if self._broadcast_fn:
+            task_data = self.store.get_task(task_id)
+            if task_data:
+                await self._broadcast_fn("updated", _task_to_detail(task_data))
+
         return web.json_response({
             "task_id": task_id,
             "parent_id": parent_id,
@@ -611,6 +666,12 @@ class OrchestrationHandler:
                 404, "dependency_not_found",
                 f"Dependency parent='{parent_id}' → child='{task_id}' not found",
             )
+
+        # Broadcast to Admin UI WebSocket clients
+        if self._broadcast_fn:
+            task_data = self.store.get_task(task_id)
+            if task_data:
+                await self._broadcast_fn("updated", _task_to_detail(task_data))
 
         return web.json_response({
             "task_id": task_id,

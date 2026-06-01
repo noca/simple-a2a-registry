@@ -1,0 +1,1167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Swarm Topology — A2A Registry</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  background: #F5F5F7;
+  color: #1D1D1F;
+  min-height: 100vh;
+  display: flex;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ===== Sidebar ===== */
+.sidebar {
+  width: 220px;
+  min-width: 220px;
+  min-height: 100vh;
+  background: rgba(255,255,255,0.72);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-right: 1px solid rgba(0,0,0,0.06);
+  padding: 20px 0;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+.sidebar-logo {
+  padding: 0 16px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1D1D1F;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid rgba(0,0,0,0.05);
+  margin-bottom: 8px;
+}
+.sidebar-logo .logo-square {
+  width: 28px; height: 28px;
+  background: linear-gradient(135deg, #007AFF, #BF5AF2);
+  border-radius: 7px;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 12px; font-weight: 700;
+}
+.sidebar-item {
+  display: flex; align-items: center;
+  padding: 9px 16px;
+  font-size: 13px;
+  color: #86868B;
+  gap: 10px;
+  cursor: default;
+  transition: background .15s;
+}
+.sidebar-item:hover { background: rgba(0,0,0,0.03); }
+.sidebar-item.active {
+  color: #1D1D1F;
+  font-weight: 500;
+  background: rgba(0,122,255,0.06);
+  border-right: 2px solid #007AFF;
+}
+.sidebar-item .badge {
+  margin-left: auto;
+  background: #007AFF;
+  color: #fff;
+  font-size: 10px; font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  min-width: 18px;
+  text-align: center;
+  line-height: 1.5;
+}
+.sidebar-item .badge-dot {
+  margin-left: auto;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #30D158;
+}
+.sidebar-divider {
+  height: 1px;
+  background: rgba(0,0,0,0.05);
+  margin: 8px 16px;
+}
+.sidebar-section-label {
+  padding: 8px 16px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #86868B;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.sidebar-footer {
+  margin-top: auto;
+  padding: 12px 16px 0;
+  border-top: 1px solid rgba(0,0,0,0.06);
+  display: flex; align-items: center; gap: 8px;
+}
+.sidebar-avatar {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #007AFF, #BF5AF2);
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 12px; font-weight: 600;
+}
+.sidebar-user-info { flex: 1; min-width: 0; }
+.sidebar-user-name {
+  font-size: 13px; font-weight: 600;
+  color: #1D1D1F; line-height: 1.3;
+}
+.sidebar-user-role {
+  font-size: 11px; color: #86868B; line-height: 1.2;
+}
+.sidebar-footer-icon {
+  width: 28px; height: 28px;
+  border: none; background: rgba(0,0,0,0.04);
+  border-radius: 6px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; color: #86868B;
+  transition: background .15s; flex-shrink: 0;
+}
+.sidebar-footer-icon:hover { background: rgba(0,0,0,0.08); }
+
+/* ===== Main Content ===== */
+.main {
+  flex: 1;
+  padding: 24px 32px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ===== Tab Bar (二级 Tab) ===== */
+.tab-bar {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 20px;
+  border-bottom: 1px solid rgba(0,0,0,0.08);
+}
+.tab-item {
+  padding: 8px 20px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #86868B;
+  cursor: default;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color .15s, border-color .15s;
+}
+.tab-item:hover { color: #1D1D1F; }
+.tab-item.active {
+  color: #007AFF;
+  border-bottom: 2px solid #007AFF;
+}
+.tab-item .tab-badge {
+  display: inline-block;
+  background: rgba(0,0,0,0.06);
+  color: #86868B;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 6px;
+  border-radius: 8px;
+  margin-left: 6px;
+  line-height: 18px;
+}
+
+/* ===== Toolbar ===== */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.page-title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  color: #1D1D1F;
+}
+.page-subtitle {
+  font-size: 13px;
+  color: #86868B;
+  font-weight: 400;
+  margin-top: 2px;
+}
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* macOS Toggle Switch */
+.macos-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #86868B;
+  cursor: default;
+}
+.macos-toggle-track {
+  width: 36px; height: 20px;
+  background: #E8E8ED;
+  border-radius: 10px;
+  position: relative;
+  transition: background .2s ease;
+  flex-shrink: 0;
+}
+.macos-toggle-track.active { background: #007AFF; }
+.macos-toggle-track .knob {
+  width: 16px; height: 16px;
+  background: #fff;
+  border-radius: 50%;
+  position: absolute;
+  top: 2px; left: 2px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  transition: left .2s ease;
+}
+.macos-toggle-track.active .knob { left: 18px; }
+
+/* Primary Button */
+.btn-primary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px;
+  height: 32px;
+  background: #007AFF;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: default;
+  transition: background .15s;
+}
+.btn-primary:hover { background: #0066D6; }
+.btn-primary:active { background: #0055B3; }
+
+/* Secondary Button */
+.btn-secondary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 32px;
+  background: transparent;
+  color: #007AFF;
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: default;
+  transition: all .15s;
+}
+.btn-secondary:hover {
+  background: rgba(0,122,255,0.06);
+  border-color: rgba(0,122,255,0.3);
+}
+
+/* ===== Card ===== */
+.card {
+  background: #FFFFFF;
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  overflow: hidden;
+}
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+.card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1D1D1F;
+}
+.card-body { padding: 16px 20px; }
+
+/* ===== Swarm List Table ===== */
+.swarm-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.swarm-table th {
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #86868B;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+.swarm-table td {
+  padding: 10px 12px;
+  font-size: 13px;
+  color: #1D1D1F;
+  border-bottom: 1px solid rgba(0,0,0,0.04);
+  cursor: default;
+}
+.swarm-table tr:last-child td { border-bottom: none; }
+.swarm-table tr:hover td { background: rgba(0,0,0,0.02); }
+.swarm-table tr.selected td { background: rgba(0,122,255,0.06); }
+.swarm-table .swarm-id {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 12px;
+  color: #86868B;
+}
+
+/* Status Badge (dot + label) */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot.running { background: #BF5AF2; }
+.status-dot.completed { background: #30D158; }
+.status-dot.ready { background: #007AFF; }
+.status-dot.blocked { background: #FF9F0A; }
+.status-dot.failed { background: #FF453A; }
+
+/* ===== Main Layout: Graph + Panel ===== */
+.topology-layout {
+  display: flex;
+  gap: 20px;
+  flex: 1;
+  min-height: 0;
+}
+.topology-graph-area {
+  flex: 1.3;
+  min-width: 0;
+}
+.topology-graph-area .card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.topology-graph-area .card-body {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  overflow: hidden;
+  position: relative;
+}
+.topology-info-panel {
+  width: 340px;
+  min-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ===== SVG Topology ===== */
+.topology-svg-wrap {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+/* Topology Node */
+.topology-node {
+  cursor: default;
+  transition: transform .15s;
+}
+.topology-node:hover { transform: scale(1.05); }
+.topology-node-body {
+  rx: 10;
+  ry: 10;
+  stroke-width: 2;
+  stroke-opacity: 1;
+  fill: #fff;
+  filter: drop-shadow(0 1px 3px rgba(0,0,0,0.06));
+}
+.topology-node-text {
+  font-size: 12px;
+  font-weight: 500;
+  fill: #1D1D1F;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+.topology-node-status {
+  font-size: 10px;
+  font-weight: 500;
+  text-anchor: middle;
+}
+.topology-node.selected .topology-node-body {
+  filter: drop-shadow(0 0 0 3px rgba(0,122,255,0.25));
+}
+
+/* Edges */
+.topology-edge-line {
+  fill: none;
+  stroke: rgba(0,0,0,0.12);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+.topology-edge-arrow {
+  fill: rgba(0,0,0,0.12);
+}
+.topology-edge.animated .topology-edge-line {
+  stroke-dasharray: 6 4;
+  animation: dash-flow 1s linear infinite;
+}
+@keyframes dash-flow {
+  to { stroke-dashoffset: -10; }
+}
+
+/* Pulse animation for running nodes */
+@keyframes pulse-ring {
+  0% { opacity: 0.6; r: 6; }
+  100% { opacity: 0; r: 14; }
+}
+.pulse-ring {
+  animation: pulse-ring 2s ease-out infinite;
+}
+
+/* ===== Node Info Panel ===== */
+.info-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+.info-panel-header .node-icon {
+  width: 32px; height: 32px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px;
+  color: #fff;
+  flex-shrink: 0;
+}
+.info-panel-header .node-name {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+}
+.info-panel-header .close-btn {
+  width: 24px; height: 24px;
+  border: none; background: transparent;
+  border-radius: 4px;
+  cursor: default;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; color: #86868B;
+}
+.info-panel-header .close-btn:hover { background: rgba(0,0,0,0.06); }
+
+.info-section {
+  padding: 14px 20px;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+.info-section:last-of-type { border-bottom: none; }
+.info-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #86868B;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: 8px;
+}
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 13px;
+}
+.info-row .label { color: #86868B; }
+.info-row .value {
+  color: #1D1D1F;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 12px;
+}
+
+/* Progress bar */
+.progress-bar-track {
+  width: 100%;
+  height: 6px;
+  background: rgba(0,0,0,0.06);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width .3s ease;
+}
+.progress-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #86868B;
+  margin-bottom: 6px;
+}
+
+/* ===== Blackboard ===== */
+.blackboard-item {
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(0,0,0,0.04);
+}
+.blackboard-item:last-child { border-bottom: none; }
+.blackboard-item .bb-role {
+  font-size: 12px;
+  font-weight: 600;
+  color: #007AFF;
+  margin-bottom: 2px;
+}
+.blackboard-item .bb-content {
+  font-size: 13px;
+  color: #1D1D1F;
+  line-height: 1.5;
+}
+.blackboard-item .bb-time {
+  font-size: 11px;
+  color: #C7C7CC;
+  margin-top: 2px;
+}
+.blackboard-input-area {
+  display: flex;
+  gap: 8px;
+  padding: 12px 0 0;
+  border-top: 1px solid rgba(0,0,0,0.06);
+  margin-top: 4px;
+}
+.bb-input {
+  flex: 1;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  color: #1D1D1F;
+  outline: none;
+  background: #fff;
+  transition: border-color .15s;
+}
+.bb-input:focus { border-color: #007AFF; }
+.bb-input::placeholder { color: #C7C7CC; }
+
+/* ===== Empty State ===== */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 40px;
+  text-align: center;
+}
+.empty-state-icon { font-size: 48px; margin-bottom: 16px; opacity: 0.4; }
+.empty-state-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1D1D1F;
+  margin-bottom: 6px;
+}
+.empty-state-desc {
+  font-size: 13px;
+  color: #86868B;
+  margin-bottom: 20px;
+  max-width: 280px;
+  line-height: 1.5;
+}
+
+/* ===== Scrollbar ===== */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,0.12);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.2); }
+
+/* ===== Collapse Toggle ===== */
+.collapse-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #007AFF;
+  cursor: default;
+  background: none;
+  border: none;
+  font-family: inherit;
+  padding: 4px 0;
+}
+.collapse-toggle:hover { text-decoration: underline; }
+
+/* ===== Modal (创建 Swarm 弹窗) ===== */
+.modal-overlay {
+  display: none;
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.3);
+  backdrop-filter: blur(4px);
+  z-index: 100;
+  align-items: center; justify-content: center;
+}
+.modal-overlay.show { display: flex; }
+.modal-card {
+  width: 480px;
+  background: #fff;
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.12), 0 4px 12px rgba(0,0,0,0.06);
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+.modal-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+.modal-close {
+  width: 28px; height: 28px;
+  border: none; background: rgba(0,0,0,0.04);
+  border-radius: 6px;
+  cursor: default;
+  font-size: 14px;
+  display: flex; align-items: center; justify-content: center;
+  color: #86868B;
+}
+.modal-close:hover { background: rgba(0,0,0,0.08); }
+.modal-body { padding: 20px 24px; }
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px 24px 20px;
+  border-top: 1px solid rgba(0,0,0,0.06);
+}
+
+/* Form fields */
+.form-group { margin-bottom: 16px; }
+.form-group:last-child { margin-bottom: 0; }
+.form-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: #1D1D1F;
+  margin-bottom: 6px;
+}
+.form-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  color: #1D1D1F;
+  outline: none;
+  background: #fff;
+  transition: border-color .15s;
+}
+.form-input:focus { border-color: #007AFF; box-shadow: 0 0 0 2px rgba(0,122,255,0.15); }
+.form-input::placeholder { color: #C7C7CC; }
+.form-select {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  color: #1D1D1F;
+  outline: none;
+  background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2386868B'/%3E%3C/svg%3E") no-repeat right 12px center;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: default;
+}
+.form-select:focus { border-color: #007AFF; box-shadow: 0 0 0 2px rgba(0,122,255,0.15); }
+.form-hint {
+  font-size: 11px;
+  color: #C7C7CC;
+  margin-top: 4px;
+}
+.form-collapse { margin-top: 8px; }
+
+/* ===== Responsive ===== */
+@media (max-width: 1200px) {
+  .topology-info-panel { width: 280px; min-width: 280px; }
+  .main { padding: 20px; }
+}
+@media (max-width: 900px) {
+  .topology-layout { flex-direction: column; }
+  .topology-info-panel { width: 100%; min-width: 0; }
+}
+</style>
+</head>
+<body>
+
+<!-- ===== Sidebar ===== -->
+<div class="sidebar">
+  <div class="sidebar-logo">
+    <div class="logo-square">A2</div>
+    <span>A2A Registry</span>
+  </div>
+
+  <div class="sidebar-section-label">Main</div>
+  <div class="sidebar-item"><span>📊</span> <span>Dashboard</span></div>
+  <div class="sidebar-item"><span>🤖</span> <span>Agents</span> <span class="badge">12</span></div>
+  <div class="sidebar-item active"><span>📋</span> <span>Kanban</span> <span class="badge">5</span></div>
+  <div class="sidebar-item"><span>🔨</span> <span>Tasks</span></div>
+
+  <div class="sidebar-divider"></div>
+  <div class="sidebar-section-label">Management</div>
+  <div class="sidebar-item"><span>🔑</span> <span>Clients</span></div>
+  <div class="sidebar-item"><span>📝</span> <span>Audit Log</span></div>
+  <div class="sidebar-item"><span>⚙️</span> <span>Settings</span></div>
+  <div class="sidebar-item"><span>👥</span> <span>Users</span></div>
+
+  <div class="sidebar-footer">
+    <div class="sidebar-avatar">YP</div>
+    <div class="sidebar-user-info">
+      <div class="sidebar-user-name">Yunpeng</div>
+      <div class="sidebar-user-role">Admin</div>
+    </div>
+    <div class="sidebar-footer-icon">🌙</div>
+    <div class="sidebar-footer-icon">🚪</div>
+  </div>
+</div>
+
+<!-- ===== Main Content ===== -->
+<div class="main">
+
+  <!-- Tab Bar -->
+  <div class="tab-bar">
+    <div class="tab-item">Tasks</div>
+    <div class="tab-item">Kanban <span class="tab-badge">8</span></div>
+    <div class="tab-item active">Swarm</div>
+  </div>
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <div>
+        <div class="page-title">Swarm Topology</div>
+        <div class="page-subtitle">Agent 编排拓扑管理与可视化</div>
+      </div>
+    </div>
+    <div class="toolbar-right">
+      <div class="macos-toggle">
+        <span>Auto-refresh</span>
+        <div class="macos-toggle-track active" id="refreshToggle">
+          <div class="knob"></div>
+        </div>
+        <span style="font-size:11px;color:#C7C7CC">10s</span>
+      </div>
+      <button class="btn-primary" id="createBtn">＋ 创建 Swarm</button>
+    </div>
+  </div>
+
+  <!-- Swarm List Card -->
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-header">
+      <span class="card-title">活跃 Swarm</span>
+      <button class="collapse-toggle" id="toggleSwarmList">▾ 收起</button>
+    </div>
+    <div class="card-body" style="padding:0;" id="swarmListBody">
+      <table class="swarm-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Nodes</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="selected" data-swarm="s1">
+            <td><span class="swarm-id">swarm-prod-1</span></td>
+            <td style="font-weight:500;">Production Pipeline</td>
+            <td>8</td>
+            <td><span class="status-badge"><span class="status-dot running"></span>Running</span></td>
+            <td style="color:#86868B;font-size:12px;">2026-05-30 09:15</td>
+            <td style="text-align:right;"><span style="font-size:11px;color:#C7C7CC;">▶</span></td>
+          </tr>
+          <tr data-swarm="s2">
+            <td><span class="swarm-id">swarm-test-2</span></td>
+            <td style="font-weight:500;">Staging Test Suite</td>
+            <td>5</td>
+            <td><span class="status-badge"><span class="status-dot completed"></span>Completed</span></td>
+            <td style="color:#86868B;font-size:12px;">2026-05-29 14:30</td>
+            <td style="text-align:right;"><span style="font-size:11px;color:#C7C7CC;">▶</span></td>
+          </tr>
+          <tr data-swarm="s3">
+            <td><span class="swarm-id">swarm-dev-3</span></td>
+            <td style="font-weight:500;">Dev Experiment v2</td>
+            <td>3</td>
+            <td><span class="status-badge"><span class="status-dot blocked"></span>Blocked</span></td>
+            <td style="color:#86868B;font-size:12px;">2026-05-28 11:00</td>
+            <td style="text-align:right;"><span style="font-size:11px;color:#C7C7CC;">▶</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Topology Layout -->
+  <div class="topology-layout">
+    <!-- Topology Graph -->
+    <div class="topology-graph-area">
+      <div class="card" style="height:100%;">
+        <div class="card-header">
+          <span class="card-title">Pipeline: Production Pipeline</span>
+          <span class="status-badge"><span class="status-dot running"></span>Running · 4/35 tasks</span>
+        </div>
+        <div class="card-body">
+          <div class="topology-svg-wrap" id="topologyContainer">
+            <svg id="topologySvg" width="600" height="420" viewBox="0 0 600 420" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <!-- Arrowhead marker -->
+                <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+                  <path d="M0,0 L10,5 L0,10 Z" fill="rgba(0,0,0,0.15)"/>
+                </marker>
+                <!-- Arrow for animated edges -->
+                <marker id="arrow-animated" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+                  <path d="M0,0 L10,5 L0,10 Z" fill="rgba(191,90,242,0.4)"/>
+                </marker>
+                <!-- Gradients -->
+                <linearGradient id="gradRoot" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#007AFF"/>
+                  <stop offset="100%" stop-color="#007AFF" stop-opacity="0.15"/>
+                </linearGradient>
+                <linearGradient id="gradWorker" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#BF5AF2"/>
+                  <stop offset="100%" stop-color="#BF5AF2" stop-opacity="0.15"/>
+                </linearGradient>
+                <!-- Drop shadows for nodes -->
+                <filter id="nodeShadow" x="-10%" y="-10%" width="130%" height="140%">
+                  <feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.08"/>
+                </filter>
+                <filter id="nodeShadowSelected" x="-20%" y="-20%" width="150%" height="160%">
+                  <feDropShadow dx="0" dy="2" stdDeviation="4" flood-opacity="0.18"/>
+                </filter>
+              </defs>
+
+              <!-- Background subtle grid -->
+              <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+                <path d="M 20 0 L 0 0 0 20" fill="none" stroke="rgba(0,0,0,0.03)" stroke-width="0.5"/>
+              </pattern>
+              <rect width="600" height="420" fill="url(#grid)"/>
+
+              <!-- EDGES (drawn behind nodes) -->
+              <!-- Root → Workers -->
+              <g class="topology-edge animated">
+                <path class="topology-edge-line" d="M300,80 L300,115" marker-end="url(#arrow-animated)"/>
+              </g>
+              <!-- Root → Worker branches -->
+              <path class="topology-edge-line" d="M300,80 L140,115" marker-end="url(#arrow)"/>
+              <path class="topology-edge-line" d="M300,80 L220,115" marker-end="url(#arrow)"/>
+              <path class="topology-edge-line" d="M300,80 L380,115" marker-end="url(#arrow)"/>
+              <path class="topology-edge-line" d="M300,80 L460,115" marker-end="url(#arrow)"/>
+
+              <!-- Workers → Verifier (bezier curves merging) -->
+              <path class="topology-edge-line" d="M140,175 Q140,210 300,230" marker-end="url(#arrow)"/>
+              <path class="topology-edge-line" d="M220,175 Q220,210 300,230" marker-end="url(#arrow)"/>
+              <path class="topology-edge-line" d="M300,175 L300,215" marker-end="url(#arrow)"/>
+              <path class="topology-edge-line" d="M380,175 Q380,210 300,230" marker-end="url(#arrow)"/>
+              <path class="topology-edge-line" d="M460,175 Q460,210 300,230" marker-end="url(#arrow)"/>
+
+              <!-- Verifier → Synthesizer -->
+              <path class="topology-edge-line" d="M300,290 L300,325" marker-end="url(#arrow)"/>
+
+              <!-- Synthesizer → Output indicator -->
+              <path class="topology-edge-line" d="M300,385 L300,405" marker-end="url(#arrow)"/>
+
+              <!-- NODES -->
+              <!-- Row 0: Root (centered at x=300, y=40) -->
+              <g class="topology-node selected" transform="translate(230,40)">
+                <rect class="topology-node-body" width="140" height="40" rx="10" ry="10"
+                      fill="white" stroke="#007AFF" stroke-width="2" filter="url(#nodeShadowSelected)"/>
+                <text class="topology-node-text" x="70" y="16" fill="#007AFF">◉  Root Agent</text>
+                <text class="topology-node-status" x="70" y="31" fill="#007AFF">● running  ·  2m</text>
+                <!-- Pulse ring -->
+                <circle cx="20" cy="12" r="6" fill="none" stroke="#007AFF" stroke-width="1" class="pulse-ring"/>
+              </g>
+
+              <!-- Row 1: Workers (5 nodes spaced at x=140, 220, 300, 380, 460) -->
+              <g class="topology-node" transform="translate(70,120)">
+                <rect class="topology-node-body" width="140" height="55" rx="10" ry="10"
+                      fill="white" stroke="#BF5AF2" stroke-width="2" filter="url(#nodeShadow)"/>
+                <text class="topology-node-text" x="70" y="19" fill="#BF5AF2">⚙  Worker A</text>
+                <text class="topology-node-status" x="70" y="34" fill="#30D158">● completed  ·  3/3</text>
+              </g>
+
+              <g class="topology-node" transform="translate(150,120)">
+                <rect class="topology-node-body" width="140" height="55" rx="10" ry="10"
+                      fill="white" stroke="#BF5AF2" stroke-width="2" filter="url(#nodeShadow)"/>
+                <text class="topology-node-text" x="70" y="19" fill="#BF5AF2">⚙  Worker B</text>
+                <text class="topology-node-status" x="70" y="34" fill="#BF5AF2">● running  ·  12/20</text>
+              </g>
+
+              <g class="topology-node" transform="translate(230,120)">
+                <rect class="topology-node-body" width="140" height="55" rx="10" ry="10"
+                      fill="white" stroke="#BF5AF2" stroke-width="2" filter="url(#nodeShadow)"/>
+                <text class="topology-node-text" x="70" y="19" fill="#BF5AF2">⚙  Worker C</text>
+                <text class="topology-node-status" x="70" y="34" fill="#30D158">● completed  ·  8/8</text>
+              </g>
+
+              <g class="topology-node" transform="translate(310,120)">
+                <rect class="topology-node-body" width="140" height="55" rx="10" ry="10"
+                      fill="white" stroke="#BF5AF2" stroke-width="2" filter="url(#nodeShadow)"/>
+                <text class="topology-node-text" x="70" y="19" fill="#BF5AF2">⚙  Worker D</text>
+                <text class="topology-node-status" x="70" y="34" fill="#FF9F0A">● blocked  ·  API err</text>
+              </g>
+
+              <g class="topology-node" transform="translate(390,120)">
+                <rect class="topology-node-body" width="140" height="55" rx="10" ry="10"
+                      fill="white" stroke="#BF5AF2" stroke-width="2" filter="url(#nodeShadow)"/>
+                <text class="topology-node-text" x="70" y="19" fill="#BF5AF2">⚙  Worker E</text>
+                <text class="topology-node-status" x="70" y="34" fill="#86868B">● pending</text>
+              </g>
+
+              <!-- Row 2: Verifier (centered at x=300) -->
+              <g class="topology-node" transform="translate(230,240)">
+                <rect class="topology-node-body" width="140" height="50" rx="10" ry="10"
+                      fill="white" stroke="#FF9F0A" stroke-width="2" filter="url(#nodeShadow)"/>
+                <text class="topology-node-text" x="70" y="16" fill="#FF9F0A">✓  Verifier</text>
+                <text class="topology-node-status" x="70" y="31" fill="#86868B">● waiting  ·  0/5</text>
+              </g>
+
+              <!-- Row 3: Synthesizer (centered at x=300) -->
+              <g class="topology-node" transform="translate(230,335)">
+                <rect class="topology-node-body" width="140" height="50" rx="10" ry="10"
+                      fill="white" stroke="#30D158" stroke-width="2" filter="url(#nodeShadow)"/>
+                <text class="topology-node-text" x="70" y="16" fill="#30D158">⊕  Synthesizer</text>
+                <text class="topology-node-status" x="70" y="31" fill="#86868B">● waiting</text>
+              </g>
+
+              <!-- Status legend -->
+              <g transform="translate(10, 10)">
+                <rect width="180" height="32" rx="6" fill="rgba(255,255,255,0.9)" stroke="rgba(0,0,0,0.06)"/>
+                <circle cx="16" cy="16" r="4" fill="#30D158"/><text x="24" y="20" font-size="10" fill="#86868B" font-weight="500">Completed</text>
+                <circle cx="76" cy="16" r="4" fill="#BF5AF2"/><text x="84" y="20" font-size="10" fill="#86868B" font-weight="500">Running</text>
+                <circle cx="136" cy="16" r="4" fill="#86868B"/><text x="144" y="20" font-size="10" fill="#86868B" font-weight="500">Waiting</text>
+              </g>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Panel -->
+    <div class="topology-info-panel">
+      <!-- Node Info Card -->
+      <div class="card">
+        <div class="info-panel-header">
+          <div class="node-icon" style="background:linear-gradient(135deg,#BF5AF2,#BF5AF2CC);">
+            ⚙
+          </div>
+          <span class="node-name">Worker B</span>
+          <span class="close-btn" id="closeInfoPanel">✕</span>
+        </div>
+
+        <!-- Status -->
+        <div class="info-section">
+          <div class="info-section-label">Status</div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="status-badge">
+              <span class="status-dot running"></span>
+              <span style="font-weight:600;">Running</span>
+            </span>
+            <span style="font-size:12px;color:#86868B;">Online · 3m</span>
+          </div>
+        </div>
+
+        <!-- Task Progress -->
+        <div class="info-section">
+          <div class="info-section-label">Task Progress</div>
+          <div class="progress-label">
+            <span>12 / 20 completed</span>
+            <span>60%</span>
+          </div>
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill" style="width:60%;background:linear-gradient(90deg,#BF5AF2,#007AFF);"></div>
+          </div>
+        </div>
+
+        <!-- Metadata -->
+        <div class="info-section">
+          <div class="info-section-label">Properties</div>
+          <div class="info-row">
+            <span class="label">ID</span>
+            <span class="value">wrk-b-001</span>
+          </div>
+          <div class="info-row">
+            <span class="label">Role</span>
+            <span class="value" style="font-family:inherit;">worker (llm)</span>
+          </div>
+          <div class="info-row">
+            <span class="label">Provider</span>
+            <span class="value" style="font-family:inherit;">openai/gpt-4o</span>
+          </div>
+          <div class="info-row">
+            <span class="label">Created</span>
+            <span class="value" style="font-family:inherit;">2026-05-30 09:15</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Blackboard Card -->
+      <div class="card" style="flex:1;">
+        <div class="card-header">
+          <span class="card-title">📋 Blackboard</span>
+          <span style="font-size:12px;color:#86868B;">3 comments</span>
+        </div>
+        <div class="card-body" style="max-height:240px;overflow-y:auto;">
+          <!-- Blackboard entries -->
+          <div class="blackboard-item">
+            <div class="bb-role">🤖 Root Agent</div>
+            <div class="bb-content">Init: 编排开始，分配 5 个 Worker 子任务</div>
+            <div class="bb-time">09:15:12</div>
+          </div>
+          <div class="blackboard-item">
+            <div class="bb-role">⚙ Worker A</div>
+            <div class="bb-content">完成：Task #2-#4 输出缓存至 /tmp/swarm/s1/wkr-a/</div>
+            <div class="bb-time">09:18:45</div>
+          </div>
+          <div class="blackboard-item">
+            <div class="bb-role">⚙ Worker D</div>
+            <div class="bb-content">⚠ 异常：调用 OpenAI API 超时 (timeout=30s)，正在重试第 2 次</div>
+            <div class="bb-time">09:22:03</div>
+          </div>
+
+          <!-- Input area -->
+          <div class="blackboard-input-area">
+            <input class="bb-input" placeholder="发送消息到 Blackboard..." />
+            <button class="btn-primary" style="flex-shrink:0;">发送</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Create Swarm Modal ===== -->
+<div class="modal-overlay" id="createModal">
+  <div class="modal-card">
+    <div class="modal-header">
+      <span class="modal-title">创建新 Swarm</span>
+      <span class="modal-close" id="modalClose">✕</span>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Swarm Name</label>
+        <input class="form-input" placeholder="例如：Production Pipeline" />
+        <div class="form-hint">唯一的编排标识名称</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Root Agent</label>
+        <select class="form-select">
+          <option>openai/gpt-4o (primary-agent)</option>
+          <option>claude/sonnet-4 (coding-agent)</option>
+          <option>gemini/pro-2 (search-agent)</option>
+          <option>deepseek/v3 (reasoning-agent)</option>
+        </select>
+        <div class="form-hint">从已注册的 Agents 中选择根节点</div>
+      </div>
+      <div class="form-collapse">
+        <button class="collapse-toggle">▸ 高级选项</button>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" id="modalCancel">取消</button>
+      <button class="btn-primary">＋ 创建 Swarm</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Tab bar interaction demo
+document.querySelectorAll('.tab-item').forEach(tab => {
+  tab.addEventListener('click', function() {
+    document.querySelectorAll('.tab-item').forEach(t => t.classList.remove('active'));
+    this.classList.add('active');
+  });
+});
+
+// Swarm list row selection
+document.querySelectorAll('.swarm-table tbody tr').forEach(row => {
+  row.addEventListener('click', function() {
+    document.querySelectorAll('.swarm-table tbody tr').forEach(r => r.classList.remove('selected'));
+    this.classList.add('selected');
+  });
+});
+
+// Toggle refresh
+document.getElementById('refreshToggle').addEventListener('click', function() {
+  this.classList.toggle('active');
+});
+
+// Toggle swarm list collapse
+let swarmCollapsed = false;
+document.getElementById('toggleSwarmList').addEventListener('click', function() {
+  const body = document.getElementById('swarmListBody');
+  swarmCollapsed = !swarmCollapsed;
+  body.style.display = swarmCollapsed ? 'none' : 'block';
+  this.textContent = swarmCollapsed ? '▸ 展开' : '▾ 收起';
+});
+
+// Modal open/close
+document.getElementById('createBtn').addEventListener('click', function() {
+  document.getElementById('createModal').classList.add('show');
+});
+function closeModal() {
+  document.getElementById('createModal').classList.remove('show');
+}
+document.getElementById('modalClose').addEventListener('click', closeModal);
+document.getElementById('modalCancel').addEventListener('click', closeModal);
+document.getElementById('createModal').addEventListener('click', function(e) {
+  if (e.target === this) closeModal();
+});
+
+// Close info panel
+document.getElementById('closeInfoPanel').addEventListener('click', function() {
+  this.closest('.card').style.opacity = '0.5';
+  this.closest('.card').querySelector('.node-name').textContent = 'Root Agent';
+  this.closest('.card').querySelector('.node-icon').style.background = 'linear-gradient(135deg,#007AFF,#007AFFCC)';
+  this.closest('.card').querySelector('.node-icon').textContent = '◉';
+});
+
+// Simulate node click on SVG nodes
+document.querySelectorAll('.topology-node').forEach(node => {
+  node.addEventListener('click', function() {
+    document.querySelectorAll('.topology-node').forEach(n => n.classList.remove('selected'));
+    this.classList.add('selected');
+  });
+});
+</script>
+
+</body>
+</html>

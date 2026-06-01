@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import secrets
 import time
 import uuid
@@ -26,6 +27,7 @@ from aiohttp import web
 
 from simple_a2a_registry.database import DatabaseEngine
 from simple_a2a_registry.audit import AuditStore, EventType
+from simple_a2a_registry.auth import create_token, ISSUER, SCOPES
 
 logger = logging.getLogger("a2a_registry.users")
 
@@ -255,23 +257,50 @@ class UserStore:
         Returns the initial password (logged but also returned for the caller).
         """
         users = self.list_users()
+        if users and "ADMIN_PASSWORD" in os.environ:
+            # Env var set — update existing admin password
+            self.update_user("admin", password=os.environ["ADMIN_PASSWORD"])
+            logger.info(
+                "╔══════════════════════════════════════════════════════════╗\n"
+                "║  🔐 ADMIN PASSWORD UPDATED (ADMIN_PASSWORD env var)      ║\n"
+                "║                                                          ║\n"
+                "║  Username: admin                                        ║\n"
+                "║  Password: %-37s  ║\n"
+                "║  Role:     admin                                        ║\n"
+                "╚══════════════════════════════════════════════════════════╝",
+                os.environ["ADMIN_PASSWORD"],
+            )
+            return os.environ["ADMIN_PASSWORD"]
         if users:
             return ""  # already bootstrapped
 
-        initial_password = secrets.token_urlsafe(12)
+        initial_password = os.environ.get("ADMIN_PASSWORD") or secrets.token_urlsafe(12)
+        is_env_set = "ADMIN_PASSWORD" in os.environ
         self.create_user("admin", initial_password, role="admin")
-        logger.info(
-            "╔══════════════════════════════════════════════════════════╗\n"
-            "║  🔐 BOOTSTRAPPED DEFAULT ADMIN ACCOUNT                  ║\n"
-            "║                                                          ║\n"
-            "║  Username: admin                                        ║\n"
-            "║  Password: %-37s  ║\n"
-            "║  Role:     admin                                        ║\n"
-            "║                                                          ║\n"
-            "║  ⚠️  CHANGE THIS PASSWORD IMMEDIATELY AFTER FIRST LOGIN  ║\n"
-            "╚══════════════════════════════════════════════════════════╝",
-            initial_password,
-        )
+        if is_env_set:
+            logger.info(
+                "╔══════════════════════════════════════════════════════════╗\n"
+                "║  🔐 BOOTSTRAPPED DEFAULT ADMIN ACCOUNT (env var)        ║\n"
+                "║                                                          ║\n"
+                "║  Username: admin                                        ║\n"
+                "║  Password: %-37s  ║\n"
+                "║  Role:     admin                                        ║\n"
+                "╚══════════════════════════════════════════════════════════╝",
+                initial_password,
+            )
+        else:
+            logger.info(
+                "╔══════════════════════════════════════════════════════════╗\n"
+                "║  🔐 BOOTSTRAPPED DEFAULT ADMIN ACCOUNT                  ║\n"
+                "║                                                          ║\n"
+                "║  Username: admin                                        ║\n"
+                "║  Password: %-37s  ║\n"
+                "║  Role:     admin                                        ║\n"
+                "║                                                          ║\n"
+                "║  ⚠️  CHANGE THIS PASSWORD IMMEDIATELY AFTER FIRST LOGIN  ║\n"
+                "╚══════════════════════════════════════════════════════════╝",
+                initial_password,
+            )
         return initial_password
 
 
@@ -436,6 +465,11 @@ def user_session_middleware_factory(
             return True
         if path.startswith("/auth/"):
             return True
+        if path.startswith("/assets/"):
+            return True
+        # /v1/* and /v2/* endpoints are protected by OAuth Bearer auth middleware, not session cookies
+        if path.startswith("/v1/") or path.startswith("/v2/"):
+            return True
         return False
 
     @web.middleware
@@ -466,7 +500,7 @@ def user_session_middleware_factory(
             return await handler(request)
 
         # API paths — return 401 JSON if no session
-        is_api = path.startswith("/api/") or path.startswith("/admin/") or path.startswith("/v1/")
+        is_api = path.startswith("/api/") or path.startswith("/admin")
 
         session = session_manager.get_session(request)
         if session is None:
@@ -502,38 +536,26 @@ class UserHandler:
         session_manager: SessionManager,
         *,
         audit_store: Optional[AuditStore] = None,
+        auth_private_key: Optional[str] = None,
+        auth_algorithm: str = "HS256",
     ) -> None:
         self.user_store = user_store
         self.session_manager = session_manager
         self.audit_store = audit_store
+        self._auth_private_key = auth_private_key
+        self._auth_algorithm = auth_algorithm
 
     # ------------------------------------------------------------------
     # Login / Logout
     # ------------------------------------------------------------------
 
     async def handle_login_page(self, request: web.Request) -> web.StreamResponse:
-        """GET /login — serve the login page.
-
-        If user is already logged in, redirect to dashboard.
+        """GET /login — redirect to React SPA.
+        
+        The React SPA (served at /) handles client-side routing;
+        showing the Login component when no session exists.
         """
-        session = self.session_manager.get_session(request)
-        if session:
-            return web.HTTPFound("/")
-
-        static_dir = Path(__file__).parent / "static"
-        login_html_path = static_dir / "login.html"
-        if not login_html_path.is_file():
-            return web.Response(
-                text="<html><body><h1>Login page not found</h1></body></html>",
-                content_type="text/html",
-                status=500,
-            )
-        html = login_html_path.read_text(encoding="utf-8")
-        return web.Response(
-            text=html,
-            content_type="text/html",
-            charset="utf-8",
-        )
+        return web.HTTPFound("/")
 
     async def handle_login(self, request: web.Request) -> web.Response:
         """POST /api/login — authenticate with username/password.
@@ -579,13 +601,36 @@ class UserHandler:
             )
 
         # Create session
-        token = self.session_manager.create_session(user.username, user.role)
+        session_token = self.session_manager.create_session(user.username, user.role)
+
+        # Also create a JWT Bearer token for the API auth middleware (/v1/* etc.)
+        # Owner scope covers role-based access; admin role gets full access.
+        if user.role == "admin":
+            bearer_scope = "registry:admin agent:admin agent:register agent:read task:write task:read"
+        elif user.role == "operator":
+            bearer_scope = "agent:register agent:read task:write task:read"
+        else:
+            bearer_scope = "task:read agent:read"
+
+        bearer_token = ""
+        if self._auth_private_key:
+            from simple_a2a_registry.auth import TOKEN_EXPIRY_SECONDS
+            bearer_token = create_token(
+                sub=f"user:{user.username}",
+                private_key=self._auth_private_key,
+                algorithm=self._auth_algorithm,
+                scope=bearer_scope,
+                expiry=TOKEN_EXPIRY_SECONDS,
+                issuer=ISSUER,
+            )
+
         resp = web.json_response({
+            "token": bearer_token,
             "success": True,
             "username": user.username,
             "role": user.role,
         })
-        self.session_manager.set_session_cookie(resp, token)
+        self.session_manager.set_session_cookie(resp, session_token)
 
         if self.audit_store is not None:
             self.audit_store.log(

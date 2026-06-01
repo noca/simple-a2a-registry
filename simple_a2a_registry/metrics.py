@@ -58,6 +58,11 @@ ws_connections = Gauge(
     "Number of active WebSocket connections from agents",
 )
 
+admin_ws_connections = Gauge(
+    "a2a_registry_admin_ws_connections",
+    "Number of active Admin WebSocket connections",
+)
+
 db_pool_size = Gauge(
     "a2a_registry_db_pool_size",
     "Current database connection pool size",
@@ -174,6 +179,11 @@ def update_agent_gauges(alive: int, stale: int) -> None:
 def update_ws_connections(count: int) -> None:
     """Update ``ws_connections`` gauge."""
     ws_connections.set(count)
+
+
+def update_admin_ws_connections(count: int) -> None:
+    """Update ``admin_ws_connections`` gauge."""
+    admin_ws_connections.set(count)
 
 
 def update_db_pool_size(size: int) -> None:

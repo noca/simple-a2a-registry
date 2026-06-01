@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agents — A2A Registry</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', sans-serif;
+    background: #F5F5F7;
+    color: #1D1D1F;
+    min-height: 100vh;
+    display: flex;
+  }
+
+  /* ─── Sidebar ─── */
+  .sidebar {
+    width: 220px;
+    min-width: 220px;
+    height: 100vh;
+    position: fixed;
+    left: 0;
+    top: 0;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    background: rgba(255,255,255,0.72);
+    border-right: 1px solid rgba(0,0,0,0.06);
+    display: flex;
+    flex-direction: column;
+    padding: 24px 16px;
+    z-index: 10;
+  }
+
+  .sidebar-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 8px 24px;
+    font-size: 16px;
+    font-weight: 600;
+    color: #1D1D1F;
+    letter-spacing: -0.2px;
+  }
+
+  .sidebar-brand-icon {
+    width: 28px;
+    height: 28px;
+    background: linear-gradient(135deg, #007AFF, #AF52DE);
+    border-radius: 7px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .sidebar-nav {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .sidebar-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #6E6E73;
+    text-decoration: none;
+    transition: background 0.15s, color 0.15s;
+    cursor: default;
+  }
+
+  .sidebar-nav-item:hover {
+    background: rgba(0,0,0,0.04);
+  }
+
+  .sidebar-nav-item.active {
+    background: linear-gradient(135deg, rgba(0,122,255,0.10), rgba(175,82,222,0.10));
+    color: #007AFF;
+    font-weight: 600;
+  }
+
+  .sidebar-nav-item .icon {
+    width: 20px;
+    text-align: center;
+    font-size: 15px;
+  }
+
+  .sidebar-bottom {
+    margin-top: auto;
+    padding-top: 20px;
+  }
+
+  .sidebar-nav-item.user-item {
+    border-top: 1px solid rgba(0,0,0,0.06);
+    padding-top: 12px;
+    margin-top: 8px;
+  }
+
+  /* ─── Main Content ─── */
+  .main {
+    margin-left: 220px;
+    flex: 1;
+    padding: 24px 32px;
+    min-height: 100vh;
+    background: #F5F5F7;
+  }
+
+  /* ─── Header ─── */
+  .page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+  }
+
+  .page-title {
+    font-size: 22px;
+    font-weight: 600;
+    color: #1D1D1F;
+    letter-spacing: -0.3px;
+  }
+
+  .btn-new-agent {
+    background: linear-gradient(135deg, #007AFF, #AF52DE);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: opacity 0.15s, transform 0.1s;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  }
+
+  .btn-new-agent:hover {
+    opacity: 0.85;
+  }
+
+  .btn-new-agent:active {
+    transform: scale(0.97);
+  }
+
+  /* ─── Filter Bar ─── */
+  .filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+
+  .search-input {
+    background: #F5F5F7;
+    border: 1px solid rgba(0,0,0,0.1);
+    border-radius: 8px;
+    padding: 8px 12px;
+    width: 240px;
+    font-size: 13px;
+    color: #1D1D1F;
+    outline: none;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', sans-serif;
+    transition: border-color 0.15s;
+  }
+
+  .search-input::placeholder {
+    color: #86868B;
+  }
+
+  .search-input:focus {
+    border-color: #007AFF;
+  }
+
+  .status-filter {
+    background: #F5F5F7;
+    border: 1px solid rgba(0,0,0,0.1);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 13px;
+    color: #1D1D1F;
+    outline: none;
+    cursor: pointer;
+    min-width: 120px;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', sans-serif;
+    transition: border-color 0.15s;
+  }
+
+  .status-filter:focus {
+    border-color: #007AFF;
+  }
+
+  .view-toggle {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+  }
+
+  .view-toggle-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    border: 1px solid rgba(0,0,0,0.1);
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    color: #86868B;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+
+  .view-toggle-btn.active {
+    background: #fff;
+    border-color: rgba(0,0,0,0.1);
+    color: #1D1D1F;
+  }
+
+  .view-toggle-btn:hover {
+    background: rgba(0,0,0,0.04);
+  }
+
+  /* ─── Agent Cards Grid ─── */
+  .agent-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 12px;
+  }
+
+  .agent-card {
+    background: #FFFFFF;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    padding: 16px 20px;
+    transition: box-shadow 0.2s, transform 0.15s;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .agent-card:hover {
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  }
+
+  /* Row 1: Name + Status */
+  .agent-card-row1 {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .agent-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: #1D1D1F;
+  }
+
+  /* Status badge */
+  .status-badge {
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: 6px;
+    padding: 2px 8px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* Online */
+  .status-online {
+    background: rgba(48,209,88,0.1);
+    color: #248A3D;
+  }
+  .status-online .status-dot {
+    background: #30D158;
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  /* Stale */
+  .status-stale {
+    background: rgba(255,214,10,0.12);
+    color: #AD7D00;
+  }
+  .status-stale .status-dot {
+    background: #FFD60A;
+  }
+
+  /* Offline */
+  .status-offline {
+    background: rgba(255,69,58,0.1);
+    color: #BF3A2E;
+  }
+  .status-offline .status-dot {
+    background: #FF453A;
+  }
+
+  /* Running */
+  .status-running {
+    background: rgba(191,90,242,0.1);
+    color: #8B3DB8;
+  }
+  .status-running .status-dot {
+    background: #BF5AF2;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  /* Row 2: ID */
+  .agent-id {
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 11px;
+    color: #86868B;
+  }
+
+  /* Row 3: Capabilities tags */
+  .agent-capabilities {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .cap-tag {
+    font-size: 11px;
+    font-weight: 500;
+    background: rgba(0,122,255,0.08);
+    color: #007AFF;
+    border-radius: 6px;
+    padding: 2px 8px;
+    white-space: nowrap;
+  }
+
+  /* Row 4: URL + Version */
+  .agent-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #86868B;
+  }
+
+  .agent-url {
+    color: #86868B;
+    text-decoration: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 160px;
+  }
+
+  .agent-url:hover {
+    color: #007AFF;
+  }
+
+  .agent-version {
+    flex-shrink: 0;
+  }
+
+  /* ─── Action Buttons ─── */
+  .agent-actions {
+    position: absolute;
+    bottom: 16px;
+    right: 20px;
+    display: flex;
+    gap: 4px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .agent-card:hover .agent-actions {
+    opacity: 1;
+  }
+
+  .btn-ghost {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    color: #86868B;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .btn-ghost:hover {
+    background: rgba(0,0,0,0.05);
+  }
+
+  .btn-delete:hover {
+    color: #FF453A;
+    background: rgba(255,69,58,0.08);
+  }
+
+  .btn-edit:hover {
+    color: #007AFF;
+    background: rgba(0,122,255,0.08);
+  }
+
+  /* ─── Responsive ─── */
+  @media (max-width: 768px) {
+    .sidebar {
+      width: 64px;
+      min-width: 64px;
+      padding: 24px 10px;
+      align-items: center;
+    }
+    .sidebar-brand span, .sidebar-nav-item span:not(.icon) {
+      display: none;
+    }
+    .sidebar-nav-item {
+      justify-content: center;
+      padding: 8px;
+    }
+    .main {
+      margin-left: 64px;
+      padding: 20px 16px;
+    }
+    .filter-bar {
+      flex-wrap: wrap;
+    }
+    .search-input {
+      width: 100%;
+    }
+    .view-toggle {
+      margin-left: 0;
+    }
+    .agent-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+</head>
+<body>
+
+<!-- ─── Sidebar ─── -->
+<aside class="sidebar">
+  <div class="sidebar-brand">
+    <div class="sidebar-brand-icon">A</div>
+    <span>A2A Registry</span>
+  </div>
+
+  <ul class="sidebar-nav">
+    <li class="sidebar-nav-item">
+      <span class="icon">📊</span><span>Dashboard</span>
+    </li>
+    <li class="sidebar-nav-item active">
+      <span class="icon">🤖</span><span>Agents</span>
+    </li>
+    <li class="sidebar-nav-item">
+      <span class="icon">🔌</span><span>Integrations</span>
+    </li>
+    <li class="sidebar-nav-item">
+      <span class="icon">📡</span><span>Endpoints</span>
+    </li>
+    <li class="sidebar-nav-item">
+      <span class="icon">📝</span><span>Logs</span>
+    </li>
+    <li class="sidebar-nav-item">
+      <span class="icon">⚙️</span><span>Settings</span>
+    </li>
+    <li class="sidebar-nav-item">
+      <span class="icon">🔐</span><span>Security</span>
+    </li>
+    <li class="sidebar-nav-item">
+      <span class="icon">❓</span><span>Help</span>
+    </li>
+  </ul>
+
+  <div class="sidebar-bottom">
+    <ul class="sidebar-nav">
+      <li class="sidebar-nav-item user-item">
+        <span class="icon">👤</span><span>Admin</span>
+      </li>
+    </ul>
+  </div>
+</aside>
+
+<!-- ─── Main Content ─── -->
+<main class="main">
+
+  <!-- Header -->
+  <div class="page-header">
+    <h1 class="page-title">Agents</h1>
+    <button class="btn-new-agent">+ New Agent</button>
+  </div>
+
+  <!-- Filter Bar -->
+  <div class="filter-bar">
+    <input class="search-input" type="text" placeholder="Search agents…">
+    <select class="status-filter">
+      <option>All Status</option>
+      <option>Online</option>
+      <option>Stale</option>
+      <option>Offline</option>
+      <option>Running</option>
+    </select>
+    <div class="view-toggle">
+      <button class="view-toggle-btn active" title="Card view">▦</button>
+      <button class="view-toggle-btn" title="Table view">☰</button>
+    </div>
+  </div>
+
+  <!-- Agent Grid -->
+  <div class="agent-grid">
+
+    <!-- Agent Alpha -->
+    <div class="agent-card">
+      <div class="agent-card-row1">
+        <span class="agent-name">agent-alpha</span>
+        <span class="status-badge status-online"><span class="status-dot"></span>Online</span>
+      </div>
+      <div class="agent-id">ag_a1b2c3</div>
+      <div class="agent-capabilities">
+        <span class="cap-tag">llm</span>
+        <span class="cap-tag">knowledge</span>
+        <span class="cap-tag">code</span>
+      </div>
+      <div class="agent-meta">
+        <span class="agent-url">http://agent-alpha.local:8080</span>
+        <span class="agent-version">v2.1.0</span>
+      </div>
+      <div class="agent-actions">
+        <button class="btn-ghost btn-edit" title="Edit">✏️</button>
+        <button class="btn-ghost btn-delete" title="Delete">🗑️</button>
+      </div>
+    </div>
+
+    <!-- Agent Beta -->
+    <div class="agent-card">
+      <div class="agent-card-row1">
+        <span class="agent-name">agent-beta</span>
+        <span class="status-badge status-online"><span class="status-dot"></span>Online</span>
+      </div>
+      <div class="agent-id">ag_d4e5f6</div>
+      <div class="agent-capabilities">
+        <span class="cap-tag">search</span>
+        <span class="cap-tag">summarize</span>
+      </div>
+      <div class="agent-meta">
+        <span class="agent-url">http://agent-beta.local:8080</span>
+        <span class="agent-version">v1.4.0</span>
+      </div>
+      <div class="agent-actions">
+        <button class="btn-ghost btn-edit" title="Edit">✏️</button>
+        <button class="btn-ghost btn-delete" title="Delete">🗑️</button>
+      </div>
+    </div>
+
+    <!-- Agent Gamma -->
+    <div class="agent-card">
+      <div class="agent-card-row1">
+        <span class="agent-name">agent-gamma</span>
+        <span class="status-badge status-stale"><span class="status-dot"></span>Stale 3m</span>
+      </div>
+      <div class="agent-id">ag_g7h8i9</div>
+      <div class="agent-capabilities">
+        <span class="cap-tag">monitor</span>
+        <span class="cap-tag">alert</span>
+      </div>
+      <div class="agent-meta">
+        <span class="agent-url">http://agent-gamma.local:8080</span>
+        <span class="agent-version">v0.9.5</span>
+      </div>
+      <div class="agent-actions">
+        <button class="btn-ghost btn-edit" title="Edit">✏️</button>
+        <button class="btn-ghost btn-delete" title="Delete">🗑️</button>
+      </div>
+    </div>
+
+    <!-- Agent Delta -->
+    <div class="agent-card">
+      <div class="agent-card-row1">
+        <span class="agent-name">agent-delta</span>
+        <span class="status-badge status-online"><span class="status-dot"></span>Online</span>
+      </div>
+      <div class="agent-id">ag_j0k1l2</div>
+      <div class="agent-capabilities">
+        <span class="cap-tag">translate</span>
+        <span class="cap-tag">vision</span>
+        <span class="cap-tag">speech</span>
+      </div>
+      <div class="agent-meta">
+        <span class="agent-url">http://agent-delta.local:8080</span>
+        <span class="agent-version">v3.0.1</span>
+      </div>
+      <div class="agent-actions">
+        <button class="btn-ghost btn-edit" title="Edit">✏️</button>
+        <button class="btn-ghost btn-delete" title="Delete">🗑️</button>
+      </div>
+    </div>
+
+    <!-- Agent Epsilon -->
+    <div class="agent-card">
+      <div class="agent-card-row1">
+        <span class="agent-name">agent-epsilon</span>
+        <span class="status-badge status-offline"><span class="status-dot"></span>Offline</span>
+      </div>
+      <div class="agent-id">ag_m3n4o5</div>
+      <div class="agent-capabilities">
+        <span class="cap-tag">data-analysis</span>
+        <span class="cap-tag">report</span>
+      </div>
+      <div class="agent-meta">
+        <span class="agent-url">http://agent-epsilon.local:8080</span>
+        <span class="agent-version">v1.0.0</span>
+      </div>
+      <div class="agent-actions">
+        <button class="btn-ghost btn-edit" title="Edit">✏️</button>
+        <button class="btn-ghost btn-delete" title="Delete">🗑️</button>
+      </div>
+    </div>
+
+    <!-- Agent Zeta -->
+    <div class="agent-card">
+      <div class="agent-card-row1">
+        <span class="agent-name">agent-zeta</span>
+        <span class="status-badge status-running"><span class="status-dot"></span>Running</span>
+      </div>
+      <div class="agent-id">ag_p6q7r8</div>
+      <div class="agent-capabilities">
+        <span class="cap-tag">code-review</span>
+        <span class="cap-tag">deploy</span>
+      </div>
+      <div class="agent-meta">
+        <span class="agent-url">http://agent-zeta.local:8080</span>
+        <span class="agent-version">v2.3.0</span>
+      </div>
+      <div class="agent-actions">
+        <button class="btn-ghost btn-edit" title="Edit">✏️</button>
+        <button class="btn-ghost btn-delete" title="Delete">🗑️</button>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+</body>
+</html>

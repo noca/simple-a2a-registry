@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard — A2A Registry</title>
+<style>
+  *, *::before, *::after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+    background: #F5F5F7;
+    color: #1D1D1F;
+    display: flex;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* ===== Sidebar ===== */
+  .sidebar {
+    width: 220px;
+    min-width: 220px;
+    height: 100vh;
+    position: sticky;
+    top: 0;
+    background: rgba(255,255,255,0.72);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 12px 16px;
+    z-index: 10;
+  }
+
+  .sidebar-logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 8px;
+    margin-bottom: 24px;
+  }
+
+  .sidebar-logo-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #007AFF, #BF5AF2);
+    flex-shrink: 0;
+  }
+
+  .sidebar-logo-text {
+    font-size: 15px;
+    font-weight: 600;
+    color: #1D1D1F;
+    letter-spacing: -0.2px;
+  }
+
+  /* Navigation */
+  .sidebar-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+  }
+
+  .nav-item {
+    display: flex;
+    align-items: center;
+    height: 36px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #1D1D1F;
+    cursor: default;
+    position: relative;
+    transition: background 0.15s ease;
+  }
+
+  .nav-item:hover {
+    background: rgba(0,0,0,0.04);
+  }
+
+  .nav-item.active {
+    background: rgba(0,122,255,0.08);
+    color: #007AFF;
+    font-weight: 500;
+  }
+
+  .nav-item.active::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 18px;
+    background: #007AFF;
+    border-radius: 0 2px 2px 0;
+  }
+
+  .nav-item .nav-icon {
+    margin-right: 8px;
+    font-size: 14px;
+    line-height: 1;
+  }
+
+  .nav-item .nav-label {
+    flex: 1;
+  }
+
+  .nav-badge {
+    background: #FF453A;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 10px;
+    line-height: 16px;
+    min-width: 20px;
+    text-align: center;
+  }
+
+  /* Sidebar bottom */
+  .sidebar-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 8px 0;
+    border-top: 1px solid rgba(0,0,0,0.06);
+    margin-top: auto;
+  }
+
+  .sidebar-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #007AFF, #BF5AF2);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .sidebar-user-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .sidebar-user-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: #1D1D1F;
+    line-height: 1.3;
+  }
+
+  .sidebar-user-role {
+    font-size: 11px;
+    color: #86868B;
+    line-height: 1.2;
+  }
+
+  .sidebar-theme-toggle {
+    width: 28px;
+    height: 28px;
+    border: none;
+    background: rgba(0,0,0,0.04);
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    color: #86868B;
+    transition: background 0.15s;
+    flex-shrink: 0;
+  }
+
+  .sidebar-theme-toggle:hover {
+    background: rgba(0,0,0,0.08);
+  }
+
+  /* ===== Main Content ===== */
+  .main {
+    flex: 1;
+    padding: 24px 32px;
+    background: #F5F5F7;
+    min-height: 100vh;
+  }
+
+  /* Top bar */
+  .top-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+  }
+
+  .top-bar-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .page-title {
+    font-size: 22px;
+    font-weight: 600;
+    color: #1D1D1F;
+    letter-spacing: -0.3px;
+  }
+
+  .top-bar-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .last-updated {
+    font-size: 12px;
+    color: #86868B;
+  }
+
+  .refresh-btn {
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: transparent;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    color: #86868B;
+    transition: background 0.15s, color 0.15s;
+  }
+
+  .refresh-btn:hover {
+    background: rgba(0,0,0,0.06);
+    color: #007AFF;
+  }
+
+  /* ===== Stat Cards ===== */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .stat-card {
+    background: #FFFFFF;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    padding: 16px 20px;
+    border-left: 4px solid #007AFF;
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+    cursor: default;
+  }
+
+  .stat-card:hover {
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    transform: translateY(-1px);
+  }
+
+  .stat-label {
+    font-size: 12px;
+    font-weight: 400;
+    color: #86868B;
+    margin-bottom: 4px;
+  }
+
+  .stat-value {
+    font-size: 28px;
+    font-weight: 700;
+    color: #1D1D1F;
+    line-height: 1.2;
+    letter-spacing: -0.5px;
+  }
+
+  .stat-trend {
+    font-size: 11px;
+    color: #86868B;
+    margin-top: 4px;
+  }
+
+  /* ===== Charts Row ===== */
+  .charts-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+
+  .chart-card {
+    background: #FFFFFF;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    padding: 20px;
+  }
+
+  .chart-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #1D1D1F;
+    margin-bottom: 16px;
+  }
+
+  /* Bar chart base */
+  .bar-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    height: 100px;
+    padding-top: 8px;
+  }
+
+  .bar-group {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    height: 100%;
+    justify-content: flex-end;
+  }
+
+  .bar {
+    width: 100%;
+    max-width: 28px;
+    border-radius: 3px 3px 0 0;
+    min-height: 4px;
+    transition: opacity 0.2s;
+  }
+
+  .bar:hover {
+    opacity: 0.8;
+  }
+
+  .bar-label {
+    font-size: 10px;
+    color: #86868B;
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  /* Health bars */
+  .health-bar {
+    background: #30D158;
+  }
+
+  /* Task status bars */
+  .task-bar-todo      { background: #C7C7CC; }
+  .task-bar-ready     { background: #007AFF; }
+  .task-bar-running   { background: #BF5AF2; }
+  .task-bar-blocked   { background: #FF453A; }
+  .task-bar-review    { background: #FF9F0A; }
+  .task-bar-done      { background: #30D158; }
+  .task-bar-cancelled { background: #86868B; }
+
+  /* ===== Bottom Panels ===== */
+  .bottom-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  .panel-card {
+    background: #FFFFFF;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    padding: 20px;
+  }
+
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+  }
+
+  .panel-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #1D1D1F;
+  }
+
+  .panel-link {
+    font-size: 12px;
+    color: #007AFF;
+    cursor: pointer;
+    font-weight: 500;
+  }
+
+  .panel-link:hover {
+    text-decoration: underline;
+  }
+
+  /* Agent list */
+  .agent-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .agent-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+  }
+
+  .agent-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .agent-status-dot.online  { background: #30D158; }
+  .agent-status-dot.stale   { background: #FFD60A; }
+  .agent-status-dot.offline { background: #C7C7CC; }
+
+  .agent-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: #1D1D1F;
+    flex: 1;
+  }
+
+  .agent-status-text {
+    font-size: 11px;
+    color: #86868B;
+  }
+
+  /* Kanban mini columns */
+  .kanban-mini {
+    display: flex;
+    gap: 8px;
+  }
+
+  .kanban-mini-col {
+    flex: 1;
+    background: #F5F5F7;
+    border-radius: 6px;
+    padding: 10px 8px;
+    text-align: center;
+    min-width: 0;
+  }
+
+  .kanban-mini-count {
+    font-size: 20px;
+    font-weight: 700;
+    color: #1D1D1F;
+    line-height: 1.2;
+  }
+
+  .kanban-mini-label {
+    font-size: 10px;
+    color: #86868B;
+    margin-top: 2px;
+  }
+
+  /* Divider utility */
+  hr {
+    border: none;
+    border-top: 1px solid rgba(0,0,0,0.06);
+    margin: 0;
+  }
+</style>
+</head>
+<body>
+
+<!-- ========== SIDEBAR ========== -->
+<aside class="sidebar">
+  <div class="sidebar-logo">
+    <div class="sidebar-logo-icon"></div>
+    <span class="sidebar-logo-text">A2A Registry</span>
+  </div>
+
+  <nav class="sidebar-nav">
+    <div class="nav-item active">
+      <span class="nav-icon">📊</span>
+      <span class="nav-label">Dashboard</span>
+    </div>
+    <div class="nav-item">
+      <span class="nav-icon">🤖</span>
+      <span class="nav-label">Agents</span>
+    </div>
+    <div class="nav-item">
+      <span class="nav-icon">📋</span>
+      <span class="nav-label">Kanban V2</span>
+      <span class="nav-badge">8</span>
+    </div>
+    <div class="nav-item">
+      <span class="nav-icon">📋</span>
+      <span class="nav-label">Tasks</span>
+    </div>
+    <div class="nav-item">
+      <span class="nav-icon">🔑</span>
+      <span class="nav-label">Clients</span>
+    </div>
+    <div class="nav-item">
+      <span class="nav-icon">📝</span>
+      <span class="nav-label">Audit Log</span>
+    </div>
+    <div class="nav-item">
+      <span class="nav-icon">⚙️</span>
+      <span class="nav-label">Settings</span>
+    </div>
+    <div class="nav-item">
+      <span class="nav-icon">👥</span>
+      <span class="nav-label">Users</span>
+    </div>
+  </nav>
+
+  <div class="sidebar-footer">
+    <div class="sidebar-avatar">A</div>
+    <div class="sidebar-user-info">
+      <div class="sidebar-user-name">Admin</div>
+      <div class="sidebar-user-role">管理员</div>
+    </div>
+    <button class="sidebar-theme-toggle" title="Toggle theme">🌙</button>
+  </div>
+</aside>
+
+<!-- ========== MAIN CONTENT ========== -->
+<main class="main">
+
+  <!-- Top Bar -->
+  <div class="top-bar">
+    <div class="top-bar-left">
+      <h1 class="page-title">Dashboard</h1>
+    </div>
+    <div class="top-bar-right">
+      <span class="last-updated">Last updated: just now</span>
+      <button class="refresh-btn" title="Refresh">↻</button>
+    </div>
+  </div>
+
+  <!-- Stat Cards -->
+  <div class="stats-grid">
+    <div class="stat-card" style="border-left-color: #007AFF;">
+      <div class="stat-label">📦 Total Agents</div>
+      <div class="stat-value">24</div>
+      <div class="stat-trend">+3 since yesterday</div>
+    </div>
+    <div class="stat-card" style="border-left-color: #30D158;">
+      <div class="stat-label">🟢 Online</div>
+      <div class="stat-value">18</div>
+      <div class="stat-trend">75% online rate</div>
+    </div>
+    <div class="stat-card" style="border-left-color: #FFD60A;">
+      <div class="stat-label">🟡 Stale</div>
+      <div class="stat-value">4</div>
+      <div class="stat-trend">&gt;5min no heartbeat</div>
+    </div>
+    <div class="stat-card" style="border-left-color: #007AFF;">
+      <div class="stat-label">🔵 WS Connections</div>
+      <div class="stat-value">12</div>
+      <div class="stat-trend">Active WebSocket</div>
+    </div>
+    <div class="stat-card" style="border-left-color: #BF5AF2;">
+      <div class="stat-label">🟣 Active Tasks</div>
+      <div class="stat-value">8</div>
+      <div class="stat-trend">3 in progress</div>
+    </div>
+    <div class="stat-card" style="border-left-color: #FF9F0A;">
+      <div class="stat-label">🟠 OAuth Clients</div>
+      <div class="stat-value">5</div>
+      <div class="stat-trend">2 admin, 3 service</div>
+    </div>
+  </div>
+
+  <!-- Charts Row -->
+  <div class="charts-grid">
+    <!-- Agent Health Trend -->
+    <div class="chart-card">
+      <div class="chart-title">Agent Health Trend</div>
+      <div class="bar-chart">
+        <div class="bar-group">
+          <div class="bar health-bar" style="height: 65%;"></div>
+          <span class="bar-label">00:00</span>
+        </div>
+        <div class="bar-group">
+          <div class="bar health-bar" style="height: 72%;"></div>
+          <span class="bar-label">03:00</span>
+        </div>
+        <div class="bar-group">
+          <div class="bar health-bar" style="height: 80%;"></div>
+          <span class="bar-label">06:00</span>
+        </div>
+        <div class="bar-group">
+          <div class="bar health-bar" style="height: 55%;"></div>
+          <span class="bar-label">09:00</span>
+        </div>
+        <div class="bar-group">
+          <div class="bar health-bar" style="height: 88%;"></div>
+          <span class="bar-label">12:00</span>
+        </div>
+        <div class="bar-group">
+          <div class="bar health-bar" style="height: 75%;"></div>
+          <span class="bar-label">15:00</span>
+        </div>
+        <div class="bar-group">
+          <div class="bar health-bar" style="height: 90%;"></div>
+          <span class="bar-label">18:00</span>
+        </div>
+        <div class="bar-group">
+          <div class="bar health-bar" style="height: 82%;"></div>
+          <span class="bar-label">21:00</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Task Status Distribution -->
+    <div class="chart-card">
+      <div class="chart-title">Task Status Distribution</div>
+      <div class="bar-chart">
+        <div class="bar-group">
+          <div class="bar task-bar-todo" style="height: 35%;"></div>
+          <span class="bar-label">Todo</span>
+        </div>
+        <div class="bar-group">
+          <div class="bar task-bar-ready" style="height: 55%;"></div>
+          <span class="bar-label">Ready</span>
+        </div>
+        <div class="bar-group">
+          <div class="bar task-bar-running" style="height: 40%;"></div>
+          <span class="bar-label">Running</span>
+        </div>
+        <div class="bar-group">
+          <div class="bar task-bar-blocked" style="height: 20%;"></div>
+          <span class="bar-label">Blocked</span>
+        </div>
+        <div class="bar-group">
+          <div class="bar task-bar-review" style="height: 30%;"></div>
+          <span class="bar-label">Review</span>
+        </div>
+        <div class="bar-group">
+          <div class="bar task-bar-done" style="height: 85%;"></div>
+          <span class="bar-label">Done</span>
+        </div>
+        <div class="bar-group">
+          <div class="bar task-bar-cancelled" style="height: 15%;"></div>
+          <span class="bar-label">Cancelled</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Panels -->
+  <div class="bottom-grid">
+    <!-- Active Agents -->
+    <div class="panel-card">
+      <div class="panel-header">
+        <span class="panel-title">Active Agents</span>
+        <span class="panel-link">View All →</span>
+      </div>
+      <div class="agent-list">
+        <div class="agent-item">
+          <span class="agent-status-dot online"></span>
+          <span class="agent-name">agent-alpha-1</span>
+          <span class="agent-status-text">Online · 2m ago</span>
+        </div>
+        <div class="agent-item">
+          <span class="agent-status-dot online"></span>
+          <span class="agent-name">agent-beta-3</span>
+          <span class="agent-status-text">Online · 30s ago</span>
+        </div>
+        <div class="agent-item">
+          <span class="agent-status-dot stale"></span>
+          <span class="agent-name">agent-gamma-2</span>
+          <span class="agent-status-text">Stale · 7m ago</span>
+        </div>
+        <div class="agent-item">
+          <span class="agent-status-dot online"></span>
+          <span class="agent-name">agent-delta-5</span>
+          <span class="agent-status-text">Online · 1m ago</span>
+        </div>
+        <div class="agent-item">
+          <span class="agent-status-dot offline"></span>
+          <span class="agent-name">agent-epsilon-4</span>
+          <span class="agent-status-text">Offline · 23m ago</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Kanban Summary -->
+    <div class="panel-card">
+      <div class="panel-header">
+        <span class="panel-title">Kanban Summary</span>
+      </div>
+      <div class="kanban-mini">
+        <div class="kanban-mini-col">
+          <div class="kanban-mini-count">8</div>
+          <div class="kanban-mini-label">Todo</div>
+        </div>
+        <div class="kanban-mini-col">
+          <div class="kanban-mini-count">10</div>
+          <div class="kanban-mini-label">Ready</div>
+        </div>
+        <div class="kanban-mini-col">
+          <div class="kanban-mini-count">5</div>
+          <div class="kanban-mini-label">Running</div>
+        </div>
+        <div class="kanban-mini-col">
+          <div class="kanban-mini-count">2</div>
+          <div class="kanban-mini-label">Blocked</div>
+        </div>
+        <div class="kanban-mini-col">
+          <div class="kanban-mini-count">28</div>
+          <div class="kanban-mini-label">Done</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+</body>
+</html>

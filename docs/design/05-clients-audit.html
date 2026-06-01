@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clients &amp; Audit Log — A2A Registry</title>
+<style>
+  *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    background: #F5F5F7;
+    color: #1D1D1F;
+    display: flex;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* ===== Sidebar ===== */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 220px;
+    height: 100vh;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    background: rgba(255,255,255,0.72);
+    border-right: 1px solid rgba(0,0,0,0.06);
+    display: flex;
+    flex-direction: column;
+    padding: 24px 16px;
+    z-index: 100;
+  }
+  .sidebar-brand {
+    font-size: 15px;
+    font-weight: 600;
+    color: #1D1D1F;
+    padding: 0 12px 20px;
+    letter-spacing: -0.01em;
+  }
+  .sidebar-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+  }
+  .sidebar-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 400;
+    color: #86868B;
+    cursor: default;
+    transition: background 0.15s, color 0.15s;
+    text-decoration: none;
+    user-select: none;
+  }
+  .sidebar-item:hover {
+    background: rgba(0,0,0,0.04);
+    color: #1D1D1F;
+  }
+  .sidebar-item.active {
+    background: rgba(0,122,255,0.10);
+    color: #007AFF;
+    font-weight: 500;
+  }
+  .sidebar-item .emoji { font-size: 15px; }
+  .sidebar-spacer { flex: 1; }
+  .sidebar-footer {
+    padding: 12px 12px 0;
+    font-size: 11px;
+    color: #86868B;
+    border-top: 1px solid rgba(0,0,0,0.06);
+    margin-top: 8px;
+  }
+  .sidebar-footer .user-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    font-size: 12px;
+    color: #1D1D1F;
+    font-weight: 500;
+  }
+
+  /* ===== Main Content ===== */
+  .main {
+    margin-left: 220px;
+    flex: 1;
+    padding: 24px 32px;
+    min-height: 100vh;
+    max-width: 960px;
+  }
+
+  /* ===== Title ===== */
+  .page-title {
+    font-size: 22px;
+    font-weight: 600;
+    color: #1D1D1F;
+    margin-bottom: 16px;
+    letter-spacing: -0.02em;
+  }
+
+  /* ===== Segmented Control ===== */
+  .segmented-control {
+    display: inline-flex;
+    background: rgba(0,0,0,0.06);
+    border-radius: 8px;
+    padding: 2px;
+    margin-bottom: 20px;
+    user-select: none;
+  }
+  .segmented-control button {
+    border: none;
+    background: transparent;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+    color: #86868B;
+    padding: 5px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s;
+    outline: none;
+  }
+  .segmented-control button.active {
+    background: #FFFFFF;
+    color: #1D1D1F;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+  }
+  .segmented-control button:not(.active):hover {
+    color: #1D1D1F;
+  }
+
+  /* ===== Tab Panels ===== */
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* ===== Clients Toolbar ===== */
+  .clients-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .search-box {
+    width: 240px;
+    padding: 7px 12px;
+    border: 1px solid rgba(0,0,0,0.10);
+    border-radius: 8px;
+    background: #FFFFFF;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 13px;
+    color: #1D1D1F;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .search-box::placeholder { color: #86868B; }
+  .search-box:focus {
+    border-color: #007AFF;
+    box-shadow: 0 0 0 3px rgba(0,122,255,0.15);
+  }
+  .btn-new-client {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 16px;
+    border: none;
+    border-radius: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    color: #fff;
+    background: linear-gradient(135deg, #007AFF, #8B3DB8);
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+    outline: none;
+    white-space: nowrap;
+  }
+  .btn-new-client:hover { opacity: 0.88; }
+  .btn-new-client:active { transform: scale(0.97); }
+
+  /* ===== Client Cards ===== */
+  .client-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .client-card {
+    background: #FFFFFF;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    position: relative;
+    transition: box-shadow 0.2s;
+  }
+  .client-card:hover {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  }
+  .client-card-row1 {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .client-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: #1D1D1F;
+  }
+  .client-id {
+    font-family: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
+    font-size: 11px;
+    color: #86868B;
+  }
+  .client-details {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .client-scopes {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .scope-tag {
+    display: inline-block;
+    background: rgba(0,122,255,0.08);
+    color: #007AFF;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 1px 8px;
+    border-radius: 6px;
+    line-height: 1.5;
+  }
+  .client-created {
+    font-size: 11px;
+    color: #86868B;
+  }
+  .client-actions {
+    position: absolute;
+    right: 20px;
+    top: 16px;
+    display: flex;
+    gap: 4px;
+  }
+  .client-actions button {
+    background: transparent;
+    border: none;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 12px;
+    font-weight: 400;
+    color: #86868B;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    outline: none;
+  }
+  .client-actions button:hover {
+    background: rgba(0,0,0,0.05);
+    color: #1D1D1F;
+  }
+  .client-actions .btn-edit:hover { color: #007AFF; }
+  .client-actions .btn-delete:hover { color: #FF453A; }
+
+  /* ===== Status Badge ===== */
+  .status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 1px 10px;
+    border-radius: 6px;
+    line-height: 1.6;
+  }
+  .status-badge .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-badge.active {
+    background: rgba(48,209,88,0.10);
+    color: #248A3D;
+  }
+  .status-badge.active .dot { background: #30D158; }
+  .status-badge.disabled {
+    background: rgba(255,69,58,0.10);
+    color: #BF3A2E;
+  }
+  .status-badge.disabled .dot { background: #FF453A; }
+
+  /* ===== Audit Log ===== */
+  .audit-filters {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  .audit-filters label {
+    font-size: 12px;
+    font-weight: 500;
+    color: #86868B;
+  }
+  .audit-filters input[type="date"],
+  .audit-filters select {
+    padding: 6px 10px;
+    border: 1px solid rgba(0,0,0,0.10);
+    border-radius: 8px;
+    background: #FFFFFF;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 12px;
+    color: #1D1D1F;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .audit-filters input[type="date"]:focus,
+  .audit-filters select:focus {
+    border-color: #007AFF;
+  }
+  .audit-filters .filter-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .event-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .event-row {
+    background: #FFFFFF;
+    border-radius: 6px;
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    transition: box-shadow 0.2s;
+  }
+  .event-row:hover {
+    box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+  }
+  .event-time {
+    font-family: "SF Mono", "Menlo", "Monaco", "Consolas", monospace;
+    font-size: 11px;
+    color: #86868B;
+    min-width: 160px;
+    flex-shrink: 0;
+  }
+  .event-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+    width: 22px;
+    text-align: center;
+  }
+  .event-desc {
+    font-size: 13px;
+    color: #1D1D1F;
+    flex: 1;
+    min-width: 0;
+  }
+  .event-type {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 6px;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .event-type.info {
+    background: rgba(0,122,255,0.08);
+    color: #007AFF;
+  }
+  .event-type.update {
+    background: rgba(191,90,242,0.10);
+    color: #8B3DB8;
+  }
+  .event-type.warning {
+    background: rgba(255,159,10,0.10);
+    color: #B37500;
+  }
+  .event-type.error {
+    background: rgba(255,69,58,0.10);
+    color: #BF3A2E;
+  }
+
+  .load-more-wrap {
+    display: flex;
+    justify-content: center;
+    padding: 16px 0 8px;
+  }
+  .btn-load-more {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+    color: #007AFF;
+    background: transparent;
+    border: 1px solid rgba(0,122,255,0.25);
+    padding: 6px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    outline: none;
+  }
+  .btn-load-more:hover {
+    background: rgba(0,122,255,0.06);
+    border-color: #007AFF;
+  }
+  .btn-load-more:active {
+    background: rgba(0,122,255,0.12);
+  }
+
+  /* ===== Responsive ===== */
+  @media (max-width: 720px) {
+    .sidebar { width: 56px; padding: 20px 8px; }
+    .sidebar .sidebar-brand,
+    .sidebar .sidebar-item span:not(.emoji),
+    .sidebar-footer { display: none; }
+    .sidebar-item { justify-content: center; padding: 8px; }
+    .sidebar-item .emoji { font-size: 18px; }
+    .main { margin-left: 56px; padding: 20px 16px; }
+    .event-time { min-width: 120px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== Sidebar ===== -->
+<nav class="sidebar">
+  <div class="sidebar-brand">A2A Registry</div>
+  <div class="sidebar-nav">
+    <a class="sidebar-item" href="#"><span class="emoji">📊</span><span>Dashboard</span></a>
+    <a class="sidebar-item" href="#"><span class="emoji">🤖</span><span>Agents</span></a>
+    <a class="sidebar-item" href="#"><span class="emoji">📋</span><span>Kanban</span></a>
+    <a class="sidebar-item active" href="#"><span class="emoji">🔑</span><span>Clients</span></a>
+    <a class="sidebar-item" href="#"><span class="emoji">📄</span><span>Audit Log</span></a>
+    <a class="sidebar-item" href="#"><span class="emoji">🔌</span><span>Integrations</span></a>
+    <a class="sidebar-item" href="#"><span class="emoji">⚙️</span><span>Settings</span></a>
+    <a class="sidebar-item" href="#"><span class="emoji">👥</span><span>Users</span></a>
+  </div>
+  <div class="sidebar-spacer"></div>
+  <div class="sidebar-footer">
+    <div class="user-row">👤 admin@a2a.local</div>
+    <div style="margin-top:4px; font-size:11px;">v2.0.1</div>
+  </div>
+</nav>
+
+<!-- ===== Main ===== -->
+<div class="main">
+  <h1 class="page-title">Clients &amp; Audit Log</h1>
+
+  <!-- Segmented control -->
+  <div class="segmented-control" role="tablist">
+    <button class="active" data-tab="clients" role="tab">🔑 Clients</button>
+    <button data-tab="audit" role="tab">📋 Audit Log</button>
+  </div>
+
+  <!-- ===== Tab: Clients ===== -->
+  <div class="tab-panel active" id="tab-clients" role="tabpanel">
+    <div class="clients-toolbar">
+      <input class="search-box" type="search" placeholder="Search clients..." aria-label="Search clients">
+      <button class="btn-new-client">+ New Client</button>
+    </div>
+
+    <div class="client-list">
+
+      <!-- Card 1 -->
+      <div class="client-card">
+        <div class="client-card-row1">
+          <span class="client-name">client-web-app</span>
+          <span class="status-badge active"><span class="dot"></span>Active</span>
+        </div>
+        <div class="client-id">client_a1b2c3d4</div>
+        <div class="client-details">
+          <div class="client-scopes">
+            <span class="scope-tag">admin</span>
+          </div>
+          <span class="client-created">Created: 2026-05-01</span>
+        </div>
+        <div class="client-actions">
+          <button class="btn-edit">Edit</button>
+          <button class="btn-delete">Delete</button>
+        </div>
+      </div>
+
+      <!-- Card 2 -->
+      <div class="client-card">
+        <div class="client-card-row1">
+          <span class="client-name">client-mobile</span>
+          <span class="status-badge active"><span class="dot"></span>Active</span>
+        </div>
+        <div class="client-id">client_e5f6g7h8</div>
+        <div class="client-details">
+          <div class="client-scopes">
+            <span class="scope-tag">read</span>
+          </div>
+          <span class="client-created">Created: 2026-05-10</span>
+        </div>
+        <div class="client-actions">
+          <button class="btn-edit">Edit</button>
+          <button class="btn-delete">Delete</button>
+        </div>
+      </div>
+
+      <!-- Card 3 -->
+      <div class="client-card">
+        <div class="client-card-row1">
+          <span class="client-name">client-service-1</span>
+          <span class="status-badge active"><span class="dot"></span>Active</span>
+        </div>
+        <div class="client-id">client_i9j0k1l2</div>
+        <div class="client-details">
+          <div class="client-scopes">
+            <span class="scope-tag">read</span>
+            <span class="scope-tag">write</span>
+          </div>
+          <span class="client-created">Created: 2026-04-15</span>
+        </div>
+        <div class="client-actions">
+          <button class="btn-edit">Edit</button>
+          <button class="btn-delete">Delete</button>
+        </div>
+      </div>
+
+      <!-- Card 4 -->
+      <div class="client-card">
+        <div class="client-card-row1">
+          <span class="client-name">client-legacy</span>
+          <span class="status-badge disabled"><span class="dot"></span>Disabled</span>
+        </div>
+        <div class="client-id">client_m3n4o5p6</div>
+        <div class="client-details">
+          <div class="client-scopes">
+            <span class="scope-tag">admin</span>
+          </div>
+          <span class="client-created">Created: 2025-12-01</span>
+        </div>
+        <div class="client-actions">
+          <button class="btn-edit">Edit</button>
+          <button class="btn-delete">Delete</button>
+        </div>
+      </div>
+
+      <!-- Card 5 -->
+      <div class="client-card">
+        <div class="client-card-row1">
+          <span class="client-name">client-testing</span>
+          <span class="status-badge active"><span class="dot"></span>Active</span>
+        </div>
+        <div class="client-id">client_q7r8s9t0</div>
+        <div class="client-details">
+          <div class="client-scopes">
+            <span class="scope-tag">read</span>
+          </div>
+          <span class="client-created">Created: 2026-05-28</span>
+        </div>
+        <div class="client-actions">
+          <button class="btn-edit">Edit</button>
+          <button class="btn-delete">Delete</button>
+        </div>
+      </div>
+
+    </div><!-- /client-list -->
+  </div><!-- /tab-clients -->
+
+  <!-- ===== Tab: Audit Log ===== -->
+  <div class="tab-panel" id="tab-audit" role="tabpanel">
+    <div class="audit-filters">
+      <div class="filter-group">
+        <label for="from-date">From</label>
+        <input type="date" id="from-date" value="2026-05-01">
+      </div>
+      <div class="filter-group">
+        <label for="to-date">To</label>
+        <input type="date" id="to-date" value="2026-05-29">
+      </div>
+      <div class="filter-group">
+        <label for="action-type">Action</label>
+        <select id="action-type">
+          <option value="">All Actions</option>
+          <option>info</option>
+          <option>update</option>
+          <option>warning</option>
+          <option>error</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label for="agent-filter">Agent</label>
+        <select id="agent-filter">
+          <option value="">All Agents</option>
+          <option>agent-alpha</option>
+          <option>agent-beta</option>
+          <option>agent-delta</option>
+          <option>agent-gamma</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="event-list">
+
+      <!-- Event 1 -->
+      <div class="event-row">
+        <span class="event-time">2026-05-29 10:23:15</span>
+        <span class="event-icon">📋</span>
+        <span class="event-desc">agent-alpha registered</span>
+        <span class="event-type info">info</span>
+      </div>
+
+      <!-- Event 2 -->
+      <div class="event-row">
+        <span class="event-time">2026-05-29 10:22:00</span>
+        <span class="event-icon">🔄</span>
+        <span class="event-desc">Task #128 moved to 'Running'</span>
+        <span class="event-type update">update</span>
+      </div>
+
+      <!-- Event 3 -->
+      <div class="event-row">
+        <span class="event-time">2026-05-29 10:20:45</span>
+        <span class="event-icon">🔑</span>
+        <span class="event-desc">client-web-app token refreshed</span>
+        <span class="event-type info">info</span>
+      </div>
+
+      <!-- Event 4 -->
+      <div class="event-row">
+        <span class="event-time">2026-05-29 10:18:30</span>
+        <span class="event-icon">⚠️</span>
+        <span class="event-desc">User 'admin' deleted agent-epsilon</span>
+        <span class="event-type warning">warning</span>
+      </div>
+
+      <!-- Event 5 -->
+      <div class="event-row">
+        <span class="event-time">2026-05-29 10:15:00</span>
+        <span class="event-icon">🔌</span>
+        <span class="event-desc">agent-beta WebSocket disconnected</span>
+        <span class="event-type error">error</span>
+      </div>
+
+      <!-- Event 6 -->
+      <div class="event-row">
+        <span class="event-time">2026-05-29 10:12:20</span>
+        <span class="event-icon">⏱️</span>
+        <span class="event-desc">agent-delta heartbeat timeout</span>
+        <span class="event-type warning">warning</span>
+      </div>
+
+      <!-- Event 7 -->
+      <div class="event-row">
+        <span class="event-time">2026-05-29 10:10:00</span>
+        <span class="event-icon">⚙️</span>
+        <span class="event-desc">System config updated</span>
+        <span class="event-type info">info</span>
+      </div>
+
+      <!-- Event 8 -->
+      <div class="event-row">
+        <span class="event-time">2026-05-29 10:05:30</span>
+        <span class="event-icon">🔍</span>
+        <span class="event-desc">agent-gamma stale detection</span>
+        <span class="event-type warning">warning</span>
+      </div>
+
+    </div><!-- /event-list -->
+
+    <div class="load-more-wrap">
+      <button class="btn-load-more">Load More</button>
+    </div>
+  </div><!-- /tab-audit -->
+
+</div><!-- /main -->
+
+<!-- ===== JS: Tab Switching ===== -->
+<script>
+(function() {
+  const tabs = document.querySelectorAll('.segmented-control button');
+  const panels = {
+    clients: document.getElementById('tab-clients'),
+    audit:   document.getElementById('tab-audit')
+  };
+
+  function switchTab(name) {
+    tabs.forEach(btn => btn.classList.toggle('active', btn.dataset.tab === name));
+    Object.keys(panels).forEach(key => panels[key].classList.toggle('active', key === name));
+  }
+
+  tabs.forEach(btn => {
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+  });
+})();
+</script>
+
+</body>
+</html>

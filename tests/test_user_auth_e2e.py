@@ -47,6 +47,7 @@ async def user_auth_env():
     app = create_app(
         data_dir=data_dir,
         base_url="http://localhost:8321",
+        user_session_enabled=True,
     )
     server = TestServer(app)
     await server.start_server()
