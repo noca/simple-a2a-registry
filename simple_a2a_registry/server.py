@@ -91,6 +91,7 @@ REGISTRY_AGENT_DESCRIPTION = (
 )
 
 CLEANUP_INTERVAL = 60  # seconds between stale-agent purges
+DANGLING_GRACE_SECONDS = 30  # WS disconnect grace period before failing tasks
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +165,10 @@ class RegistryHandler:
         # Task timeout management
         self._task_timeout: int = 300  # Default 300s, overridden via config
         self._task_timers: Dict[str, asyncio.Task] = {}  # task_id -> asyncio timer task
+
+        # DANGLING state management — graceful WS disconnect window
+        self._dangling_timers: Dict[str, asyncio.Task] = {}  # agent_id -> asyncio timer task
+        self._dangling_grace_seconds: int = DANGLING_GRACE_SECONDS
 
     # ------------------------------------------------------------------
     # Health / meta
@@ -671,9 +676,9 @@ class RegistryHandler:
             logger.info("Agent '%s' disconnected via WebSocket (%d active)",
                          agent_id, len(self._ws_connections))
 
-            # P1.3: WS 断连自动失败该 agent 的所有进行中任务
+            # P1.2: WS 断连标记任务为 DANGLING + 启动宽限计时器
             try:
-                await self._fail_agent_tasks(agent_id)
+                await self._dangle_agent_tasks(agent_id)
             except Exception:
                 logger.exception(
                     "Failed to auto-fail tasks for disconnected agent '%s'",
@@ -696,16 +701,94 @@ class RegistryHandler:
 
         return ws
 
-    async def _fail_agent_tasks(self, agent_id: str) -> None:
-        """Fail all active tasks for a disconnected agent.
+    async def _dangle_agent_tasks(self, agent_id: str) -> None:
+        """Mark all active tasks for a disconnected agent as DANGLING.
+
+        Instead of immediately failing tasks, enters a grace period
+        (``_dangling_grace_seconds``) during which the agent may reconnect.
+        If the agent reconnects in time, state_sync will reconcile the
+        tasks back to RUNNING; otherwise ``_dangle_timeout`` promotes
+        DANGLING → FAILED.
 
         Scans ``self._tasks`` for tasks belonging to *agent_id* with
-        non-terminal states (dispatched, forwarded, working).  Marks them
-        as ``failed("agent_disconnected")``.
-
-        If the task was WS-dispatched from the kanban board, also updates
-        the V2 ``TaskStore`` so the kanban lifecycle reflects the failure.
+        non-terminal states.  For WS-dispatched kanban tasks, also updates
+        the V2 ``TaskStore`` to reflect the DANGLING state.
         """
+        now = time.time()
+        dangled_ids: list[str] = []
+
+        for task_id, task in list(self._tasks.items()):
+            if task.get("agent_id") != agent_id:
+                continue
+            state = task.get("state", "")
+            if state in ("completed", "failed", "cancelled", "dangling"):
+                continue
+
+            task["state"] = "dangling"
+            task["error"] = "agent_disconnected_grace"
+            task["updated_at"] = now
+            dangled_ids.append(task_id)
+
+            # Cancel the per-task timeout timer while dangling
+            self._cancel_task_timeout(task_id)
+
+            logger.info(
+                "Task %s for agent '%s' → dangling (WS disconnect, %ds grace)",
+                task_id, agent_id, self._dangling_grace_seconds,
+            )
+
+        if not dangled_ids:
+            return
+
+        # Sync with V2 TaskStore for WS-dispatched kanban tasks
+        if self.task_store is not None and self._dispatched_ws_tasks is not None:
+            for task_id in dangled_ids:
+                if task_id in self._dispatched_ws_tasks:
+                    try:
+                        self.task_store.update_task_status(
+                            task_id, TaskStatus.DANGLING.value,
+                            result="Agent disconnected — grace period",
+                        )
+                        logger.info(
+                            "Kanban task %s → dangling (agent WS disconnect)",
+                            task_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to dangle kanban task '%s' from WS disconnect",
+                            task_id,
+                        )
+
+        # Cancel any existing dangling timer for this agent and schedule new one
+        old_timer = self._dangling_timers.pop(agent_id, None)
+        if old_timer is not None and not old_timer.done():
+            old_timer.cancel()
+            logger.debug("Cancelled stale dangling timer for agent '%s'", agent_id)
+
+        timer = asyncio.create_task(
+            self._dangle_timeout(agent_id),
+            name=f"dangle-timeout-{agent_id}",
+        )
+        self._dangling_timers[agent_id] = timer
+        logger.info(
+            "Scheduled dangling timeout for agent '%s' in %ds (%d tasks dangled)",
+            agent_id, self._dangling_grace_seconds, len(dangled_ids),
+        )
+
+    async def _dangle_timeout(self, agent_id: str) -> None:
+        """Grace-period timeout callback: promote DANGLING → FAILED.
+
+        Called ``_dangling_grace_seconds`` after ``_dangle_agent_tasks``.
+        If the agent reconnected in the interim its tasks will have been
+        reconciled back to RUNNING by state_sync (P1.3), so this method
+        only acts on tasks still in the DANGLING state.
+        """
+        try:
+            await asyncio.sleep(self._dangling_grace_seconds)
+        except asyncio.CancelledError:
+            # Agent reconnected and timer was cancelled — nothing to do
+            return
+
         now = time.time()
         failed_ids: list[str] = []
 
@@ -713,43 +796,43 @@ class RegistryHandler:
             if task.get("agent_id") != agent_id:
                 continue
             state = task.get("state", "")
-            if state in ("completed", "failed", "cancelled"):
+            if state != "dangling":
                 continue
 
             task["state"] = "failed"
-            task["error"] = "agent_disconnected"
+            task["error"] = "agent_disconnected_timeout"
             task["updated_at"] = now
             failed_ids.append(task_id)
 
-            # P1.2: Cancel the timeout timer for this task
-            self._cancel_task_timeout(task_id)
-
             logger.info(
-                "Task %s for agent '%s' → failed (agent_disconnected)",
+                "Task %s for agent '%s' → failed (dangling grace period expired)",
                 task_id, agent_id,
             )
 
         if not failed_ids:
-            return
+            logger.debug("Dangling timeout for agent '%s': no dangling tasks remain", agent_id)
 
-        # Sync with V2 TaskStore for WS-dispatched kanban tasks
+        # Sync with V2 TaskStore
         if self.task_store is not None and self._dispatched_ws_tasks is not None:
             for task_id in failed_ids:
                 if task_id in self._dispatched_ws_tasks:
                     try:
                         self.task_store.update_task_status(
                             task_id, TaskStatus.FAILED.value,
-                            result="Agent disconnected via WebSocket",
+                            result="Dangling grace period expired",
                         )
                         logger.info(
-                            "Kanban task %s → failed (agent_disconnected via WS)",
+                            "Kanban task %s → failed (dangling timeout)",
                             task_id,
                         )
                     except Exception:
                         logger.exception(
-                            "Failed to fail kanban task '%s' from WS disconnect",
+                            "Failed to fail kanban task '%s' from dangling timeout",
                             task_id,
                         )
+
+        # Clean up the timer entry
+        self._dangling_timers.pop(agent_id, None)
 
     # ------------------------------------------------------------------
     # P1.2: Task timeout management
