@@ -17,11 +17,17 @@ from typing import Any, Dict, List, Optional
 
 
 class TaskStatus(str, Enum):
-    """Kanban task lifecycle — 8 states in progression order."""
+    """Kanban task lifecycle — 9 states in progression order.
+
+    The 9th state ``DANGLING`` is a grace-period state entered when
+    an agent's WebSocket disconnects (temporary network glitch vs true
+    death).  See ``docs/resilient-distribution-architecture.md`` §4.1.
+    """
 
     TODO = "todo"           # Created, waiting for assignee or parents to complete
     READY = "ready"         # All parents done, waiting for a worker to claim
     RUNNING = "running"     # Actively being worked on by a worker
+    DANGLING = "dangling"   # WS disconnect — grace period, not yet failed
     BLOCKED = "blocked"     # Blocked by human intervention (HITL)
     COMPLETED = "completed" # Finished successfully
     FAILED = "failed"       # Finished with failure (may retry)

@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>simple-a2a-registry-v2 架构图</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: #020617;
+      min-height: 100vh;
+      padding: 2rem;
+      color: white;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    .header { margin-bottom: 2rem; }
+    .header-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+    .pulse-dot {
+      width: 12px; height: 12px; background: #22d3ee; border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-left: 1.75rem; }
+    .diagram-container {
+      background: rgba(15, 23, 42, 0.5); border-radius: 1rem;
+      border: 1px solid #1e293b; padding: 1.5rem; overflow-x: auto;
+    }
+    svg { width: 100%; min-width: 1000px; display: block; }
+    .cards {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem; margin-top: 2rem;
+    }
+    .card {
+      background: rgba(15, 23, 42, 0.5); border-radius: 0.75rem;
+      border: 1px solid #1e293b; padding: 1.25rem;
+    }
+    .card-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .card-dot.cyan { background: #22d3ee; }
+    .card-dot.emerald { background: #34d399; }
+    .card-dot.violet { background: #a78bfa; }
+    .card-dot.amber { background: #fbbf24; }
+    .card-dot.orange { background: #fb923c; }
+    .card h3 { font-size: 0.875rem; font-weight: 600; }
+    .card ul { list-style: none; color: #94a3b8; font-size: 0.75rem; }
+    .card li { margin-bottom: 0.375rem; }
+    .footer { text-align: center; margin-top: 1.5rem; color: #475569; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-row">
+        <div class="pulse-dot"></div>
+        <h1>simple-a2a-registry-v2 · 任务分发架构</h1>
+      </div>
+      <p class="subtitle">分层架构：事件驱动总线 + 声明式调度引擎 + 三层 Worker 分发</p>
+    </div>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 1100 820">
+
+        <defs>
+          <marker id="arrow-slate" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+          </marker>
+          <marker id="arrow-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee" />
+          </marker>
+          <marker id="arrow-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#34d399" />
+          </marker>
+          <marker id="arrow-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa" />
+          </marker>
+          <marker id="arrow-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fb923c" />
+          </marker>
+          <marker id="arrow-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+          </pattern>
+          <filter id="glow">
+            <feGaussianBlur stdDeviation="2" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- ===================================================================== -->
+        <!-- Z-ORDER: arrows first, then components, then labels                    -->
+        <!-- ===================================================================== -->
+
+        <!-- ========== VERTICAL CONNECTIONS (Layer 0 → 1 → 2 → 3 → Data) ========== -->
+
+        <!-- L0 → L1: API → Event Bus -->
+        <line x1="260" y1="140" x2="260" y2="185" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrow-cyan)"/>
+        <line x1="480" y1="140" x2="480" y2="185" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrow-cyan)"/>
+
+        <!-- L1 → L2: Event Bus → Scheduler -->
+        <line x1="340" y1="280" x2="340" y2="315" stroke="#fb923c" stroke-width="2" marker-end="url(#arrow-orange)"/>
+        <text x="348" y="302" fill="#94a3b8" font-size="8">事件触发</text>
+
+        <!-- L2 internal: DAG Engine ↔ State Machine -->
+        <line x1="420" y1="370" x2="510" y2="370" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-emerald)"/>
+        <line x1="510" y1="380" x2="420" y2="380" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-emerald)"/>
+        <text x="465" y="362" fill="#94a3b8" font-size="8" text-anchor="middle">读/写</text>
+
+        <!-- L2 → L3: Scheduler → Workers -->
+        <line x1="340" y1="420" x2="200" y2="455" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-emerald)"/>
+        <line x1="340" y1="420" x2="340" y2="455" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-emerald)"/>
+        <line x1="340" y1="420" x2="480" y2="455" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-emerald)"/>
+        <text x="340" y="442" fill="#94a3b8" font-size="8" text-anchor="middle">分发决策</text>
+
+        <!-- L3 → External: Worker → Agents -->
+        <path d="M 200 510 L 200 560 Q 200 575 220 575 L 300 575 Q 320 575 320 590 L 320 620" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow-slate)"/>
+        <path d="M 340 510 L 340 590 Q 340 600 350 600 L 530 600 Q 540 600 540 610 L 540 620" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow-slate)"/>
+        <path d="M 480 510 L 480 560 Q 480 575 500 575 L 580 575 Q 600 575 600 590 L 600 620" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow-slate)"/>
+
+        <!-- Data connections: Store <-> Scheduler -->
+        <line x1="420" y1="420" x2="420" y2="640" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrow-violet)"/>
+        <line x1="510" y1="420" x2="510" y2="640" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrow-violet)"/>
+        <text x="430" y="540" fill="#94a3b8" font-size="8">持久化</text>
+
+        <!-- Data connections: Event Bus → TaskStore -->
+        <path d="M 200 240 L 140 240 Q 120 240 120 260 L 120 640" fill="none" stroke="#fb923c" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-orange)"/>
+        <text x="110" y="440" fill="#94a3b8" font-size="8" text-anchor="end">事件持久化</text>
+
+        <!-- ===================================================================== -->
+        <!-- COMPONENTS                                                            -->
+        <!-- ===================================================================== -->
+
+        <!-- ===== LAYER 0: 用户界面 / 外部 API (y: 60-140) ===== -->
+
+        <!-- Layer label -->
+        <text x="30" y="78" fill="#22d3ee" font-size="9" font-weight="600">LAYER 0</text>
+
+        <!-- Web Dashboard -->
+        <rect x="160" y="85" width="200" height="55" rx="8" fill="rgba(8, 51, 68, 0.5)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="260" y="108" fill="white" font-size="11" font-weight="600" text-anchor="middle">Web Dashboard</text>
+        <text x="260" y="125" fill="#94a3b8" font-size="9" text-anchor="middle">任务管理 · 实时看板 · 监控</text>
+
+        <!-- HTTP API / A2A Gateway -->
+        <rect x="380" y="85" width="200" height="55" rx="8" fill="rgba(8, 51, 68, 0.5)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="480" y="108" fill="white" font-size="11" font-weight="600" text-anchor="middle">HTTP API / A2A Gateway</text>
+        <text x="480" y="125" fill="#94a3b8" font-size="9" text-anchor="middle">REST · WebSocket · A2A 协议</text>
+
+        <!-- ===== LAYER 1: 事件驱动分发总线 (y: 190-280) ===== -->
+
+        <!-- Layer boundary -->
+        <rect x="140" y="180" width="760" height="100" rx="10" fill="rgba(251, 146, 60, 0.04)" stroke="#fb923c" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="150" y="196" fill="#fb923c" font-size="9" font-weight="600">LAYER 1 · 事件驱动分发总线（新增）</text>
+
+        <!-- Event Bus Component -->
+        <rect x="200" y="205" width="280" height="60" rx="8" fill="rgba(251, 146, 60, 0.15)" stroke="#fb923c" stroke-width="1.5" filter="url(#glow)"/>
+        <rect x="200" y="205" width="280" height="60" rx="8" fill="rgba(251, 146, 60, 0.15)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="340" y="225" fill="white" font-size="11" font-weight="600" text-anchor="middle">Event Bus (事件总线)</text>
+        <text x="340" y="242" fill="#94a3b8" font-size="9" text-anchor="middle">asyncio.Queue + DB 持久化</text>
+
+        <!-- Event types -->
+        <text x="520" y="212" fill="#fb923c" font-size="8">task.created</text>
+        <text x="520" y="226" fill="#fb923c" font-size="8">task.timeout</text>
+        <text x="520" y="240" fill="#fb923c" font-size="8">task.completed</text>
+        <text x="520" y="254" fill="#fb923c" font-size="8">task.dependency_met</text>
+
+        <!-- Safety net note -->
+        <text x="730" y="225" fill="#94a3b8" font-size="8">Safety Net:</text>
+        <text x="730" y="240" fill="#94a3b8" font-size="8">30s 轮询兜底</text>
+
+        <!-- ===== LAYER 2: 声明式调度引擎 (y: 320-420) ===== -->
+
+        <!-- Layer boundary -->
+        <rect x="140" y="310" width="760" height="110" rx="10" fill="rgba(52, 211, 153, 0.04)" stroke="#34d399" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="150" y="326" fill="#34d399" font-size="9" font-weight="600">LAYER 2 · 声明式调度引擎（增强）</text>
+
+        <!-- DAG Engine -->
+        <rect x="160" y="335" width="260" height="70" rx="8" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="290" y="355" fill="white" font-size="11" font-weight="600" text-anchor="middle">DAG 引擎</text>
+        <text x="290" y="372" fill="#94a3b8" font-size="9" text-anchor="middle">依赖链解析 · 条件分支</text>
+        <text x="290" y="388" fill="#22d3ee" font-size="8" text-anchor="middle">+ 并行扇出（新增）</text>
+
+        <!-- 8-State State Machine -->
+        <rect x="440" y="335" width="260" height="70" rx="8" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="570" y="355" fill="white" font-size="11" font-weight="600" text-anchor="middle">8-State 状态机</text>
+        <text x="570" y="372" fill="#94a3b8" font-size="9" text-anchor="middle">ready → claimed → running</text>
+        <text x="570" y="388" fill="#94a3b8" font-size="9" text-anchor="middle">→ completed / failed / cancelled</text>
+
+        <!-- FlowController status -->
+        <rect x="730" y="335" width="150" height="70" rx="8" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+        <text x="805" y="355" fill="white" font-size="10" font-weight="600" text-anchor="middle">FlowController</text>
+        <text x="805" y="372" fill="#94a3b8" font-size="8" text-anchor="middle">并发限制 max=5</text>
+        <text x="805" y="386" fill="#94a3b8" font-size="8" text-anchor="middle">熔断器 · 退避重试</text>
+        <text x="805" y="398" fill="#fb923c" font-size="7" text-anchor="middle">→ 持久化（新增）</text>
+
+        <!-- ===== LAYER 3: Worker 分发层 (y: 460-550) ===== -->
+
+        <!-- Layer boundary -->
+        <rect x="140" y="450" width="760" height="100" rx="10" fill="rgba(30, 41, 59, 0.08)" stroke="#94a3b8" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="150" y="466" fill="#94a3b8" font-size="9" font-weight="600">LAYER 3 · Worker 分发层</text>
+
+        <!-- WS Push Worker -->
+        <rect x="145" y="478" width="200" height="60" rx="8" fill="rgba(6, 78, 59, 0.35)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="245" y="498" fill="white" font-size="11" font-weight="600" text-anchor="middle">WS Push Worker</text>
+        <text x="245" y="515" fill="#94a3b8" font-size="9" text-anchor="middle">WebSocket JSON push</text>
+        <text x="245" y="530" fill="#22d3ee" font-size="8" text-anchor="middle">优先级最高 · 增强并发</text>
+
+        <!-- HTTP Callback -->
+        <rect x="360" y="478" width="200" height="60" rx="8" fill="rgba(6, 78, 59, 0.35)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="460" y="498" fill="white" font-size="11" font-weight="600" text-anchor="middle">HTTP Callback</text>
+        <text x="460" y="515" fill="#94a3b8" font-size="9" text-anchor="middle">POST 30s timeout</text>
+        <text x="460" y="530" fill="#94a3b8" font-size="8" text-anchor="middle">指数退避重试</text>
+
+        <!-- K8s Job / Cmd -->
+        <rect x="575" y="478" width="200" height="60" rx="8" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4,3"/>
+        <text x="675" y="498" fill="#94a3b8" font-size="11" font-weight="600" text-anchor="middle">K8s Job / Cmd</text>
+        <text x="675" y="515" fill="#94a3b8" font-size="9" text-anchor="middle">本地子进程 spawn</text>
+        <text x="675" y="530" fill="#94a3b8" font-size="8" text-anchor="middle">可选 · K8s API 创建 Job</text>
+
+        <!-- ===== DATA LAYER (y: 635-760) ===== -->
+
+        <!-- Layer boundary -->
+        <rect x="100" y="625" width="900" height="145" rx="10" fill="rgba(167, 139, 250, 0.04)" stroke="#a78bfa" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="110" y="641" fill="#a78bfa" font-size="9" font-weight="600">DATA LAYER · 持久化层</text>
+
+        <!-- TaskStore -->
+        <rect x="190" y="650" width="320" height="100" rx="8" fill="rgba(76, 29, 149, 0.35)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="350" y="672" fill="white" font-size="12" font-weight="600" text-anchor="middle">TaskStore</text>
+        <text x="350" y="692" fill="#94a3b8" font-size="9" text-anchor="middle">SQLite / MySQL（BEGIN IMMEDIATE）</text>
+        <text x="350" y="708" fill="#94a3b8" font-size="9" text-anchor="middle">5 张表 · 8 态状态机 · DAG 依赖链</text>
+        <text x="350" y="724" fill="#a78bfa" font-size="8" text-anchor="middle">tasks · task_events · task_links · agents · comments</text>
+
+        <!-- AgentFlowState (new) -->
+        <rect x="550" y="650" width="250" height="100" rx="8" fill="rgba(76, 29, 149, 0.25)" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <text x="675" y="672" fill="white" font-size="12" font-weight="600" text-anchor="middle">AgentFlowState</text>
+        <text x="675" y="692" fill="#94a3b8" font-size="9" text-anchor="middle">agent_flow_state 表</text>
+        <text x="675" y="708" fill="#94a3b8" font-size="9" text-anchor="middle">并发计数 · 熔断状态</text>
+        <text x="675" y="724" fill="#fb923c" font-size="8" text-anchor="middle">新增 · Read-Through Cache</text>
+
+        <!-- ===== EXTERNAL AGENTS (y: 620-700, right side) ===== -->
+
+        <!-- Layer boundary -->
+        <rect x="820" y="60" width="260" height="200" rx="10" fill="rgba(148, 163, 184, 0.04)" stroke="#94a3b8" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="830" y="76" fill="#94a3b8" font-size="9" font-weight="600">外部 Agent 网络</text>
+
+        <!-- External Agent A -->
+        <rect x="835" y="85" width="230" height="45" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+        <text x="950" y="104" fill="white" font-size="10" font-weight="600" text-anchor="middle">Agent A (WS 在线)</text>
+        <text x="950" y="118" fill="#94a3b8" font-size="8" text-anchor="middle">WebSocket 长连接</text>
+
+        <!-- External Agent B -->
+        <rect x="835" y="140" width="230" height="45" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+        <text x="950" y="159" fill="white" font-size="10" font-weight="600" text-anchor="middle">Agent B (Callback)</text>
+        <text x="950" y="173" fill="#94a3b8" font-size="8" text-anchor="middle">HTTP POST /report</text>
+
+        <!-- External Agent C -->
+        <rect x="835" y="195" width="230" height="45" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+        <text x="950" y="214" fill="white" font-size="10" font-weight="600" text-anchor="middle">Agent C (本地)</text>
+        <text x="950" y="228" fill="#94a3b8" font-size="8" text-anchor="middle">子进程 spawn</text>
+
+        <!-- arrows from worker to agents -->
+        <path d="M 345 508 L 740 508 Q 750 508 750 520 L 750 590 Q 750 600 760 600 L 820 600 L 820 120" fill="none" stroke="#64748b" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-slate)"/>
+
+        <!-- ===================================================================== -->
+        <!-- LEGEND                                                                -->
+        <!-- ===================================================================== -->
+
+        <rect x="840" y="280" width="230" height="200" rx="8" fill="rgba(15, 23, 42, 0.8)" stroke="#1e293b" stroke-width="1"/>
+        <text x="850" y="298" fill="white" font-size="10" font-weight="600">图例</text>
+
+        <!-- Legend items -->
+        <rect x="850" y="310" width="14" height="10" rx="2" fill="rgba(8, 51, 68, 0.5)" stroke="#22d3ee" stroke-width="1"/>
+        <text x="870" y="319" fill="#94a3b8" font-size="8">前端 / API 层</text>
+
+        <rect x="850" y="330" width="14" height="10" rx="2" fill="rgba(251, 146, 60, 0.15)" stroke="#fb923c" stroke-width="1"/>
+        <text x="870" y="339" fill="#94a3b8" font-size="8">事件总线（新增）</text>
+
+        <rect x="850" y="350" width="14" height="10" rx="2" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1"/>
+        <text x="870" y="359" fill="#94a3b8" font-size="8">调度引擎 / Worker</text>
+
+        <rect x="850" y="370" width="14" height="10" rx="2" fill="rgba(76, 29, 149, 0.35)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="870" y="379" fill="#94a3b8" font-size="8">数据库持久化层</text>
+
+        <rect x="850" y="390" width="14" height="10" rx="2" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+        <text x="870" y="399" fill="#94a3b8" font-size="8">外部 Agent</text>
+
+        <line x1="850" y1="415" x2="864" y2="415" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <text x="870" y="419" fill="#94a3b8" font-size="8">持久化流</text>
+
+        <line x1="850" y1="435" x2="864" y2="435" stroke="#fb923c" stroke-width="1.5" stroke-dasharray="4,3"/>
+        <text x="870" y="439" fill="#94a3b8" font-size="8">事件流</text>
+
+        <rect x="850" y="450" width="14" height="10" rx="2" fill="none" stroke="#94a3b8" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="870" y="459" fill="#94a3b8" font-size="8">未来 / 可选</text>
+
+        <!-- ===================================================================== -->
+        <!-- TITLE BADGES on key components                                        -->
+        <!-- ===================================================================== -->
+
+        <!-- 新增 badge on Event Bus -->
+        <rect x="200" y="200" width="30" height="14" rx="3" fill="#fb923c"/>
+        <text x="215" y="211" fill="#020617" font-size="8" font-weight="700" text-anchor="middle">新增</text>
+
+        <!-- 新增 badge on AgentFlowState -->
+        <rect x="550" y="645" width="30" height="14" rx="3" fill="#fb923c"/>
+        <text x="565" y="656" fill="#020617" font-size="8" font-weight="700" text-anchor="middle">新增</text>
+
+        <!-- 增强 badge on DAG Engine -->
+        <rect x="160" y="330" width="30" height="14" rx="3" fill="#34d399"/>
+        <text x="175" y="341" fill="#020617" font-size="8" font-weight="700" text-anchor="middle">增强</text>
+
+        <!-- 增强 badge on 状态机 -->
+        <rect x="440" y="330" width="30" height="14" rx="3" fill="#34d399"/>
+        <text x="455" y="341" fill="#020617" font-size="8" font-weight="700" text-anchor="middle">增强</text>
+
+        <!-- Core principle annotation -->
+        <text x="160" y="790" fill="#fb7185" font-size="10">
+          核心原则：编排引擎层保持强一致性（CP）· Worker 分发层追求可用性（AP）
+        </text>
+
+      </svg>
+    </div>
+
+    <!-- Info Cards -->
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot orange"></div>
+          <h3>Phase 1 — 事件驱动化</h3>
+        </div>
+        <ul>
+          <li>• 引入 asyncio.Queue 消除 5s 轮询延迟</li>
+          <li>• 写操作后发布事件 → 立即触发 dispatch</li>
+          <li>• 保留 30s 轮询兜底防丢事件</li>
+          <li>• 影响范围：store.py + dispatcher.py</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot emerald"></div>
+          <h3>Phase 2 — 状态持久化</h3>
+        </div>
+        <ul>
+          <li>• 新增 AgentFlowState 表（MySQL/SQLite）</li>
+          <li>• FlowController 改为 Read-Through Cache</li>
+          <li>• 熔断器状态持久化，重启不丢失</li>
+          <li>• 影响范围：store.py + flow_controller.py</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot violet"></div>
+          <h3>Phase 3 — WorkerExecutor 抽象</h3>
+        </div>
+        <ul>
+          <li>• 定义 WorkerExecutor 抽象基类</li>
+          <li>• 多实现：Local / K8s / Docker / Callback</li>
+          <li>• Dispatcher 通过配置选择 Executor</li>
+          <li>• 影响范围：executor.py + dispatcher.py</li>
+        </ul>
+      </div>
+    </div>
+
+    <p class="footer">
+      simple-a2a-registry-v2 · 任务分发模型架构图 · 基于 task-distribution-research.md 设计 · 2026-06
+    </p>
+  </div>
+</body>
+</html>
