@@ -49,6 +49,9 @@ PRAGMA journal_mode=WAL;
 PRAGMA busy_timeout=5000;
 PRAGMA foreign_keys=ON;
 
+-- tasks.status valid values (9 states):
+--   todo | ready | running | dangling | blocked
+--   | completed | failed | cancelled | archived
 CREATE TABLE IF NOT EXISTS tasks (
     id                    TEXT PRIMARY KEY,
     title                 TEXT NOT NULL,
@@ -133,7 +136,10 @@ CREATE INDEX IF NOT EXISTS idx_task_comments_task_id ON task_comments(task_id, c
 # SQL schema — MySQL version
 # ---------------------------------------------------------------------------
 
-_SCHEMA_SQL_MYSQL = """
+_SCHEMA_SQL_MYSQL = """\
+-- tasks.status valid values (9 states):
+--   todo | ready | running | dangling | blocked
+--   | completed | failed | cancelled | archived
 CREATE TABLE IF NOT EXISTS tasks (
     id                    VARCHAR(255) PRIMARY KEY,
     title                 VARCHAR(255) NOT NULL,
@@ -1021,6 +1027,7 @@ class TaskStore:
                 "       COALESCE(max_retries, ?) AS max_ret "
                 "FROM tasks "
                 "WHERE status IN (?, ?) "
+                "  AND status != ? "
                 "  AND claim_expires IS NOT NULL "
                 "  AND claim_expires <= ?"
             )
@@ -1028,6 +1035,7 @@ class TaskStore:
                 DEFAULT_MAX_RETRIES,
                 TaskStatus.RUNNING.value,
                 TaskStatus.BLOCKED.value,
+                TaskStatus.DANGLING.value,
                 now,
             ]
             if tenant is not None:
