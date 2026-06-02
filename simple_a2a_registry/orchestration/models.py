@@ -30,7 +30,7 @@ class TaskStatus(str, Enum):
     DANGLING = "dangling"   # WS disconnect — grace period, not yet failed
     BLOCKED = "blocked"     # Blocked by human intervention (HITL)
     COMPLETED = "completed" # Finished successfully
-    FAILED = "failed"       # Finished with failure (may retry)
+    FAILED = "failed"       # Failed with failure (may retry)
     CANCELLED = "cancelled" # Cancelled before completion
     ARCHIVED = "archived"   # Terminal state — no further transitions
 
