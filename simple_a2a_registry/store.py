@@ -91,7 +91,10 @@ CREATE TABLE IF NOT EXISTS agents (
     disabled        INTEGER NOT NULL DEFAULT 0,
     registered_at   TEXT NOT NULL,
     created_at      REAL NOT NULL,
-    tenant_id       TEXT NOT NULL DEFAULT ''
+    tenant_id       TEXT NOT NULL DEFAULT '',
+    preferred_channel TEXT NOT NULL DEFAULT 'ws',
+    callback_url    TEXT NOT NULL DEFAULT '',
+    callback_token  TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS oauth_clients (
@@ -125,6 +128,7 @@ CREATE TABLE IF NOT EXISTS auth_codes (
 
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_client_id ON oauth_tokens(client_id);
 CREATE INDEX IF NOT EXISTS idx_agents_heartbeat ON agents(heartbeat_at);
+CREATE INDEX IF NOT EXISTS idx_agents_channel ON agents(preferred_channel);
 """
 
 # ---------------------------------------------------------------------------
@@ -139,7 +143,10 @@ CREATE TABLE IF NOT EXISTS agents (
     disabled        TINYINT(1) NOT NULL DEFAULT 0,
     registered_at   VARCHAR(255) NOT NULL,
     created_at      DOUBLE NOT NULL,
-    tenant_id       VARCHAR(255) NOT NULL DEFAULT ''
+    tenant_id       VARCHAR(255) NOT NULL DEFAULT '',
+    preferred_channel VARCHAR(20) NOT NULL DEFAULT 'ws',
+    callback_url    TEXT NOT NULL DEFAULT '',
+    callback_token  TEXT NOT NULL DEFAULT ''
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS oauth_clients (
@@ -202,6 +209,15 @@ def _maybe_create_schema(engine: DatabaseEngine) -> None:
                 engine.commit()
             except Exception:
                 pass  # column already exists
+        # P3.1: migrate existing databases — add callback columns
+        for col in ("preferred_channel", "callback_url", "callback_token"):
+            try:
+                engine.execute(
+                    f"ALTER TABLE agents ADD COLUMN {col} TEXT NOT NULL DEFAULT ''"
+                )
+                engine.commit()
+            except Exception:
+                pass  # column already exists
     elif engine.driver == "mysql":
         for statement in _SCHEMA_SQL_MYSQL.split(";"):
             stripped = statement.strip()
@@ -227,6 +243,23 @@ def _maybe_create_schema(engine: DatabaseEngine) -> None:
                 engine.commit()
             except Exception:
                 pass  # column already exists
+        # P3.1: migrate — add callback columns
+        for col in ("preferred_channel", "callback_url", "callback_token"):
+            try:
+                engine.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+                engine.commit()
+            except Exception:
+                pass  # column already exists
+        try:
+            engine.execute("ALTER TABLE agents MODIFY COLUMN preferred_channel VARCHAR(20) NOT NULL DEFAULT 'ws'")
+            engine.commit()
+        except Exception:
+            pass
+        try:
+            engine.execute("CREATE INDEX idx_agents_channel ON agents(preferred_channel)")
+            engine.commit()
+        except Exception:
+            pass
 
 
 # ======================================================================
@@ -524,16 +557,16 @@ class Store:
                 # Backward compatibility: non-empty tenant filter also returns
                 # agents with empty tenant_id (pre-tenant-isolation legacy data).
                 result = engine.execute(
-                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE (tenant_id=? OR tenant_id='')", (tenant,),
+                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id, preferred_channel, callback_url, callback_token FROM agents WHERE (tenant_id=? OR tenant_id='')", (tenant,),
                 )
             elif tenant == "":
                 # Empty string = backward compat: only empty-tenant agents
                 result = engine.execute(
-                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE (tenant_id='' OR tenant_id IS NULL)"
+                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id, preferred_channel, callback_url, callback_token FROM agents WHERE (tenant_id='' OR tenant_id IS NULL)"
                 )
             else:
                 # None = no tenant filter = all agents (admin scope)
-                result = engine.execute("SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents")
+                result = engine.execute("SELECT id, card_json, heartbeat_at, disabled, tenant_id, preferred_channel, callback_url, callback_token FROM agents")
             for row in result.fetchall():
                 agent_id = row["id"]
                 card = json.loads(row["card_json"])
@@ -548,6 +581,9 @@ class Store:
                     card["disabled"] = False
                 card["lastHeartbeat"] = last_hb
                 card["tenant"] = row.get("tenant_id", "") or ""
+                card["preferred_channel"] = row.get("preferred_channel", "ws") or "ws"
+                card["callback_url"] = row.get("callback_url", "") or ""
+                card["callback_token"] = row.get("callback_token", "") or ""
 
                 if skill:
                     skills = card.get("skills", [])
@@ -586,15 +622,15 @@ class Store:
         with self._tx("DEFERRED") as engine:
             if tenant is not None and tenant != "":
                 result = engine.execute(
-                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE id=? AND (tenant_id=? OR tenant_id='')", (agent_id, tenant),
+                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id, preferred_channel, callback_url, callback_token FROM agents WHERE id=? AND (tenant_id=? OR tenant_id='')", (agent_id, tenant),
                 )
             elif tenant == "":
                 result = engine.execute(
-                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE id=? AND (tenant_id='' OR tenant_id IS NULL)", (agent_id,),
+                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id, preferred_channel, callback_url, callback_token FROM agents WHERE id=? AND (tenant_id='' OR tenant_id IS NULL)", (agent_id,),
                 )
             else:
                 result = engine.execute(
-                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id FROM agents WHERE id=?", (agent_id,),
+                    "SELECT id, card_json, heartbeat_at, disabled, tenant_id, preferred_channel, callback_url, callback_token FROM agents WHERE id=?", (agent_id,),
                 )
             row = result.fetchone()
             if row is None:
@@ -607,6 +643,9 @@ class Store:
                 card["tenant"] = db_tenant
             else:
                 card["tenant"] = ""
+            card["preferred_channel"] = row.get("preferred_channel", "ws") or "ws"
+            card["callback_url"] = row.get("callback_url", "") or ""
+            card["callback_token"] = row.get("callback_token", "") or ""
             last_hb = row["heartbeat_at"]
             elapsed = time.time() - last_hb if last_hb else HEARTBEAT_TIMEOUT + 1
             if row.get("disabled"):
@@ -647,11 +686,19 @@ class Store:
                         tenant = iface.tenant
                         break
 
+        # Extract preferred_channel and callback_url from the agent_card
+        preferred_channel = agent_card.get("preferred_channel", "ws")
+        callback_url = agent_card.get("callback_url", "")
+        # Generate a callback token for callback-mode agents
+        callback_token = ""
+        if preferred_channel == "callback":
+            callback_token = secrets.token_urlsafe(32)
+
         with self._tx() as engine:
             engine.execute(
-                "INSERT INTO agents (id, card_json, heartbeat_at, registered_at, created_at, tenant_id) "
-                "VALUES (?,?,?,?,?,?)",
-                (agent_id, card_json, now_ts, registered_at, now_ts, tenant),
+                "INSERT INTO agents (id, card_json, heartbeat_at, registered_at, created_at, tenant_id, preferred_channel, callback_url, callback_token) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (agent_id, card_json, now_ts, registered_at, now_ts, tenant, preferred_channel, callback_url, callback_token),
             )
 
         return agent_id

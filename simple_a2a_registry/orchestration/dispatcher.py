@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import aiohttp
+
 from simple_a2a_registry.orchestration.models import (
     Task,
     TaskStatus,
@@ -93,11 +95,15 @@ class Dispatcher:
         workspace_manager: WorkspaceManager,
         config: Optional[DispatcherConfig] = None,
         ws_connections: Optional[Dict[str, Any]] = None,
+        registry_store: Optional[Any] = None,
+        http_session: Optional[aiohttp.ClientSession] = None,
     ) -> None:
         self.store = store
         self.ws_mgr = workspace_manager
         self.config = config or DispatcherConfig()
         self.ws_connections = ws_connections
+        self.registry_store = registry_store
+        self.http_session = http_session
         self._running = False
         self._task: Optional[asyncio.Task] = None
         # Track kanban task_ids dispatched via WebSocket so we can reconcile
@@ -257,11 +263,108 @@ class Dispatcher:
                     )
                 continue
 
-            # Priority 2: Assignee is NOT a connected agent → block the task
-            # so it doesn't sit in 'ready' forever
+            # Priority 2: Callback dispatch for callback-mode agents
+            # Check if the assignee is a callback-mode agent via registry store
+            is_callback_agent = False
+            callback_url = ""
+            callback_token = ""
+            if self.registry_store is not None:
+                try:
+                    agent_card = self.registry_store.get_agent(assignee)
+                    if agent_card:
+                        pref_channel = agent_card.get("preferred_channel", "ws") or "ws"
+                        if pref_channel == "callback":
+                            callback_url = (agent_card.get("callback_url", "") or "").strip()
+                            callback_token = agent_card.get("callback_token", "") or ""
+                            is_callback_agent = bool(callback_url)
+                except Exception:
+                    logger.exception("Failed to lookup agent '%s' in registry store", assignee)
+
+            if is_callback_agent:
+                # Callback-mode agent → dispatch via HTTP POST
+                claim_result = self.store.claim_task(
+                    task_id=task.id,
+                    worker_id=f"callback-{assignee}",
+                    pid=os.getpid(),
+                    ttl=self.config.claim_ttl,
+                )
+                if claim_result is None:
+                    continue  # another worker claimed it first
+
+                # Allocate workspace
+                try:
+                    ws_path = self.ws_mgr.allocate_for_claim(task)
+                    self.store._update_workspace_path(task.id, ws_path)
+                except Exception as e:
+                    logger.error("Callback workspace alloc failed for '%s': %s — releasing", task.id, e)
+                    self.store.update_task_status(
+                        task.id, TaskStatus.FAILED.value, result=str(e),
+                    )
+                    continue
+
+                # Build callback payload
+                payload = {
+                    "type": "task",
+                    "id": task.id,
+                    "title": task.title,
+                    "body": task.body or "",
+                    "assignee": assignee,
+                    "priority": task.priority,
+                    "workspace_path": ws_path,
+                    "kanban": True,
+                }
+
+                headers: dict[str, str] = {
+                    "Content-Type": "application/json",
+                }
+                if callback_token:
+                    headers["Authorization"] = f"Bearer {callback_token}"
+
+                try:
+                    session = self.http_session
+                    if session is None or session.closed:
+                        session = aiohttp.ClientSession()
+
+                    async with session.post(
+                        callback_url, json=payload, headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp:
+                        if resp.status >= 400:
+                            text = await resp.text()
+                            logger.error(
+                                "Callback dispatch to '%s' failed: HTTP %d: %s",
+                                callback_url, resp.status, text,
+                            )
+                            self.store.update_task_status(
+                                task.id, TaskStatus.FAILED.value,
+                                result=f"Callback returned HTTP {resp.status}",
+                            )
+                            continue
+
+                    self._dispatched_ws_tasks[task.id] = assignee
+                    claimed_count += 1
+                    logger.info(
+                        "Dispatched task '%s' via callback to agent '%s' (%s)",
+                        task.id, assignee, callback_url,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("Callback dispatch to agent '%s' timed out", assignee)
+                    self.store.update_task_status(
+                        task.id, TaskStatus.FAILED.value,
+                        result="Callback timed out after 30s",
+                    )
+                except Exception as e:
+                    logger.error("Callback dispatch to agent '%s' failed: %s", assignee, e)
+                    self.store.update_task_status(
+                        task.id, TaskStatus.FAILED.value,
+                        result=f"Callback dispatch failed: {e}",
+                    )
+                continue
+
+            # Priority 3: Assignee is NOT connected and NOT a callback agent → block
             if self.ws_connections:
                 logger.info(
-                    "Blocking task '%s' (assignee=%s) — agent not connected via WebSocket",
+                    "Blocking task '%s' (assignee=%s) — agent not connected via WebSocket and no callback configured",
                     task.id, assignee,
                 )
                 try:
@@ -270,7 +373,7 @@ class Dispatcher:
                     )
                     self.store.add_comment(
                         task.id, "dispatcher",
-                        f"assignee '{assignee}' is not connected via WebSocket",
+                        f"assignee '{assignee}' is not connected via WebSocket and no callback_url configured",
                     )
                 except Exception:
                     logger.exception("Failed to block task '%s'" , task.id)

@@ -2,7 +2,9 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { taskAPI } from '../api/client';
 import { useStore } from '../store/useStore';
 import StatusTag from '../components/StatusTag';
+import TaskTimeline from '../components/TaskTimeline';
 import { AdminWsClient } from '../api/wsClient';
+import type { TaskProgressInfo } from '../hooks/useWebSocket';
 
 const COLUMNS = ['todo', 'ready', 'running', 'completed', 'blocked', 'failed', 'cancelled'];
 const COLUMN_COLORS: Record<string, string> = {
@@ -40,10 +42,22 @@ const KanbanBoard: React.FC = () => {
   const selectedTaskRef = useRef(selectedTask);
   useEffect(() => { selectedTaskRef.current = selectedTask; }, [selectedTask]);
 
+  // --- Batch selection state ---
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [batchTargetStatus, setBatchTargetStatus] = useState('completed');
+  const [batchDeleteConfirm, setBatchDeleteConfirm] = useState(false);
+  const [batchProcessing, setBatchProcessing] = useState(false);
+  const [batchErrors, setBatchErrors] = useState<string[]>([]);
+
   const [wsConnected, setWsConnected] = useState(false);
   const [resultExpanded, setResultExpanded] = useState(false);
   const [errorExpanded, setErrorExpanded] = useState(false);
   const wsRef = useRef<AdminWsClient | null>(null);
+
+  // ── P2.2 Real-time progress & metrics state ──
+  const [taskProgress, setTaskProgress] = useState<Record<string, TaskProgressInfo>>({});
+  const [detailEvents, setDetailEvents] = useState<any[]>([]);
+  const [detailRuns, setDetailRuns] = useState<any[]>([]);
 
   const fetchTasks = useCallback(async () => {
     try {
@@ -94,6 +108,7 @@ const KanbanBoard: React.FC = () => {
             setSelectedTask((prev: any) =>
               prev && prev.id === updated.id ? null : prev,
             );
+            setSelectedIds((prev) => { const s = new Set(prev); s.delete(updated.id); return s; });
             break;
 
           case 'comment_added': {
@@ -116,6 +131,31 @@ const KanbanBoard: React.FC = () => {
       } else if (msg.type === 'task_list') {
         // Full task list sync (reconnect)
         setTasks(msg.tasks);
+      } else {
+        // P2.2: Real-time task progress (and any other messages)
+        const raw = msg as any;
+        if (raw.type === 'task_progress') {
+          const { task_id, progress, message, status } = raw;
+          setTaskProgress((prev) => ({
+            ...prev,
+            [task_id]: {
+              progress,
+              message,
+              status,
+              updatedAt: Date.now(),
+            },
+          }));
+          // Also sync status into the tasks list for live card updates
+          setTasks((prev) =>
+            prev.map((t) =>
+              t.id === task_id ? { ...t, progress, status } : t,
+            ),
+          );
+          // Sync into selectedTask detail drawer if open
+          setSelectedTask((prev: any) =>
+            prev && prev.id === task_id ? { ...prev, progress, status } : prev,
+          );
+        }
       }
     });
 
@@ -164,6 +204,8 @@ const KanbanBoard: React.FC = () => {
       const data = await taskAPI.getV2(id);
       const task = data.task || data;
       setSelectedTask({ ...task, comments: data.comments || [] });
+      setDetailEvents(data.events || []);
+      setDetailRuns(data.runs || []);
       setResultExpanded(false);
       setErrorExpanded(false);
       setEditForm({
@@ -185,6 +227,8 @@ const KanbanBoard: React.FC = () => {
     setSelectedTask(null);
     setEditing(false);
     setConfirmDelete(false);
+    setDetailEvents([]);
+    setDetailRuns([]);
   }, []);
 
   // Save edits
@@ -239,6 +283,93 @@ const KanbanBoard: React.FC = () => {
       addToast('error', `删除失败: ${e.message}`);
     }
   }, [addToast, closeDrawer, fetchTasks]);
+
+  // --- Batch selection handlers ---
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const s = new Set(prev);
+      if (s.has(id)) {
+        s.delete(id);
+      } else {
+        s.add(id);
+      }
+      return s;
+    });
+    setBatchDeleteConfirm(false);
+  };
+
+  const selectColumn = (col: string, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const s = new Set(prev);
+      const colTasks = groupedTasks[col] || [];
+      for (const t of colTasks) {
+        if (checked) {
+          s.add(t.id);
+        } else {
+          s.delete(t.id);
+        }
+      }
+      return s;
+    });
+    setBatchDeleteConfirm(false);
+  };
+
+  const clearSelection = () => {
+    setSelectedIds(new Set());
+    setBatchDeleteConfirm(false);
+    setBatchErrors([]);
+  };
+
+  const handleBatchStatusChange = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    setBatchProcessing(true);
+    setBatchErrors([]);
+    try {
+      const result = await taskAPI.batchUpdateStatus({ task_ids: ids, status: batchTargetStatus });
+      const updated = result.updated ?? 0;
+      const failed = result.failed ?? [];
+      if (failed.length > 0) {
+        const errMsgs = failed.map((f: any) => `${f.task_id}: ${f.error}`);
+        setBatchErrors(errMsgs);
+        addToast('warning', `${updated} 个成功, ${failed.length} 个失败`);
+      } else {
+        addToast('success', `已更新 ${updated} 个任务状态 → ${batchTargetStatus}`);
+      }
+      clearSelection();
+      fetchTasks();
+    } catch (e: any) {
+      addToast('error', `批量状态变更失败: ${e.message}`);
+    } finally {
+      setBatchProcessing(false);
+    }
+  };
+
+  const handleBatchDelete = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    setBatchProcessing(true);
+    setBatchErrors([]);
+    try {
+      const result = await taskAPI.batchDelete({ task_ids: ids });
+      const deleted = result.deleted ?? 0;
+      const failed = result.failed ?? [];
+      if (failed.length > 0) {
+        const errMsgs = failed.map((f: any) => `${f.task_id}: ${f.error}`);
+        setBatchErrors(errMsgs);
+        addToast('warning', `${deleted} 个已删除, ${failed.length} 个失败`);
+      } else {
+        addToast('success', `已删除 ${deleted} 个任务`);
+      }
+      clearSelection();
+      fetchTasks();
+    } catch (e: any) {
+      addToast('error', `批量删除失败: ${e.message}`);
+    } finally {
+      setBatchProcessing(false);
+    }
+  };
 
   const groupedTasks = COLUMNS.reduce((acc, col) => {
     acc[col] = tasks.filter((t) => t.status === col || (col === 'todo' && !t.status));
@@ -387,8 +518,17 @@ const KanbanBoard: React.FC = () => {
     );
   };
 
+  // Checkbox style shared by card and column header
+  const checkboxStyle: React.CSSProperties = {
+    width: 16, height: 16, borderRadius: 4, border: '1.5px solid var(--separator)',
+    background: 'transparent', cursor: 'pointer', flexShrink: 0,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    padding: 0, appearance: 'none', WebkitAppearance: 'none',
+    outline: 'none',
+  };
+
   return (
-    <div>
+    <div style={{ paddingBottom: selectedIds.size > 0 ? 70 : 0 }}>
       <h1 className="page-title">📋 Kanban Board</h1>
 
       {/* Mini stats */}
@@ -422,6 +562,12 @@ const KanbanBoard: React.FC = () => {
           {wsConnected ? 'Live' : 'Offline'}
         </span>
         <span className="spacer" />
+        {selectedIds.size > 0 && (
+          <button onClick={clearSelection}
+            style={{ ...btnStyle, background: 'transparent', border: '1px solid var(--border)', color: 'var(--text-secondary)' }}>
+            取消选择 ({selectedIds.size})
+          </button>
+        )}
         <button onClick={() => setShowCreate(true)}
           style={{ ...btnStyle, ...btnPrimaryStyle }}>+ New Task</button>
       </div>
@@ -439,48 +585,102 @@ const KanbanBoard: React.FC = () => {
         <div className="kanban-board">
           {COLUMNS.map((col) => {
             const colTasks = groupedTasks[col] || [];
+            const allSelected = colTasks.length > 0 && colTasks.every((t) => selectedIds.has(t.id));
+            const someSelected = colTasks.some((t) => selectedIds.has(t.id));
+
             return (
               <div key={col} className="kanban-column">
                 <div className="kanban-column-header" style={{ borderTopColor: COLUMN_COLORS[col] }}>
+                  {/* Column select-all checkbox */}
+                  <label style={{
+                    display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+                    marginRight: 8, flexShrink: 0,
+                  }}
+                    onClick={(e) => { e.stopPropagation(); }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      ref={(el) => {
+                        if (el) el.indeterminate = someSelected && !allSelected;
+                      }}
+                      onChange={(e) => {
+                        e.stopPropagation();
+                        selectColumn(col, e.target.checked);
+                      }}
+                      style={checkboxStyle}
+                    />
+                  </label>
                   <span><StatusTag status={col} /></span>
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{colTasks.length}</span>
                 </div>
                 <div className="kanban-column-body">
-                  {colTasks.map((t) => (
-                    <div key={t.id} className="kanban-card" onClick={() => openDetail(t.id)}>
-                      <div className="k-title">{t.title}</div>
-                      {(t.description || t.body) && (
-                        <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>{t.description || t.body}</div>
-                      )}
-                      <div className="k-meta">
-                        <span>{t.assignee || 'unassigned'}</span>
-                        <span>{t.priority || 'normal'}</span>
+                  {colTasks.map((t) => {
+                    const isSelected = selectedIds.has(t.id);
+                    return (
+                      <div key={t.id}
+                        className="kanban-card"
+                        onClick={() => openDetail(t.id)}
+                        style={{
+                          ...(isSelected ? {
+                            border: '2px solid var(--accent)',
+                            boxShadow: '0 0 0 1px rgba(0,122,255,0.15)',
+                          } : {}),
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {/* Card-level checkbox */}
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                          <label style={{
+                            flexShrink: 0, marginTop: 1, cursor: 'pointer',
+                            display: 'flex', alignItems: 'center',
+                          }}
+                            onClick={(e) => { e.stopPropagation(); }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleSelect(t.id)}
+                              style={checkboxStyle}
+                            />
+                          </label>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div className="k-title">{t.title}</div>
+                            {(t.description || t.body) && (
+                              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>{t.description || t.body}</div>
+                            )}
+                            <div className="k-meta">
+                              <span>{t.assignee || 'unassigned'}</span>
+                              <span>{t.priority || 'normal'}</span>
+                            </div>
+                            <div style={{ display: 'flex', gap: 4, marginTop: 8 }} onClick={(e) => e.stopPropagation()}>
+                              {col === 'todo' && (
+                                <>
+                                  <button onClick={() => handleMove(t.id, 'ready')} style={miniBtn}>→ Ready</button>
+                                  <button onClick={() => handleMove(t.id, 'blocked')} style={{ ...miniBtn, color: 'var(--orange)' }}>→ Blocked</button>
+                                </>
+                              )}
+                              {col === 'ready' && <button onClick={() => handleMove(t.id, 'running')} style={miniBtn}>→ Run</button>}
+                              {col === 'running' && (
+                                <>
+                                  <button onClick={() => handleMove(t.id, 'completed')} style={miniBtn}>→ Done</button>
+                                  <button onClick={() => handleMove(t.id, 'ready')} style={miniBtn}>← Revert</button>
+                                </>
+                              )}
+                              {col === 'blocked' && (
+                                <>
+                                  <button onClick={() => handleMove(t.id, 'ready')} style={miniBtn}>→ Ready</button>
+                                  <button onClick={() => handleMove(t.id, 'cancelled')} style={{ ...miniBtn, color: 'var(--red)' }}>→ Cancel</button>
+                                </>
+                              )}
+                              {col === 'failed' && <button onClick={() => handleMove(t.id, 'ready')} style={miniBtn}>→ Ready</button>}
+                              {col === 'cancelled' && <button onClick={() => handleMove(t.id, 'ready')} style={miniBtn}>→ Ready</button>}
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                      <div style={{ display: 'flex', gap: 4, marginTop: 8 }} onClick={(e) => e.stopPropagation()}>
-                        {col === 'todo' && (
-                          <>
-                            <button onClick={() => handleMove(t.id, 'ready')} style={miniBtn}>→ Ready</button>
-                            <button onClick={() => handleMove(t.id, 'blocked')} style={{ ...miniBtn, color: 'var(--orange)' }}>→ Blocked</button>
-                          </>
-                        )}
-                        {col === 'ready' && <button onClick={() => handleMove(t.id, 'running')} style={miniBtn}>→ Run</button>}
-                        {col === 'running' && (
-                          <>
-                            <button onClick={() => handleMove(t.id, 'completed')} style={miniBtn}>→ Done</button>
-                            <button onClick={() => handleMove(t.id, 'ready')} style={miniBtn}>← Revert</button>
-                          </>
-                        )}
-                        {col === 'blocked' && (
-                          <>
-                            <button onClick={() => handleMove(t.id, 'ready')} style={miniBtn}>→ Ready</button>
-                            <button onClick={() => handleMove(t.id, 'cancelled')} style={{ ...miniBtn, color: 'var(--red)' }}>→ Cancel</button>
-                          </>
-                        )}
-                        {col === 'failed' && <button onClick={() => handleMove(t.id, 'ready')} style={miniBtn}>→ Ready</button>}
-                        {col === 'cancelled' && <button onClick={() => handleMove(t.id, 'ready')} style={miniBtn}>→ Ready</button>}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                   {colTasks.length === 0 && (
                     <div style={{ textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 12, padding: 12 }}>
                       空
@@ -615,8 +815,122 @@ const KanbanBoard: React.FC = () => {
                       {detailField('ID', <code style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{selectedTask.id}</code>)}
                       {(selectedTask.description || selectedTask.body) && detailField('描述', selectedTask.description || selectedTask.body)}
                       {detailField('负责人', selectedTask.assignee || <span style={{ color: 'var(--text-tertiary)' }}>unassigned</span>)}
+
+                      {/* ── P2.2: Progress Bar ── */}
+                      {(() => {
+                        const taskId = selectedTask.id;
+                        const progInfo = taskProgress[taskId];
+                        const isRunning = ['running', 'accepted', 'working'].includes((selectedTask.status || '').toLowerCase());
+                        const isDone = ['completed', 'failed', 'cancelled'].includes((selectedTask.status || '').toLowerCase());
+                        let pct = 0;
+                        let progColor = 'var(--accent)';
+                        if (progInfo) {
+                          pct = Math.round(progInfo.progress * 100);
+                        } else if (isDone) {
+                          pct = 100;
+                          progColor = selectedTask.status === 'failed' ? 'var(--red)' : 'var(--green)';
+                        } else if (isRunning) {
+                          pct = 0;
+                        }
+                        return (
+                          <div style={{
+                            marginTop: 12, marginBottom: 16,
+                            padding: '12px 16px', background: 'var(--bg)', borderRadius: 8,
+                          }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: 11 }}>
+                              <span style={{ fontWeight: 500, color: 'var(--text-secondary)' }}>
+                                {progInfo?.message || (isRunning ? '任务执行中...' : '任务进度')}
+                              </span>
+                              <span style={{ fontWeight: 600, color: progColor }}>
+                                {isRunning ? `${pct}%` : (isDone ? '100%' : '0%')}
+                              </span>
+                            </div>
+                            <div style={{
+                              height: 6, borderRadius: 3,
+                              background: 'rgba(0,0,0,0.06)', overflow: 'hidden',
+                            }}>
+                              <div style={{
+                                width: `${isRunning ? pct : (isDone ? 100 : 0)}%`,
+                                height: '100%',
+                                borderRadius: 3,
+                                background: progColor,
+                                transition: 'width 300ms ease',
+                              }} />
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* ── P2.2: Metrics Cards ── */}
+                      <div style={{
+                        display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8,
+                        marginBottom: 16,
+                      }}>
+                        {(() => {
+                          // Duration
+                          const now = Math.floor(Date.now() / 1000);
+                          const startedAt = typeof selectedTask.started_at === 'number'
+                            ? selectedTask.started_at
+                            : (typeof selectedTask.started_at === 'string' ? parseInt(selectedTask.started_at, 10) : 0);
+                          const completedAt = typeof selectedTask.completed_at === 'number'
+                            ? selectedTask.completed_at
+                            : (typeof selectedTask.completed_at === 'string' ? parseInt(selectedTask.completed_at, 10) : 0);
+                          let duration = 0;
+                          if (completedAt > 0 && startedAt > 0) {
+                            duration = completedAt - startedAt;
+                          } else if (startedAt > 0) {
+                            duration = now - startedAt;
+                          }
+                          const durLabel = duration < 60 ? `${Math.round(duration)}s` :
+                            duration < 3600 ? `${Math.floor(duration / 60)}m ${Math.round(duration % 60)}s` :
+                            `${Math.floor(duration / 3600)}h ${Math.floor((duration % 3600) / 60)}m`;
+
+                          // Output size
+                          let outSize = '-';
+                          if (selectedTask.result) {
+                            const str = typeof selectedTask.result === 'string'
+                              ? selectedTask.result : JSON.stringify(selectedTask.result);
+                            const bytes = new Blob([str]).size;
+                            outSize = bytes < 1024 ? `${bytes} B` :
+                              bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KB` :
+                              `${(bytes / 1048576).toFixed(1)} MB`;
+                          }
+
+                          return (
+                            <>
+                              <div style={{ padding: '10px 12px', background: 'var(--bg)', borderRadius: 8 }}>
+                                <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 2 }}>⏱ 耗时</div>
+                                <div style={{ fontSize: 16, fontWeight: 600 }}>{duration > 0 ? durLabel : '-'}</div>
+                              </div>
+                              <div style={{ padding: '10px 12px', background: 'var(--bg)', borderRadius: 8 }}>
+                                <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 2 }}>💾 输出量</div>
+                                <div style={{ fontSize: 16, fontWeight: 600 }}>{outSize}</div>
+                              </div>
+                              <div style={{ padding: '10px 12px', background: 'var(--bg)', borderRadius: 8 }}>
+                                <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 2 }}>🔄 运行次数</div>
+                                <div style={{ fontSize: 16, fontWeight: 600 }}>{detailRuns.length}</div>
+                              </div>
+                              <div style={{ padding: '10px 12px', background: 'var(--bg)', borderRadius: 8 }}>
+                                <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 2 }}>📅 开始时间</div>
+                                <div style={{ fontSize: 13, fontWeight: 500 }}>{formatTime(selectedTask.started_at || selectedTask.created_at)}</div>
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+
                       {detailField('创建时间', formatTime(selectedTask.created_at || selectedTask.createdAt))}
                       {detailField('更新时间', formatTime(selectedTask.updated_at || selectedTask.updatedAt))}
+                    </div>
+                  )}
+
+                  {/* ── P2.2: Timeline ── */}
+                  {!editing && detailEvents.length > 0 && (
+                    <div style={{ borderTop: '1px solid var(--separator)', paddingTop: 16, marginBottom: 16 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.3px', marginBottom: 12 }}>
+                        📋 任务时间线 ({detailEvents.length} 个事件)
+                      </div>
+                      <TaskTimeline events={detailEvents} maxItems={30} />
                     </div>
                   )}
 
@@ -729,6 +1043,125 @@ const KanbanBoard: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Floating Batch Action Bar */}
+      {selectedIds.size > 0 && (
+        <>
+          {/* Batch errors detail */}
+          {batchErrors.length > 0 && (
+            <div style={{
+              position: 'fixed', bottom: 76, left: 0, right: 0,
+              display: 'flex', justifyContent: 'center', zIndex: 115,
+              pointerEvents: 'none',
+            }}>
+              <div style={{
+                background: 'rgba(255,69,58,0.08)', border: '1px solid rgba(255,69,58,0.25)',
+                borderRadius: 10, padding: '8px 14px', fontSize: 11,
+                color: 'var(--red)', maxWidth: 500,
+                pointerEvents: 'auto',
+              }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                  部分操作失败 ({batchErrors.length})
+                </div>
+                {batchErrors.map((e, i) => (
+                  <div key={i} style={{ lineHeight: 1.6 }}>• {e}</div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{
+            position: 'fixed', bottom: 0, left: 0, right: 0,
+            background: 'var(--bg-card)', backdropFilter: 'blur(12px)',
+            borderTop: '1px solid var(--separator)',
+            padding: '12px 24px', display: 'flex', alignItems: 'center', gap: 12,
+            zIndex: 110, boxShadow: '0 -4px 12px rgba(0,0,0,0.08)',
+          }}>
+            {/* Selected count */}
+            <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--accent)', whiteSpace: 'nowrap' }}>
+              {selectedIds.size} 个已选择
+            </span>
+
+            <div style={{ width: 1, height: 24, background: 'var(--separator)' }} />
+
+            {/* Status dropdown */}
+            <select
+              value={batchTargetStatus}
+              onChange={(e) => setBatchTargetStatus(e.target.value)}
+              style={{
+                padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)',
+                background: 'var(--bg)', fontSize: 12, color: 'var(--fg)',
+                outline: 'none', cursor: 'pointer',
+              }}
+            >
+              {COLUMNS.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+
+            {/* Batch status change */}
+            <button
+              onClick={handleBatchStatusChange}
+              disabled={batchProcessing}
+              style={{
+                ...btnStyle, background: 'var(--accent)', color: 'white', border: 'none',
+                opacity: batchProcessing ? 0.6 : 1,
+              }}
+            >
+              {batchProcessing ? '处理中...' : '变更状态'}
+            </button>
+
+            <div style={{ width: 1, height: 24, background: 'var(--separator)' }} />
+
+            {/* Batch delete */}
+            {!batchDeleteConfirm ? (
+              <button
+                onClick={() => setBatchDeleteConfirm(true)}
+                disabled={batchProcessing}
+                style={{
+                  ...btnStyle, background: 'var(--red)', color: 'white', border: 'none',
+                  opacity: batchProcessing ? 0.6 : 1,
+                }}
+              >
+                删除
+              </button>
+            ) : (
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <span style={{ fontSize: 11, color: 'var(--red)' }}>确认删除 {selectedIds.size} 个任务？</span>
+                <button
+                  onClick={handleBatchDelete}
+                  disabled={batchProcessing}
+                  style={{
+                    ...btnStyle, background: 'var(--red)', color: 'white', border: 'none',
+                    opacity: batchProcessing ? 0.6 : 1,
+                  }}
+                >
+                  {batchProcessing ? '删除中...' : '确认删除'}
+                </button>
+                <button
+                  onClick={() => setBatchDeleteConfirm(false)}
+                  style={{ ...btnStyle, background: 'transparent', border: '1px solid var(--border)' }}
+                >
+                  取消
+                </button>
+              </div>
+            )}
+
+            <span style={{ flex: 1 }} />
+
+            {/* Close selection */}
+            <button
+              onClick={clearSelection}
+              style={{
+                ...btnStyle, background: 'transparent', border: '1px solid var(--border)',
+                color: 'var(--text-secondary)', fontSize: 11,
+              }}
+            >
+              ✕ 取消选择
+            </button>
+          </div>
+        </>
       )}
     </div>
   );

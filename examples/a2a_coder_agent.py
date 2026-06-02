@@ -540,6 +540,95 @@ async def _send_ws_json(msg: Dict[str, Any]) -> bool:
         return False
 
 
+def _build_active_tasks() -> List[Dict[str, Any]]:
+    """Build the ``active_tasks`` list for state_sync from in-memory state.
+
+    Collects all non-terminal tasks from the HTTP task store (``_tasks``)
+    and from currently running WS subprocesses (``_active_procs``).
+
+    Returns:
+        A list of ``{"id": str, "status": str, "started_at": float}`` dicts.
+    """
+    active: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    # 1. HTTP _tasks — only non-terminal
+    for task_id, task in list(_tasks.items()):
+        if task.state in (TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELED):
+            continue
+        active.append({
+            "id": task_id,
+            "status": task.state.value,
+            "started_at": task.created_at,
+        })
+        seen_ids.add(task_id)
+
+    # 2. Active WS subprocesses (tasks being processed right now)
+    for task_id, _proc in list(_active_procs.items()):
+        if task_id not in seen_ids:
+            active.append({
+                "id": task_id,
+                "status": "working",
+                "started_at": time.time(),
+            })
+
+    return active
+
+
+async def _handle_state_sync_reply(data: Dict[str, Any]) -> None:
+    """Handle a ``state_sync_reply`` from the server after reconnection.
+
+    The server sends orphaned tasks — tasks it considers terminal
+    (completed / failed) that the agent may not have reported yet.
+    We re-send ``task_complete`` / ``task_fail`` for each orphaned task
+    so the server can properly reconcile its records.
+
+    Expected payload::
+
+        {"type": "state_sync_reply", "orphaned_tasks": [
+            {"id": "...", "status": "completed", "result": ...},
+            {"id": "...", "status": "failed", "error": "..."},
+        ]}
+    """
+    orphaned = data.get("orphaned_tasks", [])
+    if not orphaned:
+        logger.debug("WS: state_sync_reply has no orphaned tasks")
+        return
+
+    logger.info("WS: processing %d orphaned task(s) from state_sync_reply",
+                len(orphaned))
+    for ot in orphaned:
+        task_id = ot.get("id", "")
+        status = ot.get("status", "")
+        result = ot.get("result")
+        error = ot.get("error")
+
+        if not task_id:
+            continue
+
+        if status in ("completed", "success", "done"):
+            await _send_ws_json({
+                "type": "task_complete",
+                "id": task_id,
+                "status": "completed",
+                "result": result or {"text": "(orphaned task — recovered via state_sync)"},
+                "metrics": {"recovered": True},
+            })
+            logger.info("WS: re-sent task_complete for orphaned task %s", task_id)
+        elif status in ("failed", "error"):
+            await _send_ws_json({
+                "type": "task_fail",
+                "id": task_id,
+                "status": "failed",
+                "error": error or "(orphaned task — recovered via state_sync)",
+                "code": "ORPHANED",
+                "metrics": {"recovered": True},
+            })
+            logger.info("WS: re-sent task_fail for orphaned task %s", task_id)
+        else:
+            logger.debug("WS: ignoring orphaned task %s with status '%s'", task_id, status)
+
+
 async def _periodic_progress(task_id: str, cancel_event: asyncio.Event, started_at: float) -> None:
     """Send task_progress every 15s with estimated progress percentage.
 
@@ -1123,6 +1212,15 @@ async def ws_connect_loop(close_event: asyncio.Event) -> None:
         retry_delay = 1.0
         logger.info("WS: connected to Registry")
 
+        # ── Send state_sync immediately after reconnection ──
+        active_tasks = _build_active_tasks()
+        await ws.send_json({
+            "type": "state_sync",
+            "agent_id": _ws_agent_id,
+            "active_tasks": active_tasks,
+        })
+        logger.info("WS: sent state_sync with %d active task(s)", len(active_tasks))
+
         # Last ping timestamp for our own 30s ping
         last_ping_time = time.time()
 
@@ -1160,6 +1258,9 @@ async def ws_connect_loop(close_event: asyncio.Event) -> None:
                     elif msg_type == "ping":
                         # Respond to server ping (some WS frameworks expect this)
                         pass
+                    elif msg_type == "state_sync_reply":
+                        # Handle orphaned tasks after reconnection state sync
+                        asyncio.create_task(_handle_state_sync_reply(data))
                     elif msg_type == "close":
                         logger.info("WS: server requested close")
                         break
@@ -1174,11 +1275,28 @@ async def ws_connect_loop(close_event: asyncio.Event) -> None:
                     break
 
                 # Send our own ping every 30 seconds to keep the connection alive
+                # Ping carries active_task / task_status / task_progress for
+                # real-time task panel (P2.1 protocol spec).
                 now = time.time()
                 if now - last_ping_time >= 30.0:
                     try:
-                        await ws.send_json({"type": "ping"})
-                        logger.debug("WS: sent ping")
+                        ping_msg: Dict[str, Any] = {"type": "ping"}
+                        # Find the current active task (first non-terminal)
+                        active_tasks = _build_active_tasks()
+                        if active_tasks:
+                            # Use the first active task as the current one
+                            at = active_tasks[0]
+                            ping_msg["active_task"] = at["id"]
+                            ping_msg["task_status"] = at.get("status", "working")
+                            # Estimate progress from elapsed time
+                            started = at.get("started_at", now)
+                            elapsed = now - started
+                            ping_msg["task_progress"] = min(
+                                0.99, elapsed / HERMES_TIMEOUT
+                            )
+                        await ws.send_json(ping_msg)
+                        logger.debug("WS: sent ping%s",
+                                     f" active_task={ping_msg.get('active_task', '')}" if active_tasks else "")
                     except Exception:
                         pass
                     last_ping_time = now

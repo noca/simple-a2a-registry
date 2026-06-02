@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.." || exit 1
 DATA_DIR="data/dev"
 mkdir -p "$DATA_DIR/workspaces"
 
-exec python -m simple_a2a_registry \
+exec env python -m simple_a2a_registry \
   --host 0.0.0.0 \
   --port 8321 \
   --data-dir "$DATA_DIR" \

@@ -734,6 +734,126 @@ class OrchestrationHandler:
         return web.json_response(result)
 
 
+# ----------------------------------------------------------
+    # POST /v2/tasks/batch/status — Batch status update
+    # ----------------------------------------------------------
+
+    async def handle_batch_status(self, request: web.Request) -> web.Response:
+        """POST /v2/tasks/batch/status — batch update task statuses.
+
+        Request::
+
+            {"task_ids": ["t_xxx", "t_yyy"], "status": "running", "reason": "..."}
+
+        Response::
+
+            {"updated": 2, "failed": [{"task_id": "t_zzz", "error": "..."}]}
+
+        Empty task_ids → 400.  Non-existent tasks are silently skipped
+        (not counted as errors).  Partial success returns both updated
+        count and failed list.
+
+        Scope: ``registry:admin``.
+        """
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return _json_error(400, "invalid_json", "Invalid JSON body")
+
+        task_ids: list = body.get("task_ids", [])
+        if not isinstance(task_ids, list) or not task_ids:
+            return _json_error(
+                400, "validation_error",
+                "'task_ids' must be a non-empty array",
+            )
+
+        status = (body.get("status") or "").strip()
+        if not status:
+            return _json_error(
+                400, "validation_error",
+                "Missing required 'status' field",
+            )
+
+        reason = body.get("reason")
+
+        result = self.store.batch_update_status(task_ids, status)
+
+        # If reason provided, add comments to successfully updated tasks
+        if reason and result.get("updated", 0) > 0:
+            for task_id in task_ids:
+                task = self.store.get_task(task_id)
+                if task and task.status == status:
+                    try:
+                        self.store.add_comment(
+                            task_id, "system",
+                            f"Batch status update → {status}: {reason}",
+                        )
+                    except Exception:
+                        pass
+
+        # Broadcast to Admin UI
+        if self._broadcast_fn:
+            await self._broadcast_fn("batch_status", result)
+
+        return web.json_response(result)
+
+    # ----------------------------------------------------------
+    # POST /v2/tasks/batch/delete — Batch archive
+    # ----------------------------------------------------------
+
+    async def handle_batch_delete(self, request: web.Request) -> web.Response:
+        """POST /v2/tasks/batch/delete — batch archive (delete) tasks.
+
+        Request::
+
+            {"task_ids": ["t_xxx", "t_yyy"], "reason": "Cleanup old tasks"}
+
+        Response::
+
+            {"deleted": 2, "failed": [{"task_id": "t_zzz", "error": "..."}]}
+
+        Only terminal tasks (completed, failed, cancelled) can be archived.
+        Empty task_ids → 400.  Non-existent tasks are silently skipped.
+        Partial success returns both deleted count and failed list.
+
+        Scope: ``registry:admin``.
+        """
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return _json_error(400, "invalid_json", "Invalid JSON body")
+
+        task_ids: list = body.get("task_ids", [])
+        if not isinstance(task_ids, list) or not task_ids:
+            return _json_error(
+                400, "validation_error",
+                "'task_ids' must be a non-empty array",
+            )
+
+        reason = body.get("reason")
+
+        result = self.store.batch_delete(task_ids)
+
+        # If reason provided, add comments to successfully archived tasks
+        if reason and result.get("deleted", 0) > 0:
+            for task_id in task_ids:
+                task = self.store.get_task(task_id)
+                if task and task.status == TaskStatus.ARCHIVED.value:
+                    try:
+                        self.store.add_comment(
+                            task_id, "system",
+                            f"Batch archived: {reason}",
+                        )
+                    except Exception:
+                        pass
+
+        # Broadcast to Admin UI
+        if self._broadcast_fn:
+            await self._broadcast_fn("batch_delete", result)
+
+        return web.json_response(result)
+
+
 # ---------------------------------------------------------------------------
 # Route registration helper
 # ---------------------------------------------------------------------------
@@ -776,4 +896,14 @@ def register_v2_routes(app: web.Application, handler: OrchestrationHandler) -> N
     app.router.add_get(
         "/v2/stats/tenants",
         require_scope("registry:admin")(handler.handle_stats_by_tenant),
+    )
+    # POST /v2/tasks/batch/status — batch status update (registry:admin)
+    app.router.add_post(
+        "/v2/tasks/batch/status",
+        require_scope("registry:admin")(handler.handle_batch_status),
+    )
+    # POST /v2/tasks/batch/delete — batch archive (registry:admin)
+    app.router.add_post(
+        "/v2/tasks/batch/delete",
+        require_scope("registry:admin")(handler.handle_batch_delete),
     )

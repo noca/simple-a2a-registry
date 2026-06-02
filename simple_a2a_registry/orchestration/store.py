@@ -802,6 +802,69 @@ class TaskStore:
         ) is not None
 
     # ------------------------------------------------------------------
+    # Batch operations
+    # ------------------------------------------------------------------
+
+    def batch_update_status(
+        self,
+        task_ids: List[str],
+        new_status: str,
+    ) -> Dict[str, Any]:
+        """Update the status of multiple tasks in a batch.
+
+        Iterates over *task_ids*, calling :meth:`update_task_status` for
+        each one.  ``ValueError`` (task not found) and ``PermissionError``
+        (claim lock mismatch) are caught per-task and collected in the
+        ``failed`` list.  Tasks that don't exist are silently skipped.
+
+        Returns:
+            ``{"updated": int, "failed": [{"task_id": str, "error": str}]}``
+        """
+        updated = 0
+        failed: List[Dict[str, str]] = []
+
+        for task_id in task_ids:
+            try:
+                self.update_task_status(task_id, new_status)
+                updated += 1
+            except ValueError:
+                # Task not found — skip silently
+                pass
+            except PermissionError as e:
+                failed.append({"task_id": task_id, "error": str(e)})
+
+        return {"updated": updated, "failed": failed}
+
+    def batch_delete(
+        self,
+        task_ids: List[str],
+    ) -> Dict[str, Any]:
+        """Archive multiple tasks in a batch.
+
+        Iterates over *task_ids*, calling :meth:`delete_task` for each one.
+        ``ValueError`` (task not found) and ``PermissionError`` (claim lock
+        mismatch) are caught per-task and collected in the ``failed`` list.
+        Tasks that don't exist are silently skipped.
+
+        Returns:
+            ``{"deleted": int, "failed": [{"task_id": str, "error": str}]}``
+        """
+        deleted = 0
+        failed: List[Dict[str, str]] = []
+
+        for task_id in task_ids:
+            try:
+                if self.delete_task(task_id):
+                    deleted += 1
+            except ValueError:
+                # Task not found — skip silently
+                pass
+            except PermissionError as e:
+                failed.append({"task_id": task_id, "error": str(e)})
+
+        return {"deleted": deleted, "failed": failed}
+
+    # ------------------------------------------------------------------
     # Atomic Claim
     # ------------------------------------------------------------------
 

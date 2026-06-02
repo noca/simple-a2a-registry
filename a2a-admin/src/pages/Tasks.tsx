@@ -1,11 +1,12 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
-  Card, Table, Button, Tag, Row, Col, Select, Spin, Empty, Drawer, Descriptions, Typography,
+  Card, Table, Button, Tag, Row, Col, Select, Spin, Empty, Typography,
 } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { listV1Tasks } from '../api/client';
 import StatusTag from '../components/StatusTag';
 import PageTitle from '../components/PageTitle';
+import TaskDetailPanel from '../components/TaskDetailPanel';
 
 const { Text } = Typography;
 
@@ -60,12 +61,6 @@ const Tasks: React.FC = () => {
 
   const formatTime = (ts?: number) =>
     ts ? new Date(ts * 1000).toLocaleString() : '-';
-
-  const renderResult = (result: any) => {
-    if (!result) return '-';
-    if (typeof result === 'string') return result;
-    return JSON.stringify(result, null, 2);
-  };
 
   const columns = [
     {
@@ -149,71 +144,22 @@ const Tasks: React.FC = () => {
         )}
       </Spin>
 
-      <Drawer
-        title={
-          <span>
-            Task Detail
-            <code style={{ marginLeft: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
-              {selectedTask?.id}
-            </code>
-          </span>
-        }
-        placement="right"
-        width={520}
+      {/* Use the new TaskDetailPanel component with progress bar, timeline, metrics */}
+      <TaskDetailPanel
+        task={selectedTask ? {
+          id: selectedTask.id,
+          title: selectedTask.query || selectedTask.id,
+          status: selectedTask.state,
+          assignee: selectedTask.agent_id,
+          created_at: selectedTask.created_at,
+          updated_at: selectedTask.updated_at,
+          result: selectedTask.result,
+          [Symbol('extra')]: selectedTask,
+        } : null}
         open={drawerOpen}
         onClose={closeDrawer}
-        loading={detailLoading}
-      >
-        {selectedTask && (
-          <Descriptions column={1} size="small" bordered
-            styles={{
-              label: { width: 100, fontWeight: 500 },
-              content: { wordBreak: 'break-all' },
-            }}
-          >
-            <Descriptions.Item label="ID">
-              <code>{selectedTask.id}</code>
-            </Descriptions.Item>
-            <Descriptions.Item label="Agent">
-              {selectedTask.agent_id || '-'}
-            </Descriptions.Item>
-            <Descriptions.Item label="State">
-              <StatusTag status={selectedTask.state} />
-            </Descriptions.Item>
-            <Descriptions.Item label="Query">
-              {selectedTask.query || '-'}
-            </Descriptions.Item>
-            <Descriptions.Item label="Session">
-              {selectedTask.session_id || '-'}
-            </Descriptions.Item>
-            <Descriptions.Item label="Created">
-              {formatTime(selectedTask.created_at)}
-            </Descriptions.Item>
-            <Descriptions.Item label="Updated">
-              {formatTime(selectedTask.updated_at)}
-            </Descriptions.Item>
-            <Descriptions.Item label="Tenant">
-              {selectedTask.tenant || '-'}
-            </Descriptions.Item>
-            <Descriptions.Item label="Error">
-              {selectedTask.error ? (
-                <Text type="danger" style={{ whiteSpace: 'pre-wrap' }}>{selectedTask.error}</Text>
-              ) : '-'}
-            </Descriptions.Item>
-            <Descriptions.Item label="Result" span={1}>
-              {selectedTask.result ? (
-                <pre style={{
-                  fontSize: 12, background: 'var(--bg-secondary)', padding: 12,
-                  borderRadius: 6, maxHeight: 400, overflow: 'auto', margin: 0,
-                  whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                }}>
-                  {renderResult(selectedTask.result)}
-                </pre>
-              ) : '-'}
-            </Descriptions.Item>
-          </Descriptions>
-        )}
-      </Drawer>
+        fetchDetail={true}
+      />
     </div>
   );
 };

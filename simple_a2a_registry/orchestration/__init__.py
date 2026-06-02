@@ -46,6 +46,9 @@ from simple_a2a_registry.orchestration.swarm_routes import (
     SwarmHandler,
     register_swarm_routes,
 )
+from simple_a2a_registry.orchestration.anomaly_scanner import (
+    AnomalyScanner,
+)
 
 __all__ = [
     "Task",
@@ -70,6 +73,7 @@ __all__ = [
     "WorkspaceError",
     "Dispatcher",
     "DispatcherConfig",
+    "AnomalyScanner",
     "SwarmWorkerSpec",
     "SwarmCreated",
     "create_swarm",

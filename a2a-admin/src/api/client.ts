@@ -70,6 +70,10 @@ export const taskAPI = {
     api.post(`/v2/tasks/${id}/depend`, { parent_id: parentId }).then((r) => r.data),
   undepend: (id: string, parentId: string) =>
     api.delete(`/v2/tasks/${id}/depend/${parentId}`).then((r) => r.data),
+  batchUpdateStatus: (body: { task_ids: string[]; status: string }) =>
+    api.post('/v2/tasks/batch/status', body).then((r) => r.data),
+  batchDelete: (body: { task_ids: string[] }) =>
+    api.post('/v2/tasks/batch/delete', body).then((r) => r.data),
 };
 
 // --- Kanban Stats ---

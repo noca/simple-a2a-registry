@@ -2,7 +2,7 @@
 
 Provides a WebSocket endpoint (``/ws/admin``) that the a2a-admin frontend
 connects to receive live task updates.  Supports selective subscription
-per task ID or full (all tasks) subscription.
+per task ID or full (all tasks) subscription, plus per-task progress.
 
 Protocol
 --------
@@ -10,6 +10,7 @@ Client → Server (JSON)::
 
     {"type": "subscribe",       "task_ids": ["t_xxx", "t_yyy"]}
     {"type": "subscribe_all"}
+    {"type": "subscribe_progress", "task_ids": ["t_xxx"]}
     {"type": "ping"}
 
 Server → Client (JSON)::
@@ -17,6 +18,8 @@ Server → Client (JSON)::
     {"type": "task_update", "event": "created|updated|deleted|status_changed|comment_added",
      "task": {...}}
     {"type": "task_list",   "tasks": [...]}
+    {"type": "task_progress", "task_id": "t_xxx", "progress": 0.5,
+     "message": "Compiling...", "status": "working"}
     {"type": "pong"}
     {"type": "error",       "detail": "..."}
 """
@@ -48,16 +51,20 @@ class AdminWSHub:
     Attributes:
         _connections:       session_id → WebSocketResponse
         _subscriptions:     session_id → set of task_ids (empty set = subscribe all)
+        _progress_subs:     session_id → set of task_ids for progress-only subscriptions
         _heartbeat_tasks:   session_id → asyncio.Task for the heartbeat coroutine
+        _task_store:        Optional TaskStore for querying task status counts
     """
 
-    def __init__(self) -> None:
+    def __init__(self, task_store: Any = None) -> None:  # type: ignore[name-defined]
         self._connections: Dict[str, web.WebSocketResponse] = {}
         self._subscriptions: Dict[str, Set[str]] = {}
+        self._progress_subs: Dict[str, Set[str]] = {}
         self._heartbeat_tasks: Dict[str, asyncio.Task[None]] = {}
         self._auth_public_key: str = ""
         self._auth_algorithm: str = "HS256"
         self._auth_enabled: bool = False
+        self._task_store: Any = task_store
 
     # ------------------------------------------------------------------
     # Public API
@@ -119,6 +126,7 @@ class AdminWSHub:
         session_id = _make_session_id(request)
         self._connections[session_id] = ws
         self._subscriptions[session_id] = set()  # empty = subscribe all
+        self._progress_subs[session_id] = set()
         update_admin_ws_connections(len(self._connections))
         logger.info(
             "Admin WS connected: session=%s (%d active)",
@@ -143,7 +151,32 @@ class AdminWSHub:
                     msg_type = data.get("type", "")
 
                     if msg_type == "ping":
-                        await self._send(ws, {"type": "pong"})
+                        # Build a compact task status summary for the admin UI
+                        pong_msg: Dict[str, Any] = {"type": "pong"}
+                        if self._task_store is not None:
+                            try:
+                                # Query task counts by status
+                                _, pending_count = self._task_store.list_tasks(
+                                    status="pending,todo,ready", limit=0
+                                )
+                                _, running_count = self._task_store.list_tasks(
+                                    status="running,accepted,working", limit=0
+                                )
+                                _, completed_count = self._task_store.list_tasks(
+                                    status="completed", limit=0
+                                )
+                                _, failed_count = self._task_store.list_tasks(
+                                    status="failed", limit=0
+                                )
+                                pong_msg["task_counts"] = {
+                                    "pending": pending_count,
+                                    "running": running_count,
+                                    "completed": completed_count,
+                                    "failed": failed_count,
+                                }
+                            except Exception:
+                                logger.debug("Failed to query task counts for pong", exc_info=True)
+                        await self._send(ws, pong_msg)
 
                     elif msg_type == "subscribe":
                         task_ids = data.get("task_ids")
@@ -152,6 +185,17 @@ class AdminWSHub:
                     elif msg_type == "subscribe_all":
                         self._subscriptions[session_id] = set()
                         logger.debug("Admin session '%s' subscribed to all tasks", session_id)
+
+                    elif msg_type == "subscribe_progress":
+                        task_ids = data.get("task_ids")
+                        if isinstance(task_ids, list):
+                            self._progress_subs[session_id] = set(task_ids)
+                            logger.debug(
+                                "Admin session '%s' subscribed to progress for %d task(s)",
+                                session_id, len(task_ids),
+                            )
+                        else:
+                            await self._send(ws, {"type": "error", "detail": "'task_ids' must be a list"})
 
                     else:
                         logger.debug("Unknown admin WS message from %s: %s", session_id, msg_type)
@@ -210,6 +254,30 @@ class AdminWSHub:
         }
         await self._broadcast(task_id, msg)
 
+    async def broadcast_task_progress(
+        self,
+        task_id: str,
+        progress: float,
+        message: Optional[str] = None,
+        status: str = "working",
+    ) -> None:
+        """Push a real-time progress update to subscribers.
+
+        Args:
+            task_id:  The kanban task ID.
+            progress: Float 0.0–1.0.
+            message:  Optional human-readable progress message.
+            status:   Current task status (default "working").
+        """
+        msg = {
+            "type": "task_progress",
+            "task_id": task_id,
+            "progress": progress,
+            "message": message,
+            "status": status,
+        }
+        await self._broadcast_progress(task_id, msg)
+
     async def broadcast_task_list(self, session_id: str) -> None:
         """Send the current full task list to a single client (reconnect sync).
 
@@ -257,6 +325,7 @@ class AdminWSHub:
 
         ws = self._connections.pop(session_id, None)
         self._subscriptions.pop(session_id, None)
+        self._progress_subs.pop(session_id, None)
 
         # Cancel heartbeat task
         hb_task = self._heartbeat_tasks.pop(session_id, None)
@@ -361,6 +430,54 @@ class AdminWSHub:
             subs = self._subscriptions.get(session_id, set())
             if subs and task_id not in subs:
                 continue  # not interested in this task
+
+            try:
+                await ws.send_json(msg)
+            except (ConnectionResetError, ConnectionAbortedError):
+                stale.append(session_id)
+            except Exception as e:
+                logger.warning("Error sending to admin session '%s': %s",
+                               session_id, e)
+                stale.append(session_id)
+
+        # Clean up stale connections
+        for sid in stale:
+            self.disconnect(sid)
+
+    async def _broadcast_progress(self, task_id: str, msg: dict) -> None:
+        """Send a progress message to sessions subscribed via ``subscribe_progress``
+        or normal subscriptions covering *task_id*.
+
+        Args:
+            task_id: The kanban task ID.
+            msg:     The JSON-serialisable progress message to send.
+        """
+        if not self._connections:
+            return
+
+        stale: list[str] = []
+        for session_id, ws in list(self._connections.items()):
+            if ws.closed:
+                stale.append(session_id)
+                continue
+
+            # Check progress-specific subscriptions first
+            prog_subs = self._progress_subs.get(session_id, set())
+            if prog_subs:
+                if task_id in prog_subs:
+                    try:
+                        await ws.send_json(msg)
+                    except (ConnectionResetError, ConnectionAbortedError):
+                        stale.append(session_id)
+                    except Exception as e:
+                        logger.warning("Error sending progress to session '%s': %s",
+                                       session_id, e)
+                continue  # progress subs are exclusive when set
+
+            # Fall back to normal subscription check
+            subs = self._subscriptions.get(session_id, set())
+            if subs and task_id not in subs:
+                continue
 
             try:
                 await ws.send_json(msg)

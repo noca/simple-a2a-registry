@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from aiohttp import web, WSMsgType
 from aiohttp.web_middlewares import middleware
+import aiohttp
 import ssl
 
 from simple_a2a_registry.errors import (
@@ -70,6 +71,7 @@ from simple_a2a_registry.orchestration import (
     _maybe_create_schema as _maybe_create_board_schema,
     SwarmHandler,
     register_swarm_routes,
+    AnomalyScanner,
 )
 from simple_a2a_registry.ws_admin import AdminWSHub
 from simple_a2a_registry.registry_handler import (
@@ -116,7 +118,7 @@ def _registry_card(base_url: str) -> Dict:
             make_agent_skill("heartbeat", "Heartbeat", "Send keep-alive for an agent"),
             make_agent_skill(
                 "dispatch", "Dispatch Task",
-                "Dispatch a task to an agent via persistent connection",
+                "Dispatch a task to an agent via WebSocket or HTTP callback",
             ),
         ],
     )
@@ -137,6 +139,9 @@ class RegistryHandler:
         self.base_url = base_url.rstrip("/")
         self._started_at = time.time()
         self.audit_store = audit_store
+
+        # HTTP client session for callback dispatch
+        self._session: Optional[aiohttp.ClientSession] = None
 
         # WebSocket connections: agent_id -> WebSocketResponse
         self._ws_connections: Dict[str, web.WebSocketResponse] = {}
@@ -858,27 +863,39 @@ class RegistryHandler:
     async def handle_dispatch(self, request: web.Request) -> web.Response:
         """POST /v1/agents/{agent_id}/dispatch — submit a task to an agent.
 
-        If the agent is connected via WebSocket, the task is forwarded
-        immediately.  Otherwise returns 503 (agent unreachable).
+        Dispatches via:
+        - WebSocket if the agent is connected (preferred_channel == "ws")
+        - HTTP POST callback if the agent has preferred_channel == "callback"
+          and a callback_url.
 
-        Body:
-        ```json
-        {"query": "...", "sessionId": "..."}
-        ```
+        Returns 503 if neither channel is available.
         """
         agent_id = request.match_info["agent_id"]
 
         # Tenant filter from auth middleware; fall back to query param
         tenant = request["tenant"] if "tenant" in request else request.query.get("tenant", None)
 
-        # Check WebSocket connection
-        ws = self._ws_connections.get(agent_id)
-        if not ws or ws.closed:
-            # Check if agent exists but isn't connected
-            card = self.store.get_agent(agent_id, tenant=tenant)
-            if card is None:
-                return json_error(404, "agent_not_found",
-                                   f"Agent '{agent_id}' not found")
+        # Look up agent card for callback info (and existence check)
+        card = self.store.get_agent(agent_id, tenant=tenant)
+        if card is None:
+            return json_error(404, "agent_not_found",
+                               f"Agent '{agent_id}' not found")
+
+        preferred_channel = card.get("preferred_channel", "ws") or "ws"
+        callback_url = (card.get("callback_url", "") or "").strip()
+
+        # Check WebSocket connection for WS-mode agents
+        ws = None
+        if preferred_channel == "ws":
+            ws = self._ws_connections.get(agent_id)
+
+        if preferred_channel == "callback":
+            if not callback_url:
+                return json_error(503, "callback_not_configured",
+                                   f"Agent '{agent_id}' has preferred_channel='callback' but no callback_url")
+
+        elif not ws or ws.closed:
+            # WS-mode agent not connected
             return json_error(503, "agent_not_connected",
                                f"Agent '{agent_id}' is not connected via WebSocket")
 
@@ -910,41 +927,96 @@ class RegistryHandler:
         }
         self._tasks[task_id] = task
 
-        # Forward to agent via WebSocket
-        try:
-            await ws.send_json({
-                "type": "task",
-                "id": task_id,
-                "query": query,
-                "sessionId": session_id,
-            })
-            task["state"] = "forwarded"
-            logger.info("Dispatched task %s to agent '%s'", task_id, agent_id)
+        # --- Dispatch logic ---
 
-            if self.audit_store is not None:
-                self.audit_store.log(
-                    event_type=EventType.TASK_DISPATCH.value,
-                    actor=request.remote or "unknown",
-                    target=task_id,
-                    detail=f"agent_id={agent_id} query_len={len(query)}",
-                    success=True,
+        if preferred_channel == "callback":
+            # HTTP POST callback dispatch
+            try:
+                callback_token = card.get("callback_token", "") or ""
+                headers = {
+                    "Content-Type": "application/json",
+                }
+                if callback_token:
+                    headers["Authorization"] = f"Bearer {callback_token}"
+
+                payload = {
+                    "type": "task",
+                    "id": task_id,
+                    "query": query,
+                    "sessionId": session_id,
+                    "callbackUrl": f"{request.scheme}://{request.host}/v1/tasks/{task_id}/callback-result",
+                }
+
+                async with self._session.post(
+                    callback_url, json=payload, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status >= 400:
+                        text = await resp.text()
+                        logger.error(
+                            "Callback dispatch to '%s' failed: HTTP %d: %s",
+                            callback_url, resp.status, text,
+                        )
+                        task["state"] = "failed"
+                        task["error"] = f"Callback returned HTTP {resp.status}"
+                        return json_error(502, "callback_failed",
+                                           f"Callback to agent '{agent_id}' failed: HTTP {resp.status}")
+
+                task["state"] = "forwarded"
+                logger.info(
+                    "Dispatched task %s to agent '%s' via callback (%s)",
+                    task_id, agent_id, callback_url,
                 )
+            except asyncio.TimeoutError:
+                task["state"] = "failed"
+                task["error"] = "Callback timed out after 30s"
+                logger.error("Callback dispatch to agent '%s' timed out", agent_id)
+                return json_error(502, "callback_timeout",
+                                   f"Callback to agent '{agent_id}' timed out")
+            except Exception as e:
+                task["state"] = "failed"
+                task["error"] = f"Callback dispatch failed: {e}"
+                logger.error("Callback dispatch to agent '%s' failed: %s", agent_id, e)
+                return json_error(502, "callback_failed",
+                                   f"Failed to callback agent '{agent_id}': {e}")
 
-            # P1.2: Start the timeout timer after successful dispatch
-            self._schedule_task_timeout(task_id)
+        else:
+            # WebSocket dispatch (existing behavior)
+            try:
+                await ws.send_json({
+                    "type": "task",
+                    "id": task_id,
+                    "query": query,
+                    "sessionId": session_id,
+                })
+                task["state"] = "forwarded"
+                logger.info("Dispatched task %s to agent '%s'", task_id, agent_id)
+            except Exception as e:
+                task["state"] = "failed"
+                task["error"] = f"Dispatch failed: {e}"
+                logger.error("Dispatch to agent '%s' failed: %s", agent_id, e)
+                return json_error(502, "dispatch_failed",
+                                   f"Failed to dispatch task to agent '{agent_id}': {e}")
 
-        except Exception as e:
-            task["state"] = "failed"
-            task["error"] = f"Dispatch failed: {e}"
-            logger.error("Dispatch to agent '%s' failed: %s", agent_id, e)
-            return json_error(502, "dispatch_failed",
-                               f"Failed to dispatch task to agent '{agent_id}': {e}")
+        # Audit log
+        if self.audit_store is not None:
+            self.audit_store.log(
+                event_type=EventType.TASK_DISPATCH.value,
+                actor=request.remote or "unknown",
+                target=task_id,
+                detail=f"agent_id={agent_id} channel={preferred_channel} query_len={len(query)}",
+                success=True,
+            )
+
+        # Start timeout timer after successful dispatch
+        self._schedule_task_timeout(task_id)
 
         return web.json_response({
             "task_id": task_id,
             "agent_id": agent_id,
             "state": task["state"],
             "query": query,
+            "channel": preferred_channel,
             "created_at": task["created_at"],
         }, status=202)
 
@@ -962,6 +1034,82 @@ class RegistryHandler:
             return json_error(404, "task_not_found",
                                f"Task '{task_id}' not found")
         return web.json_response(task)
+
+    async def handle_callback_result(self, request: web.Request) -> web.Response:
+        """POST /v1/tasks/{task_id}/callback-result — receive callback result.
+
+        Called by callback-mode agents to submit their task results.
+        Expects ``callback_token`` as Bearer token in Authorization header.
+        """
+        task_id = request.match_info["task_id"]
+        task = self._tasks.get(task_id)
+        if task is None:
+            return json_error(404, "task_not_found",
+                               f"Task '{task_id}' not found")
+
+        if task.get("state") in ("completed", "failed", "cancelled"):
+            return json_error(400, "task_already_finalized",
+                               f"Task '{task_id}' is already in state '{task['state']}'")
+
+        # Verify callback token against the assigned agent
+        agent_id = task.get("agent_id", "")
+        card = self.store.get_agent(agent_id)
+        if card is None:
+            return json_error(404, "agent_not_found",
+                               f"Agent '{agent_id}' not found")
+
+        expected_token = (card.get("callback_token", "") or "")
+        if expected_token:
+            auth_header = request.headers.get("Authorization", "")
+            if not auth_header.startswith("Bearer "):
+                return json_error(401, "missing_token", "Missing Bearer token")
+            actual_token = auth_header[len("Bearer "):].strip()
+            if actual_token != expected_token:
+                return json_error(403, "invalid_token", "Invalid callback token")
+
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return json_error(400, "invalid_json", "Invalid JSON body")
+
+        result = body.get("result")
+        error = body.get("error")
+        state = body.get("state", "completed")
+
+        if state == "failed" or error:
+            task["state"] = "failed"
+            task["error"] = error or "Callback reported failure"
+        else:
+            task["state"] = "completed"
+            task["result"] = result
+
+        task["updated_at"] = time.time()
+
+        logger.info(
+            "Callback result for task %s from agent '%s': state=%s",
+            task_id, agent_id, task["state"],
+        )
+
+        # Cancel the timeout timer now that we have a result
+        self._cancel_task_timeout(task_id)
+
+        # Reconcile with kanban TaskStore if this was a dispatched task
+        if task["state"] == "completed":
+            _maybe_update_kanban(
+                self.task_store, self._dispatched_ws_tasks,
+                task_id, "completed",
+                result=result,
+                error=None,
+            )
+        else:
+            _maybe_update_kanban(
+                self.task_store, self._dispatched_ws_tasks,
+                task_id, "failed",
+                result=None,
+                error=error or "Callback reported failure",
+            )
+
+        return web.json_response({"status": "ok", "task_id": task_id, "state": task["state"]})
 
     async def handle_list_tasks(self, request: web.Request) -> web.Response:
         """GET /v1/tasks — list all tasks with optional filters.
@@ -1633,7 +1781,7 @@ def create_app(
     handler._auth_enabled = auth_enabled
 
     # Admin WebSocket Hub — live task updates for the Admin SPA
-    admin_ws_hub = AdminWSHub()
+    admin_ws_hub = AdminWSHub(task_store=task_store)
     admin_ws_hub._auth_public_key = public_key
     admin_ws_hub._auth_algorithm = algorithm
     admin_ws_hub._auth_enabled = auth_enabled
@@ -1649,6 +1797,29 @@ def create_app(
     orch_handler._broadcast_fn = _broadcast_task_event
     logger.info("OrchestrationHandler broadcast callback wired to AdminWSHub")
 
+    # Wire RegistryHandler (agent WS) progress callback to AdminWSHub
+    async def _broadcast_agent_progress(
+        task_id: str,
+        progress: float,
+        message: Optional[str] = None,
+        status: str = "working",
+    ) -> None:
+        """Bridge agent task_progress → AdminWSHub.broadcast_task_progress."""
+        await admin_ws_hub.broadcast_task_progress(
+            task_id, progress, message, status,
+        )
+
+    handler._broadcast_progress_fn = _broadcast_agent_progress
+    logger.info("RegistryHandler agent progress callback wired to AdminWSHub")
+
+    # P2.4: Anomaly Scanner — background orphan/timeout detection every 60s
+    anomaly_scanner = AnomalyScanner(
+        task_store=task_store,
+        ws_connections=handler._ws_connections,
+        admin_ws_hub=admin_ws_hub,
+        interval=60,
+    )
+
     # V2 Dispatcher (background worker dispatch)
     disp_config = DispatcherConfig(
         poll_interval=dispatcher_interval,
@@ -1656,7 +1827,9 @@ def create_app(
         failure_limit=failure_limit,
     )
     dispatcher = Dispatcher(task_store, ws_mgr, disp_config,
-                               ws_connections=handler._ws_connections) if dispatcher_enabled else None
+                               ws_connections=handler._ws_connections,
+                               registry_store=store,
+                               http_session=handler._session) if dispatcher_enabled else None
 
     # Wire up cross-references for WebSocket ↔ Kanban integration
     handler.task_store = task_store
@@ -1703,6 +1876,32 @@ def create_app(
     app["config"] = config
     app["audit_store"] = audit_store
     app["admin_ws_hub"] = admin_ws_hub
+    app["anomaly_scanner"] = anomaly_scanner
+
+    # HTTP client session for callback dispatch (created on startup, closed on cleanup)
+    async def _init_client_session(app_: web.Application) -> None:
+        handler._session = aiohttp.ClientSession()
+
+    async def _close_client_session(app_: web.Application) -> None:
+        if handler._session is not None:
+            await handler._session.close()
+            handler._session = None
+
+    # P2.4: Start/stop the anomaly scanner background loop
+    async def _start_anomaly_scanner(app_: web.Application) -> None:
+        scanner: AnomalyScanner = app_["anomaly_scanner"]
+        asyncio.create_task(scanner.run())
+        logger.info("AnomalyScanner background task started")
+
+    async def _stop_anomaly_scanner(app_: web.Application) -> None:
+        scanner: AnomalyScanner = app_["anomaly_scanner"]
+        scanner.stop()
+        logger.info("AnomalyScanner background task stopped")
+
+    app.on_startup.append(_init_client_session)
+    app.on_startup.append(_start_anomaly_scanner)
+    app.on_cleanup.append(_stop_anomaly_scanner)
+    app.on_cleanup.append(_close_client_session)
 
     # Health / well-known
     app.router.add_get("/health", handler.handle_health)
@@ -1767,6 +1966,12 @@ def create_app(
     app.router.add_post(
         "/v1/agents/{agent_id}/task",
         require_scope("task:write")(handler.handle_proxy_task),
+    )
+
+    # Callback result endpoint — called by callback-mode agents
+    app.router.add_post(
+        "/v1/tasks/{task_id}/callback-result",
+        handler.handle_callback_result,
     )
 
     # Static dashboard — a2a-admin React SPA

@@ -15,6 +15,7 @@ import argparse
 import logging
 import sys
 
+from simple_a2a_registry.config import load_config
 from simple_a2a_registry.log import setup_logging
 from simple_a2a_registry.server import create_app, run_server
 
@@ -179,6 +180,7 @@ def main(argv: list[str] | None = None) -> None:
         claim_ttl=args.claim_ttl,
         failure_limit=args.failure_limit,
         workspaces_root=args.workspaces_root,
+        config=load_config(),
     )
 
 

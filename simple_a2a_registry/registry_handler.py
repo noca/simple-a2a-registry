@@ -27,6 +27,36 @@ from simple_a2a_registry.orchestration.store import TaskStore
 logger = logging.getLogger("a2a_registry.registry_handler")
 
 # ---------------------------------------------------------------------------
+# P3.3: Per-agent state_sync rate limiter — max 1 per 30 seconds
+# ---------------------------------------------------------------------------
+_STATE_SYNC_COOLDOWN = 30.0  # seconds
+_state_sync_last: Dict[str, float] = {}  # agent_id -> last state_sync timestamp
+
+
+def _check_state_sync_rate_limit(agent_id: str) -> tuple[bool, float]:
+    """Check and record a state_sync rate limit for *agent_id*.
+
+    Returns:
+        ``(allowed, retry_after)`` — ``allowed`` is ``True`` if the
+        request passes the rate limit.  When ``allowed`` is ``False``,
+        ``retry_after`` is the number of seconds to wait before retrying.
+    """
+    now = time.time()
+    last = _state_sync_last.get(agent_id, 0.0)
+    elapsed = now - last
+    if elapsed < _STATE_SYNC_COOLDOWN and last > 0:
+        retry_after = _STATE_SYNC_COOLDOWN - elapsed
+        return False, retry_after
+    _state_sync_last[agent_id] = now
+    return True, 0.0
+
+
+def _reset_state_sync_rate_limiter() -> None:
+    """Clear all rate-limiter state (for test isolation)."""
+    _state_sync_last.clear()
+
+
+# ---------------------------------------------------------------------------
 # Context bag – what every handler receives
 # ---------------------------------------------------------------------------
 
@@ -41,6 +71,7 @@ class WSContext:
         connections: Agent WS connections dict from ``RegistryHandler._ws_connections``.
         task_store:  Kanban ``TaskStore`` (V2) for status reconciliation (may be ``None``).
         ws_tenant:   Tenant string extracted from JWT or query parameter.
+        store:       Registry ``Store`` for agent registration lookups (may be ``None``).
     """
     agent_id: str
     tasks: Dict[str, Any] = field(default_factory=dict)
@@ -51,6 +82,11 @@ class WSContext:
     # Timeout management callbacks (wired through by the RegistryHandler adapter)
     reset_task_timeout: Optional[TimeoutResetFn] = None
     cancel_task_timeout: Optional[TimeoutCancelFn] = None
+    # Registry store for agent registration lookups (P3.3 security)
+    store: Optional[Any] = None
+    # Callback to forward task_progress to admin WS hub subscribers.
+    # Signature: async fn(task_id: str, progress: float, message: str | None, status: str)
+    broadcast_progress_fn: Any = None
 
 
 # Handler signature
@@ -159,6 +195,10 @@ async def handle_ping(
 
     If the ping carries ``active_task`` / ``task_status`` / ``task_progress``
     fields the in-memory task record is updated accordingly.
+
+    The pong response includes ``pending_tasks`` — a list of tasks that are
+    assigned to this agent but not yet started (state ``pending`` / ``dispatched``),
+    giving the agent a push-based pull mechanism for new work.
     """
     _ping_states[ctx.agent_id] = _PingState(last_active=time.time())
 
@@ -173,9 +213,29 @@ async def handle_ping(
             task["progress"] = task_progress
         task["updated_at"] = time.time()
 
+    # Build pending_tasks list — non-terminal tasks assigned to this agent
+    pending_tasks: list[dict] = []
+    for task_id, task in list(ctx.tasks.items()):
+        task_agent = task.get("agent_id", "")
+        if not task_agent:
+            continue
+        if task_agent != ctx.agent_id:
+            continue
+        state = task.get("state", "")
+        if state in ("completed", "failed", "canceled"):
+            continue
+        pending_tasks.append({
+            "id": task_id,
+            "title": task.get("title", ""),
+            "state": state,
+            "progress": task.get("progress"),
+            "body": task.get("body", ""),
+        })
+
     await ws.send_json({
         "type": "pong",
         "ts": int(time.time()),
+        "pending_tasks": pending_tasks,
     })
 
 
@@ -280,6 +340,18 @@ async def handle_task_progress(
     # P1.2: Progress received → reset the timeout timer (continue waiting)
     if ctx.reset_task_timeout is not None:
         ctx.reset_task_timeout(task_id)
+
+    # P2.2: Forward progress to Admin WS hub subscribers
+    if ctx.broadcast_progress_fn is not None:
+        try:
+            await ctx.broadcast_progress_fn(
+                task_id,
+                progress=float(data.get("progress", 0)),
+                message=data.get("message"),
+                status=data.get("status", "working"),
+            )
+        except Exception:
+            logger.debug("broadcast_progress_fn failed for task '%s'", task_id, exc_info=True)
 
 
 # ── task_complete ───────────────────────────────────────────────────────
@@ -481,11 +553,74 @@ async def handle_state_sync(
     4. Agent-completed but server-unknown tasks are logged; the agent is
        expected to retransmit ``task_complete``.
     """
-    agent_id = data.get("agent_id", ctx.agent_id)
+    agent_id = data.get("agent_id", "")
     active_tasks = data.get("active_tasks", [])
 
-    logger.info("state_sync from agent '%s': %d active task(s) reported",
-                agent_id, len(active_tasks))
+    # ------------------------------------------------------------------
+    # P3.3 Security boundary checks
+    # ------------------------------------------------------------------
+
+    # 1 — agent_id validation: message agent_id must match WS connection owner
+    if agent_id and agent_id != ctx.agent_id:
+        logger.warning(
+            "state_sync REJECTED from agent '%s': message claims agent_id '%s' — mismatch",
+            ctx.agent_id, agent_id,
+        )
+        await ws.send_json({
+            "type": "error",
+            "detail": (
+                f"state_sync agent_id '{agent_id}' does not match "
+                f"connection owner '{ctx.agent_id}'"
+            ),
+        })
+        return
+
+    # Use the authenticated connection owner as authoritative agent_id
+    agent_id = ctx.agent_id
+
+    # 2 — Rate limiting: max 1 state_sync per 30 seconds per agent
+    allowed, retry_after = _check_state_sync_rate_limit(agent_id)
+    if not allowed:
+        logger.warning(
+            "state_sync REJECTED from agent '%s': rate limited, retry in %.1fs",
+            agent_id, retry_after,
+        )
+        await ws.send_json({
+            "type": "error",
+            "detail": f"state_sync rate limited: retry after {retry_after:.0f}s",
+            "retry_after": round(retry_after, 1),
+        })
+        return
+
+    # 3 — Agent registration check: only accept registered agents
+    if ctx.store is not None:
+        card = ctx.store.get_agent(agent_id, tenant=ctx.ws_tenant or None)
+        if card is None:
+            logger.warning(
+                "state_sync REJECTED from unregistered agent '%s'",
+                agent_id,
+            )
+            await ws.send_json({
+                "type": "error",
+                "detail": f"Agent '{agent_id}' is not registered",
+            })
+            return
+        if card.get("disabled", False):
+            logger.warning(
+                "state_sync REJECTED from disabled agent '%s'",
+                agent_id,
+            )
+            await ws.send_json({
+                "type": "error",
+                "detail": f"Agent '{agent_id}' is disabled",
+            })
+            return
+
+    # 4 — Log all accepted state_sync requests
+    logger.info(
+        "state_sync from agent '%s': %d active task(s) reported",
+        agent_id, len(active_tasks),
+    )
 
     # Build a set of task ids the agent thinks are active
     agent_active_ids = {t["id"] for t in active_tasks if "id" in t}
@@ -729,6 +864,8 @@ def _get_ws_handler(
             ws_tenant="",
             reset_task_timeout=getattr(registry_handler, "_reset_task_timeout", None),
             cancel_task_timeout=getattr(registry_handler, "_cancel_task_timeout", None),
+            store=getattr(registry_handler, "store", None),
+            broadcast_progress_fn=getattr(registry_handler, "_broadcast_progress_fn", None),
         )
         await handler(ws, data, ctx)
 

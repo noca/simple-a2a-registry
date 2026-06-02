@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 from aiohttp import (
     web,
@@ -404,6 +404,95 @@ _active_procs: Dict[str, subprocess.Popen] = {}
 _cancel_events: Dict[str, asyncio.Event] = {}
 # asyncio.Task for running process_ws_task — allows direct cancellation
 _running_ws_tasks: Dict[str, asyncio.Task] = {}
+
+
+def _build_active_tasks() -> List[Dict[str, Any]]:
+    """Build the ``active_tasks`` list for state_sync from in-memory state.
+
+    Collects all non-terminal tasks from the HTTP task store (``_tasks``)
+    and from currently running CLI subprocesses (``_active_procs``).
+
+    Returns:
+        A list of ``{"id": str, "status": str, "started_at": float}`` dicts.
+    """
+    active: List[Dict[str, Any]] = []
+    seen_ids: Set[str] = set()
+
+    # 1. HTTP _tasks — only non-terminal
+    for task_id, task in list(_tasks.items()):
+        if task.state in (TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELED):
+            continue
+        active.append({
+            "id": task_id,
+            "status": task.state.value,
+            "started_at": task.created_at,
+        })
+        seen_ids.add(task_id)
+
+    # 2. Active CLI subprocesses (tasks being processed right now)
+    for task_id, _proc in list(_active_procs.items()):
+        if task_id not in seen_ids:
+            active.append({
+                "id": task_id,
+                "status": "working",
+                "started_at": time.time(),
+            })
+
+    return active
+
+
+async def _handle_state_sync_reply(data: Dict[str, Any]) -> None:
+    """Handle a ``state_sync_reply`` from the server after reconnection.
+
+    The server sends orphaned tasks — tasks it considers terminal
+    (completed / failed) that the agent may not have reported yet.
+    We re-send ``task_complete`` / ``task_fail`` for each orphaned task
+    so the server can properly reconcile its records.
+
+    Expected payload::
+
+        {"type": "state_sync_reply", "orphaned_tasks": [
+            {"id": "...", "status": "completed", "result": ...},
+            {"id": "...", "status": "failed", "error": "..."},
+        ]}
+    """
+    orphaned = data.get("orphaned_tasks", [])
+    if not orphaned:
+        logger.debug("WS: state_sync_reply has no orphaned tasks")
+        return
+
+    logger.info("WS: processing %d orphaned task(s) from state_sync_reply",
+                len(orphaned))
+    for ot in orphaned:
+        task_id = ot.get("id", "")
+        status = ot.get("status", "")
+        result = ot.get("result")
+        error = ot.get("error")
+
+        if not task_id:
+            continue
+
+        if status in ("completed", "success", "done"):
+            await _send_ws_json({
+                "type": "task_complete",
+                "id": task_id,
+                "status": "completed",
+                "result": result or {"text": "(orphaned task — recovered via state_sync)"},
+                "metrics": {"recovered": True},
+            })
+            logger.info("WS: re-sent task_complete for orphaned task %s", task_id)
+        elif status in ("failed", "error"):
+            await _send_ws_json({
+                "type": "task_fail",
+                "id": task_id,
+                "status": "failed",
+                "error": error or "(orphaned task — recovered via state_sync)",
+                "code": "ORPHANED",
+                "metrics": {"recovered": True},
+            })
+            logger.info("WS: re-sent task_fail for orphaned task %s", task_id)
+        else:
+            logger.debug("WS: ignoring orphaned task %s with status '%s'", task_id, status)
 
 
 async def _periodic_progress(
@@ -1137,6 +1226,18 @@ async def _ws_connect_single(
     _ws_connection = ws
     logger.info("WebSocket connected for agent '%s'", agent_id)
 
+    # ── Send state_sync immediately after reconnection ──
+    active_tasks = _build_active_tasks()
+    try:
+        await ws.send_json({
+            "type": "state_sync",
+            "agent_id": agent_id,
+            "active_tasks": active_tasks,
+        })
+        logger.info("WS: sent state_sync with %d active task(s)", len(active_tasks))
+    except Exception as e:
+        logger.warning("WS: failed to send state_sync: %s", e)
+
     try:
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
@@ -1179,6 +1280,9 @@ async def _ws_connect_single(
                                 proc.kill()
                             except Exception:
                                 pass
+                elif msg_type == "state_sync_reply":
+                    # Handle orphaned tasks after reconnection state sync
+                    asyncio.create_task(_handle_state_sync_reply(data))
                 elif msg_type == "close":
                     break
             elif msg.type == WSMsgType.ERROR:

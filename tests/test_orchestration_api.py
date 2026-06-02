@@ -1420,3 +1420,165 @@ class TestV2StatsByTenant:
             assert ag["tenants"]["tenant1"]["total"] == 2
             assert ag["tenants"]["tenant2"]["total"] == 1
             assert ag["tenants"][""]["total"] == 1
+
+
+# ===================================================================
+# POST /v2/tasks/batch/status — Batch status update
+# ===================================================================
+
+
+class TestV2BatchStatus:
+    """Integration tests for POST /v2/tasks/batch/status."""
+
+    async def test_batch_status_success(self, api_client):
+        """Batch update status for multiple tasks."""
+        async with await api_client() as client:
+            # Create 3 tasks
+            r1 = await client.post("/v2/tasks", json={"title": "Task A"})
+            t1 = (await r1.json())["task"]["id"]
+            r2 = await client.post("/v2/tasks", json={"title": "Task B"})
+            t2 = (await r2.json())["task"]["id"]
+            r3 = await client.post("/v2/tasks", json={"title": "Task C"})
+            t3 = (await r3.json())["task"]["id"]
+
+            # Move all to running
+            for tid in (t1, t2, t3):
+                await client.post(f"/v2/tasks/{tid}/claim", json={
+                    "worker_id": "test", "pid": 1,
+                })
+
+            # Batch complete
+            resp = await client.post("/v2/tasks/batch/status", json={
+                "task_ids": [t1, t2, t3],
+                "status": "completed",
+                "reason": "All done",
+            })
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["updated"] == 3
+            assert data["failed"] == []
+
+            # Verify all are completed
+            for tid in (t1, t2, t3):
+                detail = await client.get(f"/v2/tasks/{tid}")
+                assert (await detail.json())["task"]["status"] == "completed"
+
+    async def test_batch_status_partial_missing(self, api_client):
+        """Non-existent task_ids are silently skipped."""
+        async with await api_client() as client:
+            r1 = await client.post("/v2/tasks", json={"title": "Exists"})
+            t1 = (await r1.json())["task"]["id"]
+            await client.post(f"/v2/tasks/{t1}/claim", json={
+                "worker_id": "test", "pid": 1,
+            })
+
+            resp = await client.post("/v2/tasks/batch/status", json={
+                "task_ids": [t1, "t_nonexistent"],
+                "status": "completed",
+            })
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["updated"] == 1
+            assert data["failed"] == []
+
+    async def test_batch_status_empty_ids(self, api_client):
+        """Empty task_ids array returns 400."""
+        async with await api_client() as client:
+            resp = await client.post("/v2/tasks/batch/status", json={
+                "task_ids": [],
+                "status": "completed",
+            })
+            assert resp.status == 400
+            data = await resp.json()
+            assert data["error"] == "validation_error"
+
+    async def test_batch_status_missing_status(self, api_client):
+        """Missing status field returns 400."""
+        async with await api_client() as client:
+            resp = await client.post("/v2/tasks/batch/status", json={
+                "task_ids": ["t_xxx"],
+            })
+            assert resp.status == 400
+            data = await resp.json()
+            assert data["error"] == "validation_error"
+
+
+# ===================================================================
+# POST /v2/tasks/batch/delete — Batch archive
+# ===================================================================
+
+
+class TestV2BatchDelete:
+    """Integration tests for POST /v2/tasks/batch/delete."""
+
+    async def test_batch_delete_success(self, api_client):
+        """Batch archive completed tasks."""
+        async with await api_client() as client:
+            # Create 2 tasks, complete them
+            tasks = []
+            for name in ("Alpha", "Beta"):
+                r = await client.post("/v2/tasks", json={"title": name})
+                tid = (await r.json())["task"]["id"]
+                await client.post(f"/v2/tasks/{tid}/claim", json={
+                    "worker_id": "test", "pid": 1,
+                })
+                await client.post(f"/v2/tasks/{tid}/complete", json={})
+                tasks.append(tid)
+
+            # Batch archive
+            resp = await client.post("/v2/tasks/batch/delete", json={
+                "task_ids": tasks,
+                "reason": "Cleanup",
+            })
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["deleted"] == 2
+            assert data["failed"] == []
+
+            # Verify both are archived
+            for tid in tasks:
+                detail = await client.get(f"/v2/tasks/{tid}")
+                assert (await detail.json())["task"]["status"] == "archived"
+
+    async def test_batch_delete_partial_missing(self, api_client):
+        """Non-existent task_ids are silently skipped."""
+        async with await api_client() as client:
+            r = await client.post("/v2/tasks", json={"title": "Exists"})
+            tid = (await r.json())["task"]["id"]
+            await client.post(f"/v2/tasks/{tid}/claim", json={
+                "worker_id": "test", "pid": 1,
+            })
+            await client.post(f"/v2/tasks/{tid}/complete", json={})
+
+            resp = await client.post("/v2/tasks/batch/delete", json={
+                "task_ids": [tid, "t_nonexistent"],
+            })
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["deleted"] == 1
+            assert data["failed"] == []
+
+    async def test_batch_delete_empty_ids(self, api_client):
+        """Empty task_ids array returns 400."""
+        async with await api_client() as client:
+            resp = await client.post("/v2/tasks/batch/delete", json={
+                "task_ids": [],
+            })
+            assert resp.status == 400
+            data = await resp.json()
+            assert data["error"] == "validation_error"
+
+    async def test_batch_delete_non_terminal(self, api_client):
+        """Non-terminal tasks cannot be archived — skipped."""
+        async with await api_client() as client:
+            r = await client.post("/v2/tasks", json={"title": "Active"})
+            tid = (await r.json())["task"]["id"]
+            # Task is still 'ready' — not terminal
+
+            resp = await client.post("/v2/tasks/batch/delete", json={
+                "task_ids": [tid],
+            })
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["deleted"] == 0
+            assert data["failed"] == []

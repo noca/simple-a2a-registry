@@ -5,7 +5,7 @@
  * incremental task_update → auto-reconnect with exponential backoff.
  *
  * Usage:
- *   const { connected, tasks, lastUpdate, connect, disconnect } = useWebSocket(token);
+ *   const { connected, tasks, lastUpdate, taskCounts, taskProgress, connect, disconnect } = useWebSocket(token);
  *
  * The hook auto-connects when a token is provided, and disconnects on unmount.
  * Call connect()/disconnect() manually to re-establish or tear down on demand.
@@ -28,13 +28,32 @@ export interface Task {
   description?: string;
   /** ISO-8601 or unix-seconds timestamp. Server shape varies; normalise at display. */
   created_at?: string | number;
+  started_at?: string | number;
+  completed_at?: string | number;
   updated_at?: string | number;
   /** Parent task ids (dependency edges). */
   parents?: string[];
   /** Child task ids. */
   children?: string[];
+  /** Result from completed tasks */
+  result?: string | Record<string, unknown> | null;
+  /** Current run id */
+  current_run_id?: number;
+  /** Progress percentage (0-100) from agent updates */
+  progress?: number;
   /** Arbitrary extra fields forwarded from the server. */
   [key: string]: unknown;
+}
+
+export interface TaskProgressInfo {
+  /** Progress value 0.0–1.0 */
+  progress: number;
+  /** Optional human-readable message */
+  message?: string;
+  /** Current task status */
+  status: string;
+  /** Timestamp of last progress update */
+  updatedAt: number;
 }
 
 export interface UseWebSocketResult {
@@ -45,6 +64,10 @@ export interface UseWebSocketResult {
   tasks: Task[];
   /** Unix timestamp (ms) of the last message received. */
   lastUpdate: number;
+  /** Task counts from the most recent pong (includes pending/running/completed/failed). */
+  taskCounts: Record<string, number>;
+  /** Per-task real-time progress info (keyed by task id). */
+  taskProgress: Record<string, TaskProgressInfo>;
   /** Manually establish (or re-establish) the connection. */
   connect: () => void;
   /** Manually tear down the connection. */
@@ -59,9 +82,13 @@ export function useWebSocket(token: string | null): UseWebSocketResult {
   const [connected, setConnected] = useState(false);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [lastUpdate, setLastUpdate] = useState(0);
+  const [taskCounts, setTaskCounts] = useState<Record<string, number>>({});
+  const [taskProgress, setTaskProgress] = useState<Record<string, TaskProgressInfo>>({});
 
   const wsRef = useRef<AdminWsClient | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const metaCleanupRef = useRef<(() => void) | null>(null);
+  const progressCleanupRef = useRef<(() => void) | null>(null);
 
   // Stable connect
   const connect = useCallback(() => {
@@ -111,6 +138,43 @@ export function useWebSocket(token: string | null): UseWebSocketResult {
     cleanupRef.current = unsub;
     wsRef.current = ws;
     ws.connect();
+
+    // Register meta handler for pong with task_counts
+    const unsubMeta = ws.onMeta((meta) => {
+      if (meta.type === 'pong' && meta.task_counts) {
+        setTaskCounts(meta.task_counts as Record<string, number>);
+      }
+      setLastUpdate(Date.now());
+    });
+    metaCleanupRef.current = unsubMeta;
+
+    // Register progress handler for real-time task_progress updates
+    const unsubProgress = ws.onProgress((msg) => {
+      setTaskProgress((prev) => ({
+        ...prev,
+        [msg.task_id]: {
+          progress: msg.progress,
+          message: msg.message,
+          status: msg.status,
+          updatedAt: Date.now(),
+        },
+      }));
+      // Also update the task in the main list if it exists
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === msg.task_id
+            ? { ...t, progress: msg.progress, status: msg.status }
+            : t,
+        ),
+      );
+      setLastUpdate(Date.now());
+    });
+    progressCleanupRef.current = unsubProgress;
+
+    // Auto-subscribe to progress for all active tasks
+    setTimeout(() => {
+      ws.subscribeProgress(['*']);
+    }, 500);
   }, [token]);
 
   // Stable disconnect
@@ -118,6 +182,14 @@ export function useWebSocket(token: string | null): UseWebSocketResult {
     if (cleanupRef.current) {
       cleanupRef.current();
       cleanupRef.current = null;
+    }
+    if (metaCleanupRef.current) {
+      metaCleanupRef.current();
+      metaCleanupRef.current = null;
+    }
+    if (progressCleanupRef.current) {
+      progressCleanupRef.current();
+      progressCleanupRef.current = null;
     }
     if (wsRef.current) {
       wsRef.current.disconnect();
@@ -136,7 +208,7 @@ export function useWebSocket(token: string | null): UseWebSocketResult {
     };
   }, [token, connect, disconnect]);
 
-  return { connected, tasks, lastUpdate, connect, disconnect };
+  return { connected, tasks, lastUpdate, taskCounts, taskProgress, connect, disconnect };
 }
 
 export default useWebSocket;

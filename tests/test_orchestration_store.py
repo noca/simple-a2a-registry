@@ -646,6 +646,102 @@ class TestEdgeCases:
 
 
 # ---------------------------------------------------------------------------
+# Batch operations
+# ---------------------------------------------------------------------------
+
+
+class TestBatchUpdateStatus:
+    """Tests for TaskStore.batch_update_status()."""
+
+    def test_batch_update_all_succeed(self, store: TaskStore) -> None:
+        tasks = [store.create_task(title=f"Task {i}") for i in range(3)]
+        # Move all to running
+        for t in tasks:
+            store.update_task_status(t.id, TaskStatus.RUNNING.value)
+
+        result = store.batch_update_status(
+            [t.id for t in tasks], TaskStatus.COMPLETED.value,
+        )
+        assert result["updated"] == 3
+        assert result["failed"] == []
+
+        for t in tasks:
+            updated = store.get_task(t.id)
+            assert updated is not None
+            assert updated.status == TaskStatus.COMPLETED.value
+
+    def test_batch_update_partial_missing(self, store: TaskStore) -> None:
+        t1 = store.create_task(title="Exists")
+        store.update_task_status(t1.id, TaskStatus.RUNNING.value)
+
+        result = store.batch_update_status(
+            [t1.id, "t_nonexistent"], TaskStatus.COMPLETED.value,
+        )
+        assert result["updated"] == 1
+        assert result["failed"] == []  # missing tasks are skipped silently
+
+    def test_batch_update_empty_list(self, store: TaskStore) -> None:
+        result = store.batch_update_status([], TaskStatus.RUNNING.value)
+        assert result["updated"] == 0
+        assert result["failed"] == []
+
+    def test_batch_update_invalid_transition(self, store: TaskStore) -> None:
+        """ready → completed is invalid; skipped (no error returned)."""
+        t1 = store.create_task(title="Invalid")
+        # ready → completed is illegal but batch_update_status catches
+        # ValueError and skips
+        result = store.batch_update_status([t1.id], TaskStatus.COMPLETED.value)
+        assert result["updated"] == 0
+        # InvalidTransitionError is caught by update_task_status and raised
+        # as ValueError, which batch_update_status silently skips
+        assert result["failed"] == []
+
+
+class TestBatchDelete:
+    """Tests for TaskStore.batch_delete()."""
+
+    def test_batch_delete_all_succeed(self, store: TaskStore) -> None:
+        tasks = []
+        for i in range(3):
+            t = store.create_task(title=f"Task {i}")
+            store.update_task_status(t.id, TaskStatus.RUNNING.value)
+            store.update_task_status(t.id, TaskStatus.COMPLETED.value)
+            tasks.append(t)
+
+        result = store.batch_delete([t.id for t in tasks])
+        assert result["deleted"] == 3
+        assert result["failed"] == []
+
+        for t in tasks:
+            updated = store.get_task(t.id)
+            assert updated is not None
+            assert updated.status == TaskStatus.ARCHIVED.value
+
+    def test_batch_delete_partial_missing(self, store: TaskStore) -> None:
+        t1 = store.create_task(title="Exists")
+        store.update_task_status(t1.id, TaskStatus.RUNNING.value)
+        store.update_task_status(t1.id, TaskStatus.COMPLETED.value)
+
+        result = store.batch_delete([t1.id, "t_nonexistent"])
+        assert result["deleted"] == 1
+        assert result["failed"] == []  # missing skipped silently
+
+    def test_batch_delete_non_terminal_skipped(self, store: TaskStore) -> None:
+        t1 = store.create_task(title="Ready task")  # ready — not terminal
+        store.update_task_status(t1.id, TaskStatus.RUNNING.value)
+        # running — still not terminal
+
+        result = store.batch_delete([t1.id])
+        assert result["deleted"] == 0
+        # InvalidTransitionError is caught → skipped
+
+    def test_batch_delete_empty_list(self, store: TaskStore) -> None:
+        result = store.batch_delete([])
+        assert result["deleted"] == 0
+        assert result["failed"] == []
+
+
+# ---------------------------------------------------------------------------
 # Tenant-filtered operations
 # ---------------------------------------------------------------------------
 

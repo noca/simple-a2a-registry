@@ -7,12 +7,14 @@
  * Protocol (server → client):
  *   - {"type": "task_update", "event": "created|updated|status_changed|deleted|comment_added", "task": {...}}
  *   - {"type": "task_list",    "tasks": [...]}
+ *   - {"type": "task_progress","task_id": "...", "progress": 0.5, "message": "...", "status": "working"}
  *   - {"type": "pong"}
  *   - {"type": "error",        "detail": "..."}
  *
  * Protocol (client → server):
  *   - {"type": "subscribe_all"}
  *   - {"type": "subscribe", "task_ids": [...]}
+ *   - {"type": "subscribe_progress", "task_ids": [...]}
  *   - {"type": "ping"}
  */
 
@@ -34,14 +36,30 @@ export interface TaskListMessage {
   tasks: Record<string, any>[];
 }
 
+export interface TaskProgressMessage {
+  type: 'task_progress';
+  task_id: string;
+  progress: number;
+  message?: string;
+  status: string;
+}
+
 export type WsMessage = TaskUpdateMessage | TaskListMessage;
 
 export type WsHandler = (msg: WsMessage) => void;
+
+/** Handles non-entity meta-messages (pong with task_counts). */
+export type WsMetaHandler = (msg: Record<string, unknown>) => void;
+
+/** Handles real-time task progress updates. */
+export type WsProgressHandler = (msg: TaskProgressMessage) => void;
 
 export class AdminWsClient {
   private ws: WebSocket | null = null;
   private url: string;
   private handlers: WsHandler[] = [];
+  private metaHandlers: WsMetaHandler[] = [];
+  private progressHandlers: WsProgressHandler[] = [];
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -66,6 +84,22 @@ export class AdminWsClient {
     this.handlers.push(handler);
     return () => {
       this.handlers = this.handlers.filter((h) => h !== handler);
+    };
+  }
+
+  /** Register a handler for meta messages (pong, error). */
+  onMeta(handler: WsMetaHandler): () => void {
+    this.metaHandlers.push(handler);
+    return () => {
+      this.metaHandlers = this.metaHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  /** Register a handler for real-time task progress updates. */
+  onProgress(handler: WsProgressHandler): () => void {
+    this.progressHandlers.push(handler);
+    return () => {
+      this.progressHandlers = this.progressHandlers.filter((h) => h !== handler);
     };
   }
 
@@ -99,8 +133,13 @@ export class AdminWsClient {
         const data = JSON.parse(event.data);
         if (data.type === 'task_update' || data.type === 'task_list') {
           this.dispatch(data as WsMessage);
+        } else if (data.type === 'task_progress') {
+          this.dispatchProgress(data as TaskProgressMessage);
+        } else if (data.type === 'pong') {
+          // Dispatch pong with task_counts to meta handlers
+          this.dispatchMeta(data as Record<string, unknown>);
         }
-        // Ignore pong/connected/error meta messages (handled by protocol)
+        // Ignore connected/error meta messages (handled by protocol)
       } catch (e) {
         console.warn('[AdminWS] Failed to parse message:', e);
       }
@@ -136,6 +175,11 @@ export class AdminWsClient {
     this.onStatusChange?.(false);
   }
 
+  /** Subscribe to progress updates for specific tasks. */
+  subscribeProgress(taskIds: string[]): void {
+    this.send({ type: 'subscribe_progress', task_ids: taskIds });
+  }
+
   /** Send a JSON message to the server. */
   send(data: Record<string, unknown>): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -153,6 +197,26 @@ export class AdminWsClient {
         handler(msg);
       } catch (e) {
         console.error('[AdminWS] Handler error:', e);
+      }
+    }
+  }
+
+  private dispatchMeta(msg: Record<string, unknown>): void {
+    for (const handler of this.metaHandlers) {
+      try {
+        handler(msg);
+      } catch (e) {
+        console.error('[AdminWS] Meta handler error:', e);
+      }
+    }
+  }
+
+  private dispatchProgress(msg: TaskProgressMessage): void {
+    for (const handler of this.progressHandlers) {
+      try {
+        handler(msg);
+      } catch (e) {
+        console.error('[AdminWS] Progress handler error:', e);
       }
     }
   }

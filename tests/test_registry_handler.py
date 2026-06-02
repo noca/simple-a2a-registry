@@ -17,6 +17,8 @@ from simple_a2a_registry.registry_handler import (
     create_default_router,
     _get_ws_handler,
     _reconcile_task_store,
+    _check_state_sync_rate_limit,
+    _reset_state_sync_rate_limiter,
     TimeoutResetFn,
     TimeoutCancelFn,
 )
@@ -46,6 +48,12 @@ def router() -> WSMessageRouter:
 @pytest.fixture
 def ws() -> AsyncMock:
     return AsyncMock(spec=web.WebSocketResponse)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter() -> None:
+    """Reset the module-level state_sync rate limiter before each test."""
+    _reset_state_sync_rate_limiter()
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +173,33 @@ class TestPingHandler:
         )
         assert tasks["t_abc"]["state"] == "working"
         assert tasks["t_abc"]["progress"] == 0.5
+
+    def test_ping_returns_pending_tasks_for_agent(self, router: WSMessageRouter):
+        """pong includes pending_tasks — non-terminal tasks for this agent."""
+        ws = AsyncMock()
+        tasks = {
+            "t_active": {"id": "t_active", "agent_id": "agent-a", "state": "working", "title": "Active task"},
+            "t_pending": {"id": "t_pending", "agent_id": "agent-a", "state": "dispatched", "title": "Pending task"},
+            "t_completed": {"id": "t_completed", "agent_id": "agent-a", "state": "completed", "title": "Done"},
+            "t_other": {"id": "t_other", "agent_id": "agent-b", "state": "working", "title": "Other agent task"},
+        }
+        import asyncio
+        asyncio.run(
+            router.dispatch(
+                ws, {"type": "ping"},
+                WSContext(agent_id="agent-a", tasks=tasks),
+            )
+        )
+        ws.send_json.assert_called_once()
+        call_args = ws.send_json.call_args[0][0]
+        assert call_args["type"] == "pong"
+        pending = call_args.get("pending_tasks", [])
+        assert len(pending) == 2, f"Expected 2 pending tasks, got {len(pending)}"
+        pending_ids = {p["id"] for p in pending}
+        assert "t_active" in pending_ids
+        assert "t_pending" in pending_ids
+        assert "t_completed" not in pending_ids  # Terminal state excluded
+        assert "t_other" not in pending_ids  # Other agent excluded
 
 
 # ---------------------------------------------------------------------------
@@ -912,3 +947,166 @@ class TestTimeoutCallbacks:
             )
         )
         assert tasks["t_001"]["state"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# P3.3: state_sync security boundaries — auth + rate limiting + registration
+# ---------------------------------------------------------------------------
+
+
+class TestStateSyncSecurity:
+    """Security boundary tests for state_sync handler."""
+
+    def test_state_sync_mismatched_agent_id_rejected(self, router: WSMessageRouter):
+        """state_sync with agent_id != ctx.agent_id -> error response."""
+        ws = AsyncMock()
+        tasks = {"t_001": {"id": "t_001", "agent_id": "agent-a", "state": "working"}}
+        import asyncio
+        asyncio.run(
+            router.dispatch(
+                ws,
+                {
+                    "type": "state_sync",
+                    "agent_id": "malicious-agent",
+                    "active_tasks": [],
+                },
+                WSContext(agent_id="agent-a", tasks=tasks),
+            )
+        )
+        ws.send_json.assert_called_once()
+        call_data = ws.send_json.call_args[0][0]
+        assert call_data["type"] == "error"
+        assert "does not match" in call_data["detail"]
+
+    def test_state_sync_without_agent_id_uses_ctx(self, router: WSMessageRouter):
+        """state_sync without agent_id uses ctx.agent_id and passes."""
+        ws = AsyncMock()
+        tasks = {"t_001": {"id": "t_001", "agent_id": "agent-a", "state": "completed"}}
+        import asyncio
+        asyncio.run(
+            router.dispatch(
+                ws,
+                {"type": "state_sync", "active_tasks": []},
+                WSContext(agent_id="agent-a", tasks=tasks),
+            )
+        )
+        ws.send_json.assert_called_once()
+        call_data = ws.send_json.call_args[0][0]
+        assert call_data["type"] == "state_sync_reply"
+
+    def test_state_sync_rate_limit(self, router: WSMessageRouter):
+        """state_sync within 30s -> rejected."""
+        ws = AsyncMock()
+        tasks: dict = {}
+        import asyncio
+        asyncio.run(
+            router.dispatch(
+                ws,
+                {"type": "state_sync", "active_tasks": []},
+                WSContext(agent_id="agent-a", tasks=tasks),
+            )
+        )
+        ws.reset_mock()
+        asyncio.run(
+            router.dispatch(
+                ws,
+                {"type": "state_sync", "active_tasks": []},
+                WSContext(agent_id="agent-a", tasks=tasks),
+            )
+        )
+        ws.send_json.assert_called_once()
+        call_data = ws.send_json.call_args[0][0]
+        assert call_data["type"] == "error"
+        assert "rate limited" in call_data["detail"]
+
+    def test_state_sync_rate_limit_resets(self):
+        """_check_state_sync_rate_limit allows after cooldown."""
+        ok1, _ = _check_state_sync_rate_limit("rate-test-agent")
+        assert ok1
+        ok2, retry = _check_state_sync_rate_limit("rate-test-agent")
+        assert not ok2
+        assert retry > 0
+
+    def test_state_sync_unregistered_agent_rejected(self, router: WSMessageRouter):
+        """state_sync from unregistered agent -> error response."""
+        ws = AsyncMock()
+        tasks: dict = {}
+        mock_store = MagicMock()
+        mock_store.get_agent.return_value = None
+        import asyncio
+        asyncio.run(
+            router.dispatch(
+                ws,
+                {"type": "state_sync", "active_tasks": []},
+                WSContext(agent_id="unknown-agent", tasks=tasks, store=mock_store),
+            )
+        )
+        ws.send_json.assert_called_once()
+        call_data = ws.send_json.call_args[0][0]
+        assert call_data["type"] == "error"
+        assert "is not registered" in call_data["detail"]
+        mock_store.get_agent.assert_called_once_with(
+            "unknown-agent", tenant=None,
+        )
+
+    def test_state_sync_disabled_agent_rejected(self, router: WSMessageRouter):
+        """state_sync from disabled agent -> error response."""
+        ws = AsyncMock()
+        tasks: dict = {}
+        mock_store = MagicMock()
+        mock_store.get_agent.return_value = {
+            "id": "disabled-agent",
+            "name": "Disabled Agent",
+            "disabled": True,
+        }
+        import asyncio
+        asyncio.run(
+            router.dispatch(
+                ws,
+                {"type": "state_sync", "active_tasks": []},
+                WSContext(agent_id="disabled-agent", tasks=tasks, store=mock_store),
+            )
+        )
+        ws.send_json.assert_called_once()
+        call_data = ws.send_json.call_args[0][0]
+        assert call_data["type"] == "error"
+        assert "is disabled" in call_data["detail"]
+
+    def test_state_sync_registered_agent_passes(self, router: WSMessageRouter):
+        """state_sync from registered, enabled agent -> state_sync_reply."""
+        ws = AsyncMock()
+        tasks = {"t_001": {"id": "t_001", "agent_id": "agent-a", "state": "completed"}}
+        mock_store = MagicMock()
+        mock_store.get_agent.return_value = {
+            "id": "agent-a",
+            "name": "Agent A",
+            "disabled": False,
+        }
+        import asyncio
+        asyncio.run(
+            router.dispatch(
+                ws,
+                {"type": "state_sync", "active_tasks": []},
+                WSContext(agent_id="agent-a", tasks=tasks, store=mock_store),
+            )
+        )
+        ws.send_json.assert_called_once()
+        call_data = ws.send_json.call_args[0][0]
+        assert call_data["type"] == "state_sync_reply"
+
+    def test_state_sync_skips_store_check_when_store_none(
+            self, router: WSMessageRouter):
+        """state_sync works when store is None (backward compatible)."""
+        ws = AsyncMock()
+        tasks = {"t_001": {"id": "t_001", "agent_id": "agent-a", "state": "completed"}}
+        import asyncio
+        asyncio.run(
+            router.dispatch(
+                ws,
+                {"type": "state_sync", "active_tasks": []},
+                WSContext(agent_id="agent-a", tasks=tasks, store=None),
+            )
+        )
+        ws.send_json.assert_called_once()
+        call_data = ws.send_json.call_args[0][0]
+        assert call_data["type"] == "state_sync_reply"
