@@ -87,6 +87,8 @@ class WSContext:
     # Callback to forward task_progress to admin WS hub subscribers.
     # Signature: async fn(task_id: str, progress: float, message: str | None, status: str)
     broadcast_progress_fn: Any = None
+    # P1.3: Cancel the dangling grace-period timer for this agent (reconnect healing).
+    cancel_dangling_timer: Optional[TimeoutCancelFn] = None
 
 
 # Handler signature
@@ -685,6 +687,8 @@ async def handle_state_sync(
     # proper task_complete / task_fail message so the server can record the
     # result and reconcile with the kanban TaskStore.
     # ------------------------------------------------------------------
+    # P1.3: Count healed tasks for dangling-timer cancellation
+    healed_count = 0
     for at in active_tasks:
         at_id = at.get("id")
         at_status = at.get("status")
@@ -707,6 +711,35 @@ async def handle_state_sync(
                 "created_at": time.time(),
                 "updated_at": time.time(),
             }
+
+        # P1.3: DANGLING→RUNNING healing — DB says dangling, agent says active
+        if (at_status in ("working", "running", "accepted")
+                and ctx.task_store is not None
+                and ctx._dispatched_ws_tasks is not None
+                and at_id in ctx._dispatched_ws_tasks):
+            try:
+                task_obj = ctx.task_store.get_task(at_id)
+                if task_obj is not None and task_obj.status == TaskStatus.DANGLING.value:
+                    ctx.task_store.update_task_status(
+                        at_id, TaskStatus.RUNNING.value,
+                    )
+                    healed_count += 1
+                    logger.info(
+                        "state_sync: healed task %s → running (was dangling) "
+                        "for agent '%s'", at_id, agent_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "state_sync: failed to heal dangling task '%s'", at_id,
+                )
+
+    # P1.3: Cancel dangling timer if tasks were healed
+    if healed_count and ctx.cancel_dangling_timer is not None:
+        ctx.cancel_dangling_timer(agent_id)
+        logger.info(
+            "state_sync: healed %d dangling task(s) for agent '%s' — timer cancelled",
+            healed_count, agent_id,
+        )
 
     # ------------------------------------------------------------------
     # Step 3 — Detect server-completed/agent-unknown orphaned tasks
@@ -864,6 +897,7 @@ def _get_ws_handler(
             ws_tenant="",
             reset_task_timeout=getattr(registry_handler, "_reset_task_timeout", None),
             cancel_task_timeout=getattr(registry_handler, "_cancel_task_timeout", None),
+            cancel_dangling_timer=getattr(registry_handler, "_cancel_dangling_timer", None),
             store=getattr(registry_handler, "store", None),
             broadcast_progress_fn=getattr(registry_handler, "_broadcast_progress_fn", None),
         )

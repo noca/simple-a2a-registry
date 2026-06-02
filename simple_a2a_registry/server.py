@@ -848,6 +848,17 @@ class RegistryHandler:
             timer.cancel()
             logger.debug("Cancelled timeout timer for task '%s'", task_id)
 
+    def _cancel_dangling_timer(self, agent_id: str) -> None:
+        """Cancel the dangling grace-period timer for *agent_id* (no-op if absent).
+
+        Called when an agent reconnects and its tasks are healed back to RUNNING
+        via state_sync (P1.3).
+        """
+        timer = self._dangling_timers.pop(agent_id, None)
+        if timer is not None and not timer.done():
+            timer.cancel()
+            logger.debug("Cancelled dangling timer for agent '%s'", agent_id)
+
     def _reset_task_timeout(self, task_id: str) -> None:
         """Cancel and re-schedule the timeout for *task_id*.
 
