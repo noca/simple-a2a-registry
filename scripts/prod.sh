@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.." || exit 1
 DATA_DIR="${HOME}/.simple-a2a-registry"
 mkdir -p "$DATA_DIR/workspaces"
 
-exec env ADMIN_PASSWORD=admin123 python -m simple_a2a_registry \
+exec env ADMIN_PASSWORD=admin123 python -m simple_a2a_registry server \
   --host 0.0.0.0 \
   --port 8321 \
   --data-dir "$DATA_DIR" \
