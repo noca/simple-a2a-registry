@@ -202,56 +202,61 @@ def build_server_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _start_server(args: argparse.Namespace) -> None:
     """Execute the server subcommand with parsed arguments."""
-    log_file = args.log_file
+    log_file = getattr(args, "log_file", None)
     setup_logging(
-        log_format=args.log_format,
-        level=args.log_level.lower(),
+        log_format=getattr(args, "log_format", "text"),
+        level=getattr(args, "log_level", "INFO").lower(),
         output="stdout",
         log_file=log_file,
         suppress_noisy=True,
     )
 
     # Deprecated alias handling
-    if args.dispatcher_enabled_v1 is not None:
+    if getattr(args, "dispatcher_enabled_v1", None) is not None:
         logger.warning("--dispatcher is deprecated; use --dispatcher-enabled instead")
         args.dispatcher_enabled = args.dispatcher_enabled_v1
 
     v2_opts = []
-    if args.board_path:
+    if getattr(args, "board_path", None):
         v2_opts.append(f"board={args.board_path}")
-    if args.dispatcher_enabled is False:
+    if getattr(args, "dispatcher_enabled", True) is False:
         v2_opts.append("dispatcher=off")
-    if args.dispatcher_interval != 5:
+    if getattr(args, "dispatcher_interval", 5) != 5:
         v2_opts.append(f"poll_interval={args.dispatcher_interval}s")
-    if args.claim_ttl != 900:
+    if getattr(args, "claim_ttl", 900) != 900:
         v2_opts.append(f"claim_ttl={args.claim_ttl}s")
-    if args.failure_limit != 3:
+    if getattr(args, "failure_limit", 3) != 3:
         v2_opts.append(f"fail_limit={args.failure_limit}")
-    if args.workspaces_root:
+    if getattr(args, "workspaces_root", None):
         v2_opts.append(f"workspaces={args.workspaces_root}")
 
-    auth_info = "🔐 auth enabled" if args.auth_enabled else "🔓 auth disabled (dev)"
+    auth_enabled = getattr(args, "auth_enabled", False)
+    auth_info = "🔐 auth enabled" if auth_enabled else "🔓 auth disabled (dev)"
     v2_info = f" | V2: {', '.join(v2_opts)}" if v2_opts else " | V2: defaults"
+
+    host = getattr(args, "host", "0.0.0.0")
+    port = getattr(args, "port", 8321)
+    data_dir = getattr(args, "data_dir", "~/.simple-a2a-registry")
+
     logger.info(
         "Simple A2A Registry starting on %s:%s (data: %s) %s %s",
-        args.host, args.port, args.data_dir, auth_info, v2_info,
+        host, port, data_dir, auth_info, v2_info,
     )
 
     run_server(
-        host=args.host,
-        port=args.port,
-        data_dir=args.data_dir,
-        auth_enabled=args.auth_enabled,
-        bootstrap_secret=args.bootstrap_secret,
-        board_path=args.board_path,
-        dispatcher_enabled=args.dispatcher_enabled,
-        dispatcher_interval=args.dispatcher_interval,
-        claim_ttl=args.claim_ttl,
-        failure_limit=args.failure_limit,
-        workspaces_root=args.workspaces_root,
+        host=host,
+        port=port,
+        data_dir=data_dir,
+        auth_enabled=auth_enabled,
+        bootstrap_secret=getattr(args, "bootstrap_secret", None),
+        board_path=getattr(args, "board_path", None),
+        dispatcher_enabled=getattr(args, "dispatcher_enabled", True),
+        dispatcher_interval=getattr(args, "dispatcher_interval", 5),
+        claim_ttl=getattr(args, "claim_ttl", 900),
+        failure_limit=getattr(args, "failure_limit", 3),
+        workspaces_root=getattr(args, "workspaces_root", None),
         config=load_config(),
     )
-
 
 # ---------------------------------------------------------------------------
 # Dispatch
