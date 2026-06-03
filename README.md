@@ -35,40 +35,7 @@ A lightweight, production-ready Agent-to-Agent (A2A) Registry server that enable
 
 ## Architecture
 
-```
-┌──────────────┐    HTTP/WS     ┌──────────────────────────────────────────────────────┐
-│   Client     │ ─────────────→ │  A2A Registry server (localhost:8321)                 │
-│  (caller)    │                │                                                        │
-└──────────────┘                │  ┌────────────────────────────────────────────────┐   │
-                                │  │  Agent Registry & Dispatch                     │   │
-                                │  │  Register/list/search/delete agents            │   │
-                                │  │  HTTP heartbeat + WebSocket long-connection    │   │
-                                │  │  Task push via WS + HTTP result polling        │   │
-                                │  ├────────────────────────────────────────────────┤   │
-                                │  │  Orchestration Engine (V2 Kanban)              │   │
-                                │  │  DAG dependency, state machine, dispatching    │   │
-                                │  │  Swarm topology, blackboard, workspace mgmt    │   │
-                                │  ├────────────────────────────────────────────────┤   │
-                                │  │  Auth & Governance                             │   │
-                                │  │  OAuth 2.1 / JWT RS256+HS256 / Scope / Admin   │   │
-                                │  │  Multi-tenant, rate limiting, audit logging    │   │
-                                │  ├────────────────────────────────────────────────┤   │
-                                │  │  Observability                                 │   │
-                                │  │  Prometheus metrics, JSON logging, Admin WS    │   │
-                                │  ├────────────────────────────────────────────────┤   │
-                                │  │  Store (unified DB engine)                     │   │
-                                │  │  SQLite (dev)  ←→  MySQL (prod)                │   │
-                                │  │  WAL mode + RetryEngine + Alembic migrations   │   │
-                                │  └────────────────────────────────────────────────┘   │
-                                └────────────────────────┬─────────────────────────────┘
-                                                         │
-          ┌──────────────────────────────────────────────┼────────────────────────────────┐
-          │                                              │                                │
-   ┌──────▼──────┐                               ┌──────▼──────┐                  ┌──────▼──────┐
-   │  Agent A    │                               │  Agent B    │                  │  Worker     │
-   │(HTTP + WS)  │                               │ (WS long)   │                  │ (Kanban)    │
-   └─────────────┘                               └─────────────┘                  └─────────────┘
-```
+<img src="./docs/architecture.svg" alt="A2A Registry Architecture Diagram" width="100%"/>
 
 ### Internal Module Map
 
