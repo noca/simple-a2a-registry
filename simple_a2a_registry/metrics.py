@@ -87,6 +87,22 @@ db_query_duration_seconds = Histogram(
 )
 
 # ---------------------------------------------------------------------------
+# SLA Gauges
+# ---------------------------------------------------------------------------
+
+sla_task_success_rate = Gauge(
+    "a2a_registry_sla_task_success_rate",
+    "Task success rate per time window (completed / (completed + failed))",
+    labelnames=["window"],
+)
+
+sla_tasks_total = Gauge(
+    "a2a_registry_sla_tasks_total",
+    "Number of tasks in terminal state per window, by status",
+    labelnames=["status", "window"],
+)
+
+# ---------------------------------------------------------------------------
 # Middleware — HTTP request metrics
 # ---------------------------------------------------------------------------
 

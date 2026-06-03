@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE TABLE IF NOT EXISTS task_links (
     parent_id TEXT NOT NULL,
     child_id  TEXT NOT NULL,
+    condition TEXT,
     PRIMARY KEY (parent_id, child_id),
     FOREIGN KEY (parent_id) REFERENCES tasks(id),
     FOREIGN KEY (child_id)  REFERENCES tasks(id)
@@ -169,6 +170,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE TABLE IF NOT EXISTS task_links (
     parent_id VARCHAR(255) NOT NULL,
     child_id  VARCHAR(255) NOT NULL,
+    condition TEXT,
     PRIMARY KEY (parent_id, child_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -221,6 +223,22 @@ def _maybe_create_schema(engine: DatabaseEngine) -> None:
     if engine.driver == "sqlite":
         engine.executescript(_SCHEMA_SQL)
         engine.commit()
+        # Migration: add condition column to task_links if missing
+        try:
+            engine.execute(
+                "ALTER TABLE task_links ADD COLUMN condition TEXT"
+            )
+            engine.commit()
+        except Exception:
+            engine.rollback()
+        # Migration: add parallel_group column to tasks if missing
+        try:
+            engine.execute(
+                "ALTER TABLE tasks ADD COLUMN parallel_group TEXT"
+            )
+            engine.commit()
+        except Exception:
+            engine.rollback()
     elif engine.driver == "mysql":
         for statement in _SCHEMA_SQL_MYSQL.split(";"):
             stripped = statement.strip()
@@ -384,15 +402,21 @@ class TaskStore:
 
     def _resolve_dependencies(self, engine: DatabaseEngine, task_id: str) -> None:
         """If all parents of *task_id* are done, promote it from ``todo`` to ``ready``.
-        If a parent is re-activated, demote from ``ready`` back to ``todo``."""
+        If a parent is re-activated, demote from ``ready`` back to ``todo``.
+
+        For parent links with a ``condition``, the parent is only considered
+        satisfied if it is completed/archived **and** its ``result`` field
+        matches the condition string (exact match).
+        """
         result = engine.execute(
-            "SELECT p.status FROM task_links l "
+            "SELECT p.status, p.result, l.condition AS link_condition "
+            "FROM task_links l "
             "JOIN tasks p ON l.parent_id = p.id "
             "WHERE l.child_id = ?",
             (task_id,),
         )
-        parent_statuses = [r["status"] for r in result.fetchall()]
-        if not parent_statuses:
+        parent_rows = result.fetchall()
+        if not parent_rows:
             # No parents at all — if currently todo, promote to ready.
             t = _result_to_task(
                 engine.execute("SELECT status FROM tasks WHERE id=?", (task_id,))
@@ -415,21 +439,37 @@ class TaskStore:
             return
         current_status = t.status
 
-        all_done = all(
-            s in (TaskStatus.COMPLETED.value, TaskStatus.ARCHIVED.value)
-            for s in parent_statuses
-        )
+        all_satisfied = True
+        for row in parent_rows:
+            p_status = row["status"]
+            # Parent must be completed/archived
+            if p_status not in (TaskStatus.COMPLETED.value, TaskStatus.ARCHIVED.value):
+                all_satisfied = False
+                break
+            # If the link has a condition, parent's result must match
+            link_condition = row.get("link_condition") or row.get("condition")
+            if link_condition:
+                p_result = row.get("result")
+                if not p_result or p_result != link_condition:
+                    all_satisfied = False
+                    break
 
-        if all_done and current_status == TaskStatus.TODO.value:
+        if all_satisfied and current_status == TaskStatus.TODO.value:
             engine.execute(
                 "UPDATE tasks SET status=? WHERE id=?",
                 (TaskStatus.READY.value, task_id),
             )
             self._emit_event(
                 engine, task_id, TaskEventKind.DEPENDENCY_PROMOTED.value,
-                payload={"from": "todo", "to": "ready"},
+                payload={
+                    "from": "todo", "to": "ready",
+                    "reason": "conditions_satisfied" if any(
+                        r.get("link_condition") or r.get("condition")
+                        for r in parent_rows
+                    ) else "all_parents_done",
+                },
             )
-        elif not all_done and current_status == TaskStatus.READY.value:
+        elif not all_satisfied and current_status == TaskStatus.READY.value:
             engine.execute(
                 "UPDATE tasks SET status=? WHERE id=?",
                 (TaskStatus.TODO.value, task_id),
@@ -449,18 +489,26 @@ class TaskStore:
         body: Optional[str] = None,
         assignee: Optional[str] = None,
         priority: int = 0,
-        parents: Optional[List[str]] = None,
+        parents: Optional[List] = None,
         workspace_kind: Optional[str] = None,
         workspace_path: Optional[str] = None,
         max_runtime_seconds: Optional[int] = None,
         max_retries: Optional[int] = None,
         tenant: Optional[str] = None,
         created_by: Optional[str] = None,
+        parallel_group: Optional[str] = None,
     ) -> Task:
         """Create a new task and return it.
 
         If ``parents`` is provided, validates each exists and checks for cycles.
+        Each element of ``parents`` can be a plain string (parent id, no condition)
+        or a dict like ``{"parent_id": "t_xxx", "condition": "success"}`` for
+        conditional DAG branching.
         The task starts in ``todo`` (or ``ready`` if no parents).
+
+        ``parallel_group`` is an optional string label. Tasks with the same
+        ``parallel_group`` are dispatched together in the same poll cycle
+        (parallel fan-out). See :meth:`get_ready_in_parallel_group`.
         """
         task = Task(
             title=title,
@@ -473,21 +521,38 @@ class TaskStore:
             max_retries=max_retries,
             tenant=tenant,
             created_by=created_by,
+            parallel_group=parallel_group,
         )
         task.ensure_id()
         now = int(time.time())
         task.created_at = now
 
-        parents_list = parents or []
-        task.status = TaskStatus.TODO.value if parents_list else TaskStatus.READY.value
+        # Normalize parents: each item is either a string (parent_id) or dict
+        # with {"parent_id": str, "condition": Optional[str]}
+        raw_parents = parents or []
+        parent_specs: List[dict] = []
+        for p in raw_parents:
+            if isinstance(p, dict):
+                pid = p.get("parent_id", "")
+                cond = p.get("condition")
+            else:
+                pid = str(p)
+                cond = None
+            if not pid:
+                raise ValueError("Each parent must have a non-empty 'parent_id'")
+            parent_specs.append({"parent_id": pid, "condition": cond})
+
+        task.status = TaskStatus.TODO.value if parent_specs else TaskStatus.READY.value
 
         with self._tx() as engine:
-            for pid in parents_list:
+            for spec in parent_specs:
+                pid = spec["parent_id"]
                 result = engine.execute("SELECT id FROM tasks WHERE id=?", (pid,))
                 if result.fetchone() is None:
                     raise ValueError(f"Parent task '{pid}' not found")
 
-            for pid in parents_list:
+            for spec in parent_specs:
+                pid = spec["parent_id"]
                 if self._detect_cycle(engine, task.id, pid):
                     raise ValueError(
                         f"Cannot add parent '{pid}' — would create a cycle"
@@ -497,27 +562,31 @@ class TaskStore:
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, priority, created_by, "
                 " created_at, workspace_kind, workspace_path, tenant, "
-                " max_runtime_seconds, max_retries) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " max_runtime_seconds, max_retries, parallel_group) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     task.id, task.title, task.body, task.assignee,
                     task.status, task.priority, task.created_by,
                     task.created_at, task.workspace_kind, task.workspace_path,
                     task.tenant, task.max_runtime_seconds, task.max_retries,
+                    task.parallel_group,
                 ),
             )
 
-            for pid in parents_list:
+            for spec in parent_specs:
+                pid = spec["parent_id"]
+                cond = spec["condition"]
                 engine.execute(
-                    "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
-                    (pid, task.id),
+                    "INSERT INTO task_links (parent_id, child_id, condition) "
+                    "VALUES (?, ?, ?)",
+                    (pid, task.id, cond),
                 )
 
             self._emit_event(
                 engine, task.id, TaskEventKind.CREATED.value,
                 payload={
                     "assignee": assignee,
-                    "parents": parents_list,
+                    "parents": parent_specs,
                     "status": task.status,
                 },
             )
@@ -1157,6 +1226,45 @@ class TaskStore:
         return promoted
 
     # ------------------------------------------------------------------
+    # Parallel group helpers
+    # ------------------------------------------------------------------
+
+    def get_ready_in_parallel_group(
+        self,
+        group: str,
+        tenant: Optional[str] = None,
+        exclude_task_id: Optional[str] = None,
+    ) -> list[Task]:
+        """Find all ready tasks belonging to the same **parallel_group**.
+
+        Used by the dispatcher to batch-dispatch all members of a parallel
+        group in a single poll cycle.
+
+        Args:
+            group: The parallel_group label to match.
+            tenant: Optional tenant filter (only match tasks from this tenant).
+            exclude_task_id: Optional task id to exclude (the task that
+                triggered the lookup, already being processed).
+
+        Returns:
+            List of ready Task objects in the same parallel_group.
+        """
+        with self._tx("DEFERRED") as engine:
+            query = (
+                "SELECT * FROM tasks "
+                "WHERE status = ? AND parallel_group = ?"
+            )
+            params: list = [TaskStatus.READY.value, group]
+            if tenant is not None:
+                query += " AND tenant = ?"
+                params.append(tenant)
+            if exclude_task_id is not None:
+                query += " AND id != ?"
+                params.append(exclude_task_id)
+            result = engine.execute(query, tuple(params))
+            return _result_to_task_list(result)
+
+    # ------------------------------------------------------------------
     # Comments
     # ------------------------------------------------------------------
 
@@ -1235,8 +1343,14 @@ class TaskStore:
     # Dependencies
     # ------------------------------------------------------------------
 
-    def add_dependency(self, task_id: str, parent_id: str) -> None:
-        """Add a parent → child dependency edge.
+    def add_dependency(
+        self, task_id: str, parent_id: str, condition: Optional[str] = None,
+    ) -> None:
+        """Add a parent → child dependency edge with optional condition.
+
+        The ``condition`` field enables conditional DAG branching: the child
+        task is only promoted to ``ready`` when the parent completes **and**
+        the parent's ``result`` matches this condition.
 
         Raises ``ValueError`` if the parent doesn't exist, self-link, or cycle.
         """
@@ -1255,11 +1369,17 @@ class TaskStore:
                 raise ValueError("Would create a cycle")
 
             if self._link_exists(engine, parent_id, task_id):
+                # Link already exists — update condition if different
+                engine.execute(
+                    "UPDATE task_links SET condition=? WHERE parent_id=? AND child_id=?",
+                    (condition, parent_id, task_id),
+                )
+                self._resolve_dependencies(engine, task_id)
                 return
 
             engine.execute(
-                "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
-                (parent_id, task_id),
+                "INSERT INTO task_links (parent_id, child_id, condition) VALUES (?, ?, ?)",
+                (parent_id, task_id, condition),
             )
 
             self._resolve_dependencies(engine, task_id)
@@ -1281,10 +1401,11 @@ class TaskStore:
             return removed
 
     def get_parents(self, task_id: str) -> List[dict]:
-        """Return parent task summaries (id, title, status)."""
+        """Return parent task summaries (id, title, status, condition)."""
         with self._tx("DEFERRED") as engine:
             result = engine.execute(
-                "SELECT t.id, t.title, t.status FROM task_links l "
+                "SELECT t.id, t.title, t.status, l.condition "
+                "FROM task_links l "
                 "JOIN tasks t ON l.parent_id = t.id "
                 "WHERE l.child_id=?",
                 (task_id,),
@@ -1292,10 +1413,11 @@ class TaskStore:
             return result.fetchall()
 
     def get_children(self, task_id: str) -> List[dict]:
-        """Return child task summaries (id, title, status)."""
+        """Return child task summaries (id, title, status, condition)."""
         with self._tx("DEFERRED") as engine:
             result = engine.execute(
-                "SELECT t.id, t.title, t.status FROM task_links l "
+                "SELECT t.id, t.title, t.status, l.condition "
+                "FROM task_links l "
                 "JOIN tasks t ON l.child_id = t.id "
                 "WHERE l.parent_id=?",
                 (task_id,),

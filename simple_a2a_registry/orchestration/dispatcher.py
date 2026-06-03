@@ -192,6 +192,12 @@ class Dispatcher:
         """Find ready tasks with an assignee, claim them, allocate workspace,
         and spawn worker processes.
 
+        **Parallel group optimisation**: when a ready task has a non-null
+        ``parallel_group``, the dispatcher fetches all other ready tasks in the
+        same group and dispatches them together in a single poll cycle (fan-out).
+        Tasks without a ``parallel_group`` are dispatched individually (existing
+        behaviour).
+
         Returns:
             Number of successfully claimed-and-spawned tasks.
         """
@@ -205,261 +211,296 @@ class Dispatcher:
         if not ready_tasks:
             return 0
 
+        # Pre-group ready tasks by parallel_group for batch dispatch.
+        # Tasks without a group (None) get a sentinel key so they are handled
+        # individually in the normal loop.
+        _NO_GROUP = object()
+        groups: dict[str | object, list] = {}
+        for t in ready_tasks:
+            key = t.parallel_group if t.parallel_group else _NO_GROUP
+            groups.setdefault(key, []).append(t)
+
         claimed_count = 0
-        for task in ready_tasks:
-            if not task.assignee:
-                # Skip tasks without an assignee — they can't be dispatched
-                continue
+        dispatched_ids: set[str] = set()
 
-            # Priority 1: WebSocket dispatch to connected agent
-            assignee = task.assignee
-            ws = self.ws_connections.get(assignee) if self.ws_connections else None
-
-            if ws is not None and not ws.closed:
-                # Agent is connected via WebSocket → dispatch the task
-                claim_result = self.store.claim_task(
-                    task_id=task.id,
-                    worker_id=f"ws-{assignee}",
-                    pid=os.getpid(),
-                    ttl=self.config.claim_ttl,
-                )
-                if claim_result is None:
-                    continue  # another worker claimed it first
-
-                # Allocate workspace
-                try:
-                    ws_path = self.ws_mgr.allocate_for_claim(task)
-                    self.store._update_workspace_path(task.id, ws_path)
-                except Exception as e:
-                    logger.error("WS workspace alloc failed for '%s': %s — releasing", task.id, e)
-                    self.store.update_task_status(
-                        task.id, TaskStatus.FAILED.value, result=str(e),
-                    )
-                    continue
-
-                # Send A2A-style task message over WebSocket
-                task_msg = {
-                    "type": "task",
-                    "id": task.id,
-                    "title": task.title,
-                    "body": task.body or "",
-                    "assignee": assignee,
-                    "priority": task.priority,
-                    "workspace_path": ws_path,
-                    "kanban": True,  # flag so agent knows this is a kanban-backed task
-                }
-                try:
-                    await ws.send_json(task_msg)
-                    self._dispatched_ws_tasks[task.id] = assignee
-                    claimed_count += 1
+        for group_key, group_tasks in groups.items():
+            if group_key is _NO_GROUP:
+                # Individual tasks — dispatch one at a time
+                for task in group_tasks:
+                    if task.id in dispatched_ids:
+                        continue
+                    if not task.assignee:
+                        continue
+                    result = await self._dispatch_single_task(task)
+                    claimed_count += result
+                    if result > 0:
+                        dispatched_ids.add(task.id)
+            else:
+                # Parallel group — batch-dispatch all members
+                for task in group_tasks:
+                    if task.id in dispatched_ids:
+                        continue
+                    result = await self._dispatch_single_task(task)
+                    claimed_count += result
+                    if result > 0:
+                        dispatched_ids.add(task.id)
+                if group_tasks:
                     logger.info(
-                        "Dispatched task '%s' via WS to agent '%s' (ws=%s)",
-                        task.id, assignee, ws_path,
+                        "Parallel group '%s' — %d task(s) batch-dispatched (%d claimed)",
+                        group_key, len(group_tasks), claimed_count,
                     )
-                except Exception as e:
-                    logger.error("WS send failed for task '%s': %s — releasing claim", task.id, e)
-                    self.store.update_task_status(
-                        task.id, TaskStatus.FAILED.value, result=str(e),
-                    )
-                continue
-
-            # Priority 2: Callback dispatch for callback-mode agents
-            # Check if the assignee is a callback-mode agent via registry store
-            is_callback_agent = False
-            callback_url = ""
-            callback_token = ""
-            if self.registry_store is not None:
-                try:
-                    agent_card = self.registry_store.get_agent(assignee)
-                    if agent_card:
-                        pref_channel = agent_card.get("preferred_channel", "ws") or "ws"
-                        if pref_channel == "callback":
-                            callback_url = (agent_card.get("callback_url", "") or "").strip()
-                            callback_token = agent_card.get("callback_token", "") or ""
-                            is_callback_agent = bool(callback_url)
-                except Exception:
-                    logger.exception("Failed to lookup agent '%s' in registry store", assignee)
-
-            if is_callback_agent:
-                # Callback-mode agent → dispatch via HTTP POST
-                claim_result = self.store.claim_task(
-                    task_id=task.id,
-                    worker_id=f"callback-{assignee}",
-                    pid=os.getpid(),
-                    ttl=self.config.claim_ttl,
-                )
-                if claim_result is None:
-                    continue  # another worker claimed it first
-
-                # Allocate workspace
-                try:
-                    ws_path = self.ws_mgr.allocate_for_claim(task)
-                    self.store._update_workspace_path(task.id, ws_path)
-                except Exception as e:
-                    logger.error("Callback workspace alloc failed for '%s': %s — releasing", task.id, e)
-                    self.store.update_task_status(
-                        task.id, TaskStatus.FAILED.value, result=str(e),
-                    )
-                    continue
-
-                # Build callback payload
-                payload = {
-                    "type": "task",
-                    "id": task.id,
-                    "title": task.title,
-                    "body": task.body or "",
-                    "assignee": assignee,
-                    "priority": task.priority,
-                    "workspace_path": ws_path,
-                    "kanban": True,
-                }
-
-                headers: dict[str, str] = {
-                    "Content-Type": "application/json",
-                }
-                if callback_token:
-                    headers["Authorization"] = f"Bearer {callback_token}"
-
-                try:
-                    session = self.http_session
-                    if session is None or session.closed:
-                        session = aiohttp.ClientSession()
-
-                    async with session.post(
-                        callback_url, json=payload, headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as resp:
-                        if resp.status >= 400:
-                            text = await resp.text()
-                            logger.error(
-                                "Callback dispatch to '%s' failed: HTTP %d: %s",
-                                callback_url, resp.status, text,
-                            )
-                            self.store.update_task_status(
-                                task.id, TaskStatus.FAILED.value,
-                                result=f"Callback returned HTTP {resp.status}",
-                            )
-                            continue
-
-                    self._dispatched_ws_tasks[task.id] = assignee
-                    claimed_count += 1
-                    logger.info(
-                        "Dispatched task '%s' via callback to agent '%s' (%s)",
-                        task.id, assignee, callback_url,
-                    )
-                except asyncio.TimeoutError:
-                    logger.error("Callback dispatch to agent '%s' timed out", assignee)
-                    self.store.update_task_status(
-                        task.id, TaskStatus.FAILED.value,
-                        result="Callback timed out after 30s",
-                    )
-                except Exception as e:
-                    logger.error("Callback dispatch to agent '%s' failed: %s", assignee, e)
-                    self.store.update_task_status(
-                        task.id, TaskStatus.FAILED.value,
-                        result=f"Callback dispatch failed: {e}",
-                    )
-                continue
-
-            # Priority 3: Assignee is NOT connected and NOT a callback agent → block
-            if self.ws_connections:
-                logger.info(
-                    "Blocking task '%s' (assignee=%s) — agent not connected via WebSocket and no callback configured",
-                    task.id, assignee,
-                )
-                try:
-                    self.store.update_task_status(
-                        task.id, TaskStatus.BLOCKED.value,
-                    )
-                    self.store.add_comment(
-                        task.id, "dispatcher",
-                        f"assignee '{assignee}' is not connected via WebSocket and no callback_url configured",
-                    )
-                except Exception:
-                    logger.exception("Failed to block task '%s'" , task.id)
-                continue
-
-            # Priority 3 (legacy): worker_command mode
-            # Only claim tasks when a worker_command is configured.
-            # Without worker_command, the dispatcher can't spawn a real
-            # worker process, so claiming would strand the task in
-            # "running" forever.  In this mode the dispatcher acts purely
-            # as a pipeline promoter (todo → ready) and relies on
-            # external polling workers to claim and execute tasks.
-            if not self.config.worker_command:
-                logger.info(
-                    "Skipping claim for task '%s' (assignee=%s) — "
-                    "no worker_command configured; leaving in 'ready' "
-                    "for polling workers.",
-                    task.id, task.assignee,
-                )
-                continue
-
-            # Sanity check — only claim if it's still ready
-            fresh = self.store.get_task(task.id)
-            if fresh is None or fresh.status != TaskStatus.READY.value:
-                continue
-
-            # Atomic claim
-            claim_result = self.store.claim_task(
-                task_id=task.id,
-                worker_id=self.config.dispatcher_id,
-                pid=os.getpid(),
-                ttl=self.config.claim_ttl,
-            )
-            if claim_result is None:
-                # Another worker claimed it first
-                continue
-
-            # Allocate workspace
-            task.workspace_path = claim_result.get("workspace_path")
-            try:
-                ws_path = self.ws_mgr.allocate_for_claim(task)
-
-                # Update the workspace_path in the DB
-                self.store._update_workspace_path(task.id, ws_path)
-
-                # Store the updated path in the claim result
-                claim_result["workspace_path"] = ws_path
-
-                # Spawn worker
-                await self._spawn_worker(task, ws_path)
-
-                claimed_count += 1
-                logger.info(
-                    "Claimed + spawned task '%s' (assignee=%s, ws=%s)",
-                    task.id, task.assignee, ws_path,
-                )
-
-            except WorkspaceAllocationError as e:
-                logger.error(
-                    "Workspace allocation failed for task '%s': %s — releasing claim",
-                    task.id, e,
-                )
-                # Release the claim by marking as failed
-                try:
-                    self.store.update_task_status(
-                        task.id, TaskStatus.FAILED.value,
-                        result=str(e),
-                    )
-                except Exception:
-                    logger.exception("Failed to release claim for task '%s'", task.id)
-
-            except Exception as e:
-                logger.exception(
-                    "Failed to spawn worker for task '%s': %s",
-                    task.id, e,
-                )
-                # Release the claim
-                try:
-                    self.store.update_task_status(
-                        task.id, TaskStatus.FAILED.value,
-                        result=str(e),
-                    )
-                except Exception:
-                    logger.exception("Failed to release claim for task '%s'", task.id)
 
         return claimed_count
+
+    # ------------------------------------------------------------------
+    # Single-task dispatch (shared by individual + parallel_group)
+    # ------------------------------------------------------------------
+
+    async def _dispatch_single_task(self, task: Task) -> int:
+        """Attempt to dispatch **task** to its assignee via the appropriate
+        channel (WebSocket → callback → worker_command).
+
+        Returns:
+            1 if the task was successfully claimed-and-dispatched, 0 otherwise.
+        """
+        if not task.assignee:
+            return 0
+
+        assignee = task.assignee
+        ws = self.ws_connections.get(assignee) if self.ws_connections else None
+
+        if ws is not None and not ws.closed:
+            return await self._dispatch_via_ws(task, ws)
+
+        # Check if the assignee is a callback-mode agent
+        is_callback_agent = False
+        callback_url = ""
+        callback_token = ""
+        if self.registry_store is not None:
+            try:
+                agent_card = self.registry_store.get_agent(assignee)
+                if agent_card:
+                    pref_channel = agent_card.get("preferred_channel", "ws") or "ws"
+                    if pref_channel == "callback":
+                        callback_url = (agent_card.get("callback_url", "") or "").strip()
+                        callback_token = agent_card.get("callback_token", "") or ""
+                        is_callback_agent = bool(callback_url)
+            except Exception:
+                logger.exception("Failed to lookup agent '%s' in registry store", assignee)
+
+        if is_callback_agent:
+            return await self._dispatch_via_callback(task, callback_url, callback_token)
+
+        # Assignee not connected and not a callback agent → block
+        if self.ws_connections:
+            logger.info(
+                "Blocking task '%s' (assignee=%s) — agent not connected via WebSocket and no callback configured",
+                task.id, assignee,
+            )
+            try:
+                self.store.update_task_status(
+                    task.id, TaskStatus.BLOCKED.value,
+                )
+                self.store.add_comment(
+                    task.id, "dispatcher",
+                    f"assignee '{assignee}' is not connected via WebSocket and no callback_url configured",
+                )
+            except Exception:
+                logger.exception("Failed to block task '%s'", task.id)
+            return 0
+
+        # worker_command mode (legacy polling workers)
+        if not self.config.worker_command:
+            logger.info(
+                "Skipping claim for task '%s' (assignee=%s) — "
+                "no worker_command configured; leaving in 'ready' "
+                "for polling workers.",
+                task.id, task.assignee,
+            )
+            return 0
+
+        return await self._dispatch_via_worker_command(task)
+
+    async def _dispatch_via_ws(self, task: Task, ws) -> int:
+        """WebSocket dispatch — claim, allocate workspace, send task message."""
+        assignee = task.assignee
+        claim_result = self.store.claim_task(
+            task_id=task.id,
+            worker_id=f"ws-{assignee}",
+            pid=os.getpid(),
+            ttl=self.config.claim_ttl,
+        )
+        if claim_result is None:
+            return 0  # another worker claimed it first
+
+        try:
+            ws_path = self.ws_mgr.allocate_for_claim(task)
+            self.store._update_workspace_path(task.id, ws_path)
+        except Exception as e:
+            logger.error("WS workspace alloc failed for '%s': %s — releasing", task.id, e)
+            self.store.update_task_status(
+                task.id, TaskStatus.FAILED.value, result=str(e),
+            )
+            return 0
+
+        task_msg = {
+            "type": "task",
+            "id": task.id,
+            "title": task.title,
+            "body": task.body or "",
+            "assignee": assignee,
+            "priority": task.priority,
+            "workspace_path": ws_path,
+            "kanban": True,
+        }
+        try:
+            await ws.send_json(task_msg)
+            self._dispatched_ws_tasks[task.id] = assignee
+            logger.info(
+                "Dispatched task '%s' via WS to agent '%s' (ws=%s)",
+                task.id, assignee, ws_path,
+            )
+            return 1
+        except Exception as e:
+            logger.error("WS send failed for task '%s': %s — releasing claim", task.id, e)
+            self.store.update_task_status(
+                task.id, TaskStatus.FAILED.value, result=str(e),
+            )
+            return 0
+
+    async def _dispatch_via_callback(
+        self, task: Task, callback_url: str, callback_token: str,
+    ) -> int:
+        """Callback dispatch — claim, allocate workspace, POST to callback URL."""
+        assignee = task.assignee
+        claim_result = self.store.claim_task(
+            task_id=task.id,
+            worker_id=f"callback-{assignee}",
+            pid=os.getpid(),
+            ttl=self.config.claim_ttl,
+        )
+        if claim_result is None:
+            return 0
+
+        try:
+            ws_path = self.ws_mgr.allocate_for_claim(task)
+            self.store._update_workspace_path(task.id, ws_path)
+        except Exception as e:
+            logger.error("Callback workspace alloc failed for '%s': %s — releasing", task.id, e)
+            self.store.update_task_status(
+                task.id, TaskStatus.FAILED.value, result=str(e),
+            )
+            return 0
+
+        payload = {
+            "type": "task",
+            "id": task.id,
+            "title": task.title,
+            "body": task.body or "",
+            "assignee": assignee,
+            "priority": task.priority,
+            "workspace_path": ws_path,
+            "kanban": True,
+        }
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if callback_token:
+            headers["Authorization"] = f"Bearer {callback_token}"
+
+        try:
+            session = self.http_session
+            if session is None or session.closed:
+                session = aiohttp.ClientSession()
+
+            async with session.post(
+                callback_url, json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status >= 400:
+                    text = await resp.text()
+                    logger.error(
+                        "Callback dispatch to '%s' failed: HTTP %d: %s",
+                        callback_url, resp.status, text,
+                    )
+                    self.store.update_task_status(
+                        task.id, TaskStatus.FAILED.value,
+                        result=f"Callback returned HTTP {resp.status}",
+                    )
+                    return 0
+
+            self._dispatched_ws_tasks[task.id] = assignee
+            logger.info(
+                "Dispatched task '%s' via callback to agent '%s' (%s)",
+                task.id, assignee, callback_url,
+            )
+            return 1
+        except asyncio.TimeoutError:
+            logger.error("Callback dispatch to agent '%s' timed out", assignee)
+            self.store.update_task_status(
+                task.id, TaskStatus.FAILED.value,
+                result="Callback timed out after 30s",
+            )
+            return 0
+        except Exception as e:
+            logger.error("Callback dispatch to agent '%s' failed: %s", assignee, e)
+            self.store.update_task_status(
+                task.id, TaskStatus.FAILED.value,
+                result=f"Callback dispatch failed: {e}",
+            )
+            return 0
+
+    async def _dispatch_via_worker_command(self, task: Task) -> int:
+        """worker_command mode — claim, allocate workspace, spawn subprocess."""
+        # Sanity check — only claim if it's still ready
+        fresh = self.store.get_task(task.id)
+        if fresh is None or fresh.status != TaskStatus.READY.value:
+            return 0
+
+        claim_result = self.store.claim_task(
+            task_id=task.id,
+            worker_id=self.config.dispatcher_id,
+            pid=os.getpid(),
+            ttl=self.config.claim_ttl,
+        )
+        if claim_result is None:
+            return 0
+
+        task.workspace_path = claim_result.get("workspace_path")
+        try:
+            ws_path = self.ws_mgr.allocate_for_claim(task)
+            self.store._update_workspace_path(task.id, ws_path)
+            claim_result["workspace_path"] = ws_path
+            await self._spawn_worker(task, ws_path)
+            logger.info(
+                "Claimed + spawned task '%s' (assignee=%s, ws=%s)",
+                task.id, task.assignee, ws_path,
+            )
+            return 1
+        except WorkspaceAllocationError as e:
+            logger.error(
+                "Workspace allocation failed for '%s': %s — releasing claim",
+                task.id, e,
+            )
+            try:
+                self.store.update_task_status(
+                    task.id, TaskStatus.FAILED.value,
+                    result=str(e),
+                )
+            except Exception:
+                logger.exception("Failed to release claim for task '%s'", task.id)
+            return 0
+        except Exception as e:
+            logger.exception(
+                "Failed to spawn worker for task '%s': %s",
+                task.id, e,
+            )
+            try:
+                self.store.update_task_status(
+                    task.id, TaskStatus.FAILED.value,
+                    result=str(e),
+                )
+            except Exception:
+                logger.exception("Failed to release claim for task '%s'", task.id)
+            return 0
 
     # ------------------------------------------------------------------
     # Worker spawn

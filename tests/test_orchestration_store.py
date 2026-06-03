@@ -576,6 +576,175 @@ class TestDependencies:
 
 
 # ---------------------------------------------------------------------------
+# DAG 条件分支 — P5b.1
+# ---------------------------------------------------------------------------
+
+
+class TestConditionalDependencies:
+    """Tests for conditional DAG branching via ``condition`` on task_links."""
+
+    def test_create_task_with_condition_parent(self, store: TaskStore) -> None:
+        """create_task accepts parent dict with condition."""
+        parent = store.create_task(title="Parent")
+        child = store.create_task(
+            title="Child",
+            parents=[{"parent_id": parent.id, "condition": "success"}],
+        )
+        assert child.status == TaskStatus.TODO.value
+        parents = store.get_parents(child.id)
+        assert len(parents) == 1
+        assert parents[0]["condition"] == "success"
+
+    def test_condition_not_met_blocks_promotion(self, store: TaskStore) -> None:
+        """Parent completed but result != condition → child stays todo."""
+        parent = store.create_task(title="Parent")
+        child = store.create_task(
+            title="Child",
+            parents=[{"parent_id": parent.id, "condition": "success"}],
+        )
+        store.update_task_status(parent.id, TaskStatus.RUNNING.value)
+        store.update_task_status(parent.id, TaskStatus.COMPLETED.value)
+        # result is '' (default), not 'success' → condition not satisfied
+        updated = store.get_task(child.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.TODO.value
+
+    def test_condition_met_promotes_child(self, store: TaskStore) -> None:
+        """Parent completed with matching result → child promoted to ready."""
+        parent = store.create_task(title="Parent")
+        child = store.create_task(
+            title="Child",
+            parents=[{"parent_id": parent.id, "condition": "success"}],
+        )
+        store.update_task_status(parent.id, TaskStatus.RUNNING.value)
+        with store._tx() as cur:
+            cur.execute("UPDATE tasks SET result=? WHERE id=?", ("success", parent.id))
+        store.update_task_status(parent.id, TaskStatus.COMPLETED.value)
+        updated = store.get_task(child.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.READY.value
+
+    def test_condition_no_match_on_other_result(self, store: TaskStore) -> None:
+        """Parent result != condition even when completed → child stays todo."""
+        parent = store.create_task(title="Parent")
+        child = store.create_task(
+            title="Child",
+            parents=[{"parent_id": parent.id, "condition": "success"}],
+        )
+        store.update_task_status(parent.id, TaskStatus.RUNNING.value)
+        with store._tx() as cur:
+            cur.execute("UPDATE tasks SET result=? WHERE id=?", ("failure", parent.id))
+        store.update_task_status(parent.id, TaskStatus.COMPLETED.value)
+        updated = store.get_task(child.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.TODO.value
+
+    def test_condition_exact_match_not_substring(self, store: TaskStore) -> None:
+        """Condition matching is exact, not substring."""
+        parent = store.create_task(title="Parent")
+        child = store.create_task(
+            title="Child",
+            parents=[{"parent_id": parent.id, "condition": "success"}],
+        )
+        store.update_task_status(parent.id, TaskStatus.RUNNING.value)
+        with store._tx() as cur:
+            cur.execute("UPDATE tasks SET result=? WHERE id=?", ("success_with_warnings", parent.id))
+        store.update_task_status(parent.id, TaskStatus.COMPLETED.value)
+        updated = store.get_task(child.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.TODO.value
+
+    def test_condition_parent_not_completed(self, store: TaskStore) -> None:
+        """Parent running with matching result → child still todo."""
+        parent = store.create_task(title="Parent")
+        child = store.create_task(
+            title="Child",
+            parents=[{"parent_id": parent.id, "condition": "success"}],
+        )
+        store.update_task_status(parent.id, TaskStatus.RUNNING.value)
+        with store._tx() as cur:
+            cur.execute("UPDATE tasks SET result=? WHERE id=?", ("success", parent.id))
+        updated = store.get_task(child.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.TODO.value
+
+    def test_mixed_parents_some_with_condition(self, store: TaskStore) -> None:
+        """Mixed parents: unconditional met, conditional unmet → child stays todo."""
+        unconditional = store.create_task(title="Unconditional")
+        conditional_parent = store.create_task(title="Conditional")
+        child = store.create_task(
+            title="Child",
+            parents=[
+                unconditional.id,
+                {"parent_id": conditional_parent.id, "condition": "success"},
+            ],
+        )
+        assert child.status == TaskStatus.TODO.value
+        # Complete unconditional parent (no condition → ok)
+        store.update_task_status(unconditional.id, TaskStatus.RUNNING.value)
+        store.update_task_status(unconditional.id, TaskStatus.COMPLETED.value)
+        # Child should still be todo because conditional parent not ready
+        updated = store.get_task(child.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.TODO.value
+
+    def test_condition_result_changed_after_complete(self, store: TaskStore) -> None:
+        """Changing parent's result after completion triggers re-resolution
+        via _resolve_dependencies and unblocks child when condition met."""
+        parent = store.create_task(title="Parent")
+        child = store.create_task(
+            title="Child",
+            parents=[{"parent_id": parent.id, "condition": "success"}],
+        )
+        store.update_task_status(parent.id, TaskStatus.RUNNING.value)
+        with store._tx() as cur:
+            cur.execute("UPDATE tasks SET result=? WHERE id=?", ("failure", parent.id))
+        store.update_task_status(parent.id, TaskStatus.COMPLETED.value)
+        updated = store.get_task(child.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.TODO.value
+
+        # Manually fix result and trigger dependency re-resolution
+        with store._tx() as eng:
+            eng.execute("UPDATE tasks SET result=? WHERE id=?", ("success", parent.id))
+            store._resolve_dependencies(eng, child.id)
+        updated = store.get_task(child.id)
+        assert updated is not None
+        assert updated.status == TaskStatus.READY.value
+
+    def test_add_dependency_with_condition(self, store: TaskStore) -> None:
+        """add_dependency accepts condition parameter."""
+        parent = store.create_task(title="Parent")
+        child = store.create_task(title="Child")
+        store.add_dependency(child.id, parent.id, condition="deploy_ok")
+        parents = store.get_parents(child.id)
+        assert len(parents) == 1
+        assert parents[0]["condition"] == "deploy_ok"
+
+    def test_add_dependency_update_condition(self, store: TaskStore) -> None:
+        """add_dependency with existing link updates condition."""
+        parent = store.create_task(title="Parent")
+        child = store.create_task(title="Child")
+        store.add_dependency(child.id, parent.id, condition="v1")
+        store.add_dependency(child.id, parent.id, condition="v2")
+        parents = store.get_parents(child.id)
+        assert parents[0]["condition"] == "v2"
+
+    def test_get_children_with_condition(self, store: TaskStore) -> None:
+        """get_children returns condition field."""
+        parent = store.create_task(title="Parent")
+        child = store.create_task(
+            title="Child",
+            parents=[{"parent_id": parent.id, "condition": "success"}],
+        )
+        children = store.get_children(parent.id)
+        assert len(children) >= 1
+        match = [c for c in children if c["id"] == child.id]
+        assert len(match) == 1
+        assert match[0]["condition"] == "success"
+
+
+# ---------------------------------------------------------------------------
 # Stats
 # ---------------------------------------------------------------------------
 

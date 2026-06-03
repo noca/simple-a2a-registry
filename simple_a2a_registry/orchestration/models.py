@@ -112,6 +112,7 @@ class Task:
     last_heartbeat_at: Optional[int] = None
     current_run_id: Optional[int] = None
     max_retries: Optional[int] = None
+    parallel_group: Optional[str] = None
 
     # Transient — loaded from related tables
     parents: List[dict] = field(default_factory=list)

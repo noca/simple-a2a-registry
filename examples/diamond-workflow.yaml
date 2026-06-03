@@ -1,0 +1,63 @@
+# Multi-Agent Diamond Workflow
+#
+# Apply with:
+#   a2a-registry workflow apply examples/diamond-workflow.yaml
+#
+# Demonstrates a diamond-shaped dependency graph:
+#         A
+#        / \
+#       B   C
+#        \ /
+#         D
+# A starts → B and C run in parallel → D runs after both
+
+name: "Multi-Agent Diamond Pipeline"
+description: "Parallel agent execution with a diamond dependency graph."
+tenant: "default"
+created_by: "admin"
+
+tasks:
+  - id: data-prep
+    title: "Data preparation"
+    body: |
+      Prepare input data for parallel processing.
+      - Extract data from source
+      - Normalize format
+    assignee: "coder"
+    priority: 5
+    max_runtime_seconds: 300
+
+  - id: analyze-stats
+    title: "Statistical analysis"
+    body: |
+      Perform statistical analysis on prepared data.
+      - Mean, median, standard deviation
+      - Distribution analysis
+    assignee: "data-scientist"
+    priority: 5
+    max_runtime_seconds: 600
+    depends_on:
+      - data-prep
+
+  - id: generate-visuals
+    title: "Generate visualizations"
+    body: |
+      Create charts and visualizations.
+      - Time series plot
+      - Distribution histogram
+    assignee: "designer"
+    priority: 5
+    max_runtime_seconds: 600
+    depends_on:
+      - data-prep
+
+  - id: compile-report
+    title: "Compile final report"
+    body: |
+      Combine analysis results and visualizations into a final report.
+    assignee: "writer"
+    priority: 10
+    max_runtime_seconds: 300
+    depends_on:
+      - analyze-stats
+      - generate-visuals

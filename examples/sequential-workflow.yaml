@@ -1,0 +1,38 @@
+# Simple Sequential Workflow
+#
+# Apply with:
+#   a2a-registry workflow apply examples/sequential-workflow.yaml
+#
+# This workflow defines two sequential tasks: fetch → process.
+
+name: "Data Pipeline"
+description: "Fetch data from source, then process it."
+tenant: "default"
+created_by: "admin"
+
+tasks:
+  - id: fetch
+    title: "Fetch raw data"
+    body: |
+      1. Connect to external API
+      2. Download latest data file
+      3. Save to workspace
+    assignee: "coder"
+    priority: 5
+    max_runtime_seconds: 300
+    max_retries: 3
+    workspace_kind: "scratch"
+
+  - id: process
+    title: "Process and transform data"
+    body: |
+      1. Read fetched data
+      2. Apply transformations
+      3. Output processed results
+    assignee: "coder"
+    priority: 5
+    max_runtime_seconds: 600
+    max_retries: 2
+    depends_on:
+      - task: fetch
+        condition: "success"

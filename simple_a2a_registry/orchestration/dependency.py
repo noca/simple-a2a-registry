@@ -86,18 +86,24 @@ def resolve_dependencies(
     """Check whether *task_id*'s parent dependencies are satisfied and update
     its status accordingly.
 
-    - If all parents are ``completed``/``archived`` and the task is currently
-      ``todo``, promote it to ``ready``.
+    - If all parents are ``completed``/``archived`` (and their condition, if
+      any, is satisfied) and the task is currently ``todo``, promote it to
+      ``ready``.
     - If a parent has been re-activated and the task is currently ``ready``,
       demote it back to ``todo``.
+
+    For parent links with a ``condition``, the parent is only considered
+    satisfied if its ``result`` field matches the condition string
+    (exact match).
     """
     cur.execute(
-        "SELECT p.status FROM task_links l "
+        "SELECT p.status, p.result, l.condition AS link_condition "
+        "FROM task_links l "
         "JOIN tasks p ON l.parent_id = p.id "
         "WHERE l.child_id=?",
         (task_id,),
     )
-    parent_statuses = [r[0] for r in cur.fetchall()]
+    parent_rows = cur.fetchall()
 
     cur.execute("SELECT status FROM tasks WHERE id=?", (task_id,))
     row = cur.fetchone()
@@ -105,7 +111,7 @@ def resolve_dependencies(
         return
     current_status = row[0]
 
-    if not parent_statuses:
+    if not parent_rows:
         # No parents at all — if currently todo, promote to ready.
         if current_status == TaskStatus.TODO.value:
             cur.execute(
@@ -118,18 +124,23 @@ def resolve_dependencies(
                     payload={"from": "todo", "to": "ready", "reason": "no_parents"},
                 )
         return
-    cur.execute("SELECT status FROM tasks WHERE id=?", (task_id,))
-    row = cur.fetchone()
-    if row is None:
-        return
-    current_status = row[0]
 
-    all_done = all(
-        s in (TaskStatus.COMPLETED.value, TaskStatus.ARCHIVED.value)
-        for s in parent_statuses
-    )
+    all_satisfied = True
+    for row in parent_rows:
+        p_status = row[0] if isinstance(row, tuple) else row["status"]
+        # Parent must be completed/archived
+        if p_status not in (TaskStatus.COMPLETED.value, TaskStatus.ARCHIVED.value):
+            all_satisfied = False
+            break
+        # If the link has a condition, parent's result must match
+        link_condition = row[2] if isinstance(row, tuple) else row.get("link_condition") or row.get("condition")
+        if link_condition:
+            p_result = row[1] if isinstance(row, tuple) else row.get("result")
+            if not p_result or p_result != link_condition:
+                all_satisfied = False
+                break
 
-    if all_done and current_status == TaskStatus.TODO.value:
+    if all_satisfied and current_status == TaskStatus.TODO.value:
         cur.execute(
             "UPDATE tasks SET status=? WHERE id=?",
             (TaskStatus.READY.value, task_id),
@@ -140,7 +151,7 @@ def resolve_dependencies(
                 payload={"from": "todo", "to": "ready"},
             )
 
-    elif not all_done and current_status == TaskStatus.READY.value:
+    elif not all_satisfied and current_status == TaskStatus.READY.value:
         cur.execute(
             "UPDATE tasks SET status=? WHERE id=?",
             (TaskStatus.TODO.value, task_id),

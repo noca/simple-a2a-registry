@@ -49,6 +49,12 @@ from simple_a2a_registry.orchestration.swarm_routes import (
 from simple_a2a_registry.orchestration.anomaly_scanner import (
     AnomalyScanner,
 )
+from simple_a2a_registry.orchestration.sla import (
+    SlaCalculator,
+    SlaUpdater,
+    SlaSnapshot,
+    WindowStat,
+)
 
 __all__ = [
     "Task",
@@ -74,6 +80,10 @@ __all__ = [
     "Dispatcher",
     "DispatcherConfig",
     "AnomalyScanner",
+    "SlaCalculator",
+    "SlaUpdater",
+    "SlaSnapshot",
+    "WindowStat",
     "SwarmWorkerSpec",
     "SwarmCreated",
     "create_swarm",

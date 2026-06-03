@@ -80,6 +80,7 @@ def _task_to_detail(task) -> dict:
         "max_retries": task.max_retries,
         "consecutive_failures": task.consecutive_failures,
         "current_run_id": task.current_run_id,
+        "parallel_group": task.parallel_group,
         "result": json.loads(task.result) if task.result else None,
     })
     return d
@@ -139,7 +140,7 @@ class OrchestrationHandler:
             except (ValueError, TypeError):
                 priority = 0
 
-        parents: Optional[List[str]] = body.get("parents")
+        parents: Optional[List] = body.get("parents")
 
         try:
             task = self.store.create_task(
@@ -154,6 +155,7 @@ class OrchestrationHandler:
                 max_retries=body.get("max_retries"),
                 tenant=body.get("tenant"),
                 created_by=body.get("created_by"),
+                parallel_group=body.get("parallel_group"),
             )
         except ValueError as e:
             msg = str(e)
@@ -635,7 +637,15 @@ class OrchestrationHandler:
     # ----------------------------------------------------------
 
     async def handle_add_dependency(self, request: web.Request) -> web.Response:
-        """POST /v2/tasks/{id}/depend — add a parent dependency to a task."""
+        """POST /v2/tasks/{id}/depend — add a parent dependency to a task.
+
+        Body::
+
+            {
+                "parent_id": "t_xxx",
+                "condition": "success"  // optional — for conditional DAG branching
+            }
+        """
         task_id = request.match_info["id"]
 
         try:
@@ -649,8 +659,12 @@ class OrchestrationHandler:
                 400, "validation_error", "Missing required 'parent_id' field"
             )
 
+        condition = body.get("condition")
+        if condition is not None:
+            condition = str(condition).strip() or None
+
         try:
-            self.store.add_dependency(task_id, parent_id)
+            self.store.add_dependency(task_id, parent_id, condition=condition)
         except ValueError as e:
             msg = str(e)
             if "cycle" in msg.lower():
@@ -671,6 +685,7 @@ class OrchestrationHandler:
         return web.json_response({
             "task_id": task_id,
             "parent_id": parent_id,
+            "condition": condition,
             "status": "dependency_added",
         })
 

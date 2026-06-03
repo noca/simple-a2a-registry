@@ -1,0 +1,63 @@
+# Conditional Branching Workflow
+#
+# Apply with:
+#   a2a-registry workflow apply examples/conditional-workflow.yaml
+#
+# This workflow demonstrates conditional branching:
+# - Step A runs first
+# - If A succeeds → Step B (generate report)
+# - If A fails   → Step C (error recovery)
+# - Step D always runs after B or C is done
+
+name: "Conditional Branching Pipeline"
+description: "Demonstrates conditional DAG branching with success/failure conditions."
+tenant: "default"
+created_by: "admin"
+
+tasks:
+  - id: validate-input
+    title: "Validate input data"
+    body: |
+      Check input data for completeness and correctness.
+      - Schema validation
+      - Required fields check
+      - Data type validation
+    assignee: "verifier"
+    priority: 10
+    max_runtime_seconds: 120
+    max_retries: 1
+
+  - id: generate-report
+    title: "Generate success report"
+    body: |
+      Input validation passed. Generate summary report.
+      - Log validation results
+      - Create formatted report
+    assignee: "writer"
+    priority: 5
+    depends_on:
+      - task: validate-input
+        condition: "success"
+
+  - id: error-recovery
+    title: "Error recovery workflow"
+    body: |
+      Input validation failed. Initiate error recovery.
+      - Log error details
+      - Attempt auto-remediation
+      - Notify operator if needed
+    assignee: "ops"
+    priority: 10
+    depends_on:
+      - task: validate-input
+        condition: "failure"
+
+  - id: notify
+    title: "Send notification"
+    body: |
+      Workflow complete. Send status notification.
+    assignee: "bot"
+    priority: 1
+    depends_on:
+      - generate-report
+      - error-recovery

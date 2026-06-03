@@ -4,6 +4,8 @@ A spec-compliant A2A Registry that accepts external agent registrations
 with heartbeat-based liveness monitoring and task proxying.
 """
 
+__version__ = "1.0.0"
+
 from simple_a2a_registry.models import (
     AgentCard,
     AgentCapabilities,

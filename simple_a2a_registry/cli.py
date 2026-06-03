@@ -1,79 +1,146 @@
 """CLI entry point for the Simple A2A Registry.
 
-Usage:
-    a2a-registry [--host HOST] [--port PORT] [--data-dir DIR]
-                 [--log-format {json,text}] [--log-level LEVEL]
-                 [--log-file PATH]
-                 [--board-path PATH] [--dispatcher-enabled BOOL]
-                 [--dispatcher-interval SEC] [--claim-ttl SEC]
-                 [--failure-limit N] [--workspaces-root DIR]
-    python -m simple_a2a_registry [options...]
+Usage::
+
+    a2a-registry [--version]
+    a2a-registry server [options...]
+    a2a-registry task <subcommand> [options...]
+    a2a-registry history <subcommand> [options...]
+    a2a-registry workflow <subcommand> [options...]
+    python -m simple_a2a_registry [options...]        (default: start server)
+
+Subcommands:
+
+    server    Start the registry HTTP server (default when no subcommand given)
+    task      View, search, and filter orchestration tasks
+    history   Query audit log events (timeline query)
+    workflow  Apply, validate, and inspect declarative YAML workflows
 """
+
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
 
+from simple_a2a_registry import __version__
+from simple_a2a_registry.cli_task import build_task_parser
+
+try:
+    from simple_a2a_registry.cli_agent import build_agent_parser
+except ImportError:
+    build_agent_parser = None
+
+try:
+    from simple_a2a_registry.cli_history import build_history_parser
+except ImportError:
+    build_history_parser = None
+
+try:
+    from simple_a2a_registry.cli_workflow import build_workflow_parser
+except ImportError:
+    build_workflow_parser = None
+
 from simple_a2a_registry.config import load_config
 from simple_a2a_registry.log import setup_logging
-from simple_a2a_registry.server import create_app, run_server
+from simple_a2a_registry.server import run_server
 
 logger = logging.getLogger("a2a_registry")
 
 
-def main(argv: list[str] | None = None) -> None:
+# ---------------------------------------------------------------------------
+# Parser builders
+# ---------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the top-level argument parser with subcommands."""
     parser = argparse.ArgumentParser(
-        description="Simple A2A Registry — Agent-to-Agent Registry Server",
+        description="Simple A2A Registry — Agent-to-Agent Registry Server & CLI SDK",
     )
 
-    # --- Basic server options ---
-    parser.add_argument(
-        "--host",
-        default="0.0.0.0",
-        help="Bind address (default: 0.0.0.0)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8321,
-        help="Bind port (default: 8321)",
-    )
-    parser.add_argument(
-        "--data-dir",
-        default="~/.simple-a2a-registry",
-        help="Persistent data directory (default: ~/.simple-a2a-registry)",
-    )
-    parser.add_argument(
-        "--log-format",
-        default="text",
-        choices=["json", "text"],
-        help="Log output format: json (production/ELK) or text (development) (default: text)",
-    )
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level (default: INFO)",
-    )
-    parser.add_argument(
-        "--log-file",
-        default=None,
-        help="Log file path (default: stderr). Example: ~/.simple-a2a-registry/server.log",
-    )
     parser.add_argument(
         "--version",
         action="store_true",
         help="Show version and exit",
     )
 
-    parser.add_argument(
+    subparsers = parser.add_subparsers(
+        dest="command",
+        title="subcommands",
+        description="Available subcommands (run without a subcommand to start the server)",
+    )
+
+    # --- server subcommand ---
+    build_server_parser(subparsers)
+
+    # --- task subcommand ---
+    build_task_parser(subparsers)
+
+    # --- agent subcommand (optional) ---
+    if build_agent_parser:
+        build_agent_parser(subparsers)
+
+    # --- history subcommand (optional) ---
+    if build_history_parser:
+        build_history_parser(subparsers)
+
+    # --- workflow subcommand (optional) ---
+    if build_workflow_parser:
+        build_workflow_parser(subparsers)
+
+    return parser
+
+
+def build_server_parser(subparsers: argparse._SubParsersAction) -> None:
+    """Add the ``server`` subcommand parser (and also used as default)."""
+    sp = subparsers.add_parser(
+        "server",
+        help="Start the registry HTTP server",
+        description="Start the Simple A2A Registry HTTP server with the V2 orchestration engine.",
+    )
+
+    # --- Basic server options ---
+    sp.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Bind address (default: 0.0.0.0)",
+    )
+    sp.add_argument(
+        "--port",
+        type=int,
+        default=8321,
+        help="Bind port (default: 8321)",
+    )
+    sp.add_argument(
+        "--data-dir",
+        default="~/.simple-a2a-registry",
+        help="Persistent data directory (default: ~/.simple-a2a-registry)",
+    )
+    sp.add_argument(
+        "--log-format",
+        default="text",
+        choices=["json", "text"],
+        help="Log output format: json (production/ELK) or text (development) (default: text)",
+    )
+    sp.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging level (default: INFO)",
+    )
+    sp.add_argument(
+        "--log-file",
+        default=None,
+        help="Log file path (default: stderr). Example: ~/.simple-a2a-registry/server.log",
+    )
+    sp.add_argument(
         "--auth-enabled",
         default=False,
         action=argparse.BooleanOptionalAction,
         help="Enable OAuth 2.1 authentication middleware (default: disabled — dev mode)",
     )
-    parser.add_argument(
+    sp.add_argument(
         "--bootstrap-secret",
         default=None,
         help="Bootstrap client secret for the 'simple-a2a-registry' admin account "
@@ -81,37 +148,37 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     # --- V2 Orchestration Engine options ---
-    parser.add_argument(
+    sp.add_argument(
         "--board-path",
         default=None,
         help="SQLite database path for the V2 orchestration board "
              "(default: <data-dir>/board.db)",
     )
-    parser.add_argument(
+    sp.add_argument(
         "--dispatcher-enabled",
         default=True,
         action=argparse.BooleanOptionalAction,
         help="Enable the background worker dispatcher (default: enabled)",
     )
-    parser.add_argument(
+    sp.add_argument(
         "--dispatcher-interval",
         type=int,
         default=5,
         help="Dispatcher poll interval in seconds (default: 5)",
     )
-    parser.add_argument(
+    sp.add_argument(
         "--claim-ttl",
         type=int,
         default=900,
         help="Claim lock TTL in seconds (default: 900 / 15 min)",
     )
-    parser.add_argument(
+    sp.add_argument(
         "--failure-limit",
         type=int,
         default=3,
         help="Global default retry limit (default: 3)",
     )
-    parser.add_argument(
+    sp.add_argument(
         "--workspaces-root",
         default=None,
         help="Root directory for scratch workspaces "
@@ -119,7 +186,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     # --- Deprecated V1 alias ---
-    parser.add_argument(
+    sp.add_argument(
         "--dispatcher",
         dest="dispatcher_enabled_v1",
         action=argparse.BooleanOptionalAction,
@@ -127,16 +194,18 @@ def main(argv: list[str] | None = None) -> None:
         help="[deprecated] Use --dispatcher-enabled instead",
     )
 
-    args = parser.parse_args(argv)
 
-    if args.version:
-        print("simple-a2a-registry 1.0.0")
-        return
+# ---------------------------------------------------------------------------
+# Server start
+# ---------------------------------------------------------------------------
 
+
+def _start_server(args: argparse.Namespace) -> None:
+    """Execute the server subcommand with parsed arguments."""
     log_file = args.log_file
     setup_logging(
         log_format=args.log_format,
-        level=args.log_level.lower(),  # setup_logging accepts lowercase
+        level=args.log_level.lower(),
         output="stdout",
         log_file=log_file,
         suppress_noisy=True,
@@ -182,6 +251,41 @@ def main(argv: list[str] | None = None) -> None:
         workspaces_root=args.workspaces_root,
         config=load_config(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.version:
+        print(__version__)
+        return
+
+    # Dispatch to subcommand handler
+    if args.command in ("task", "agent", "history", "workflow"):
+        if hasattr(args, "func"):
+            args.func(args)
+        else:
+            sub_name = args.command
+            choices = {
+                "task": "list, show",
+                "agent": "list, get, register, unregister, heartbeat, toggle, stats, purge-stale",
+                "history": "list, show",
+                "workflow": "apply, validate, show",
+            }
+            parser.error(
+                f"{sub_name} subcommand required: {choices.get(sub_name, '...')}"
+            )
+    elif args.command == "server":
+        _start_server(args)
+    else:
+        # No subcommand given — backward compat: start server
+        _start_server(args)
 
 
 if __name__ == "__main__":

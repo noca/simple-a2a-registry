@@ -72,6 +72,8 @@ from simple_a2a_registry.orchestration import (
     SwarmHandler,
     register_swarm_routes,
     AnomalyScanner,
+    SlaCalculator,
+    SlaUpdater,
 )
 from simple_a2a_registry.ws_admin import AdminWSHub
 from simple_a2a_registry.registry_handler import (
@@ -1914,6 +1916,10 @@ def create_app(
         interval=60,
     )
 
+    # P5a.2: SLA Statistics — periodic success-rate gauge updates every 60s
+    sla_calculator = SlaCalculator(task_store=task_store)
+    sla_updater = SlaUpdater(calculator=sla_calculator, interval=60)
+
     # V2 Dispatcher (background worker dispatch)
     disp_config = DispatcherConfig(
         poll_interval=dispatcher_interval,
@@ -1971,6 +1977,8 @@ def create_app(
     app["audit_store"] = audit_store
     app["admin_ws_hub"] = admin_ws_hub
     app["anomaly_scanner"] = anomaly_scanner
+    app["sla_calculator"] = sla_calculator
+    app["sla_updater"] = sla_updater
 
     # HTTP client session for callback dispatch (created on startup, closed on cleanup)
     async def _init_client_session(app_: web.Application) -> None:
@@ -1992,9 +2000,22 @@ def create_app(
         scanner.stop()
         logger.info("AnomalyScanner background task stopped")
 
+    # P5a.2: Start/stop the SLA updater background loop
+    async def _start_sla_updater(app_: web.Application) -> None:
+        updater: SlaUpdater = app_["sla_updater"]
+        asyncio.create_task(updater.run())
+        logger.info("SlaUpdater background task started")
+
+    async def _stop_sla_updater(app_: web.Application) -> None:
+        updater: SlaUpdater = app_["sla_updater"]
+        updater.stop()
+        logger.info("SlaUpdater background task stopped")
+
     app.on_startup.append(_init_client_session)
     app.on_startup.append(_start_anomaly_scanner)
     app.on_cleanup.append(_stop_anomaly_scanner)
+    app.on_startup.append(_start_sla_updater)
+    app.on_cleanup.append(_stop_sla_updater)
     app.on_cleanup.append(_close_client_session)
 
     # Health / well-known
@@ -2150,6 +2171,35 @@ def create_app(
             require_scope("registry:admin")(
                 admin_handler.handle_get_agent_stats
             ),
+        )
+
+        # P5a.2: SLA statistics endpoint
+        async def _handle_sla_stats(request: web.Request) -> web.Response:
+            calc: SlaCalculator = app["sla_calculator"]
+            snap = calc.snapshot()
+            return web.json_response({
+                "captured_at": snap.captured_at,
+                "windows": [
+                    {
+                        "window": w.window_label,
+                        "completed": w.completed,
+                        "failed": w.failed,
+                        "cancelled": w.cancelled,
+                        "total_terminal": w.total_terminal,
+                        "success_rate": w.success_rate,
+                    }
+                    for w in snap.windows
+                ],
+                "trend": {
+                    "slope": snap.trend_slope,
+                    "intercept": snap.trend_intercept,
+                    "r_squared": snap.trend_r_squared,
+                },
+            })
+
+        app.router.add_get(
+            "/admin/sla",
+            require_scope("registry:admin")(_handle_sla_stats),
         )
 
     # User authentication routes — login/logout + user management
