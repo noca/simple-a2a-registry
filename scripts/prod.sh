@@ -25,4 +25,5 @@ exec env ADMIN_PASSWORD=admin123 python -m simple_a2a_registry server \
   --workspaces-root "$DATA_DIR/workspaces" \
   --dispatcher-enabled \
   --dispatcher-interval 5 \
+  --bootstrap-secret admin123 \
   "$@"

@@ -313,12 +313,15 @@ def _ensure_token() -> str:
     if OAUTH_ACCESS_TOKEN and time.time() < OAUTH_TOKEN_EXPIRES_AT - 30:
         return OAUTH_ACCESS_TOKEN
 
-    body = (
-        f"grant_type=client_credentials"
-        f"&client_id={shlex.quote(OAUTH_CLIENT_ID)}"
-        f"&client_secret={shlex.quote(OAUTH_CLIENT_SECRET)}"
-        f"&scope=task:read+task:write+agent:read+agent:register"
-    ).encode()
+    import urllib.request
+    from urllib.parse import urlencode
+
+    body = urlencode({
+        "grant_type": "client_credentials",
+        "client_id": OAUTH_CLIENT_ID,
+        "client_secret": OAUTH_CLIENT_SECRET,
+        "scope": "task:read task:write agent:read agent:register",
+    }).encode()
 
     import urllib.request
     from urllib.error import HTTPError
