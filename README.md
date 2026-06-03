@@ -170,6 +170,81 @@ a2a-registry --auth-enabled true
 
 `Ctrl+C` triggers graceful shutdown: WS agents notified, in-flight tasks cancelled, DB closed.
 
+### 7. Use the Python SDK
+
+```python
+from simple_a2a_registry.client import A2AClient
+
+client = A2AClient(
+    registry_url="http://localhost:8321",
+    client_id="my-agent",
+    client_secret="my-secret",
+)
+
+# 1. Health check
+health = client.health()
+print(f"Registry: {health['version']} uptime={health['uptime_seconds']}s")
+
+# 2. Register an agent (sync)
+agent_card = {
+    "name": "My Agent",
+    "description": "A test agent",
+    "version": "1.0.0",
+    "default_input_modes": ["text/plain"],
+    "default_output_modes": ["text/plain"],
+    "skills": [{"id": "echo", "name": "Echo"}],
+}
+agent_id = client.register_agent(agent_card=agent_card)
+print(f"Registered: {agent_id}")
+
+# 3. Heartbeat
+client.heartbeat(agent_id)
+
+# 4. List agents
+result = client.list_agents()
+print(f"Total agents: {result['total']}")
+
+# 5. Clean up
+client.deregister_agent(agent_id)
+```
+
+Async with WebSocket:
+
+```python
+import asyncio
+
+async def demo():
+    async with A2AClient(
+        registry_url="http://localhost:8321",
+        client_id="my-agent",
+        client_secret="my-secret",
+    ) as client:
+        agent_id = await client.async_register_agent(agent_card=agent_card)
+
+        # Set up dispatch handler
+        async def handle_task(task):
+            task_id = task["id"]
+            await client.async_report_progress(task_id, status="working")
+            result = {"text": "Task completed"}
+            await client.async_report_result(task_id, result)
+
+        client.dispatch_handler = handle_task
+        await client.async_connect_websocket(agent_id)
+        await asyncio.sleep(3600)  # keep alive
+
+asyncio.run(demo())
+```
+
+Run the full example:
+
+```bash
+# sync mode
+python examples/sdk_usage.py --mode sync
+
+# async mode with WebSocket (default)
+python examples/sdk_usage.py --mode async --self-dispatch
+```
+
 ---
 
 ## Configuration
