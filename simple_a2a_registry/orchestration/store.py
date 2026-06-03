@@ -170,7 +170,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE TABLE IF NOT EXISTS task_links (
     parent_id VARCHAR(255) NOT NULL,
     child_id  VARCHAR(255) NOT NULL,
-    condition TEXT,
+    `condition` TEXT,
     PRIMARY KEY (parent_id, child_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

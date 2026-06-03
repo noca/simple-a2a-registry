@@ -82,6 +82,10 @@ def _task_to_detail(task) -> dict:
         "current_run_id": task.current_run_id,
         "parallel_group": task.parallel_group,
         "result": json.loads(task.result) if task.result else None,
+        "summary": task.summary,
+        "metadata": json.loads(task.metadata) if task.metadata else None,
+        "tags": task.tags,
+        "circuit_state": task.circuit_state,
     })
     return d
 
