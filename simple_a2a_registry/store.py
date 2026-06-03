@@ -293,15 +293,23 @@ class Store:
         self._bootstrap_secret = bootstrap_secret
 
         if isinstance(data_dir_or_engine, str):
-            # Legacy path: create SQLiteEngine automatically
-            resolved = Path(data_dir_or_engine).expanduser().resolve()
-            resolved.mkdir(parents=True, exist_ok=True)
-            db_path = str(resolved / "registry.db")
-            engine = SQLiteEngine(db_path)
-            engine.connect()
-            _maybe_create_schema(engine)
-            self._engine = RetryEngine(engine)
-            self._data_dir = str(resolved)
+            # :memory: special case — SQLite in-memory database
+            if data_dir_or_engine == ":memory:":
+                engine = SQLiteEngine(":memory:")
+                engine.connect()
+                _maybe_create_schema(engine)
+                self._engine = RetryEngine(engine)
+                self._data_dir = ""
+            else:
+                # Legacy path: create SQLiteEngine automatically
+                resolved = Path(data_dir_or_engine).expanduser().resolve()
+                resolved.mkdir(parents=True, exist_ok=True)
+                db_path = str(resolved / "registry.db")
+                engine = SQLiteEngine(db_path)
+                engine.connect()
+                _maybe_create_schema(engine)
+                self._engine = RetryEngine(engine)
+                self._data_dir = str(resolved)
         else:
             self._engine = RetryEngine(data_dir_or_engine)
             self._data_dir = ""
