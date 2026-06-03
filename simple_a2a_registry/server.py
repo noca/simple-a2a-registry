@@ -33,6 +33,10 @@ from simple_a2a_registry.metrics import (
 )
 from simple_a2a_registry.rate_limiter import rate_limit_middleware_factory
 from simple_a2a_registry.models import make_agent_card, make_agent_skill
+from simple_a2a_registry.validation import (
+    validate_agent_card,
+    sanitize_card_output,
+)
 from simple_a2a_registry.config import Config
 from simple_a2a_registry.database import create_engine, SQLiteEngine
 from simple_a2a_registry.store import Store, HEARTBEAT_TIMEOUT
@@ -242,6 +246,9 @@ class RegistryHandler:
                 agent["connection"] = "websocket"
                 agent["status"] = "alive"
 
+        # Sanitize output for XSS prevention
+        page = [sanitize_card_output(a) for a in page]
+
         return web.json_response({
             "total": total,
             "limit": limit,
@@ -271,6 +278,8 @@ class RegistryHandler:
         if agent_id in self._ws_connections:
             card["connection"] = "websocket"
             card["status"] = "alive"
+        # Sanitize output for XSS prevention
+        card = sanitize_card_output(card)
         return web.json_response(card)
 
     async def handle_register(self, request: web.Request) -> web.Response:
@@ -311,6 +320,12 @@ class RegistryHandler:
         if not name:
             return json_error(400, "validation_error", "Agent requires a 'name'")
 
+        # Validate agent card fields (lengths, types, XSS prevention)
+        validation_errors = validate_agent_card(body)
+        if validation_errors:
+            details = "; ".join(e.detail for e in validation_errors[:5])
+            return json_error(400, "validation_error", details)
+
         # Auth middleware injects request['tenant'] (JWT); fall back to body tenant.
         # Admin scope (registry:admin) sets request['tenant']='' so registration
         # creates an agent in the default (empty) tenant.
@@ -327,6 +342,8 @@ class RegistryHandler:
         tenant = request["tenant"] if request.get("tenant") else body.get("tenant", "")
         agent_id = self.store.register_agent(body, tenant=tenant)
         card = self.store.get_agent(agent_id)
+        # Sanitize output for XSS prevention
+        card = sanitize_card_output(card)
 
         response = {
             "message": "Agent registered successfully",
@@ -1612,6 +1629,7 @@ def _maybe_update_kanban(
     status: str,
     result: Optional[str],
     error: Optional[str],
+    flow_control: Optional[Any] = None,
 ) -> None:
     """If *task_id* was WS-dispatched from the kanban board,
     update its status in the TaskStore.
@@ -1624,12 +1642,18 @@ def _maybe_update_kanban(
     if task_id not in dispatched_tasks:
         return
 
+    assignee = dispatched_tasks.get(task_id)
+
     if status in ("completed", "success"):
         try:
             task_store.update_task_status(
                 task_id, TaskStatus.COMPLETED.value,
                 result=json.dumps(result) if isinstance(result, dict) else result,
             )
+            # Notify flow control
+            if flow_control is not None and assignee:
+                flow_control.on_task_completed(assignee)
+                flow_control.on_task_departed(assignee)
             logger.info("Kanban task %s → completed (via WS task_result)", task_id)
         except Exception:
             logger.exception("Failed to complete kanban task '%s' from WS result", task_id)
@@ -1639,6 +1663,10 @@ def _maybe_update_kanban(
                 task_id, TaskStatus.FAILED.value,
                 result=error or str(result) if result else "Agent reported failure",
             )
+            # Notify flow control
+            if flow_control is not None and assignee:
+                flow_control.on_task_failed(assignee)
+                flow_control.on_task_departed(assignee)
             logger.info("Kanban task %s → failed (via WS task_result)", task_id)
         except Exception:
             logger.exception("Failed to fail kanban task '%s' from WS result", task_id)
@@ -1649,6 +1677,7 @@ async def _maybe_dispatch_pending(
     ws: web.WebSocketResponse,
     agent_id: str,
     dispatched_ws_tasks: Optional[Dict[str, str]] = None,
+    flow_control: Optional[Any] = None,
 ) -> None:
     """On reconnection, find blocked tasks assigned to *agent_id*
     and re-dispatch them over the fresh WebSocket.
@@ -1659,6 +1688,7 @@ async def _maybe_dispatch_pending(
         agent_id: Registered agent name.
         dispatched_ws_tasks: Optional shared dict from the Dispatcher
             so re-dispatched tasks are tracked for result reconciliation.
+        flow_control: Optional FlowController to check before re-dispatching.
     """
     if task_store is None:
         return
@@ -1673,6 +1703,14 @@ async def _maybe_dispatch_pending(
             return
 
         for task in blocked:
+            # Flow control gate
+            if flow_control is not None and not flow_control.can_dispatch(agent_id):
+                logger.debug(
+                    "Flow control blocked re-dispatch of task '%s' to agent '%s'",
+                    task.id, agent_id,
+                )
+                return
+
             try:
                 task_store.update_task_status(
                     task.id, TaskStatus.RUNNING.value,
@@ -1692,11 +1730,19 @@ async def _maybe_dispatch_pending(
                 # reconcile results when the agent reports completion
                 if dispatched_ws_tasks is not None:
                     dispatched_ws_tasks[task.id] = agent_id
+                # Notify flow control
+                if flow_control is not None:
+                    flow_control.on_task_dispatched(agent_id)
+                    flow_control.on_task_arrived(agent_id)
                 logger.info(
                     "Re-dispatched pending task '%s' to reconnected agent '%s'",
                     task.id, agent_id,
                 )
             except Exception as e:
+                # Notify flow control about failure
+                if flow_control is not None:
+                    flow_control.on_task_failed(agent_id)
+                    flow_control.on_task_departed(agent_id)
                 logger.error("Failed to re-dispatch task '%s': %s", task.id, e)
     except Exception:
         logger.exception("Error checking pending tasks for agent '%s'", agent_id)

@@ -913,6 +913,7 @@ def _reconcile_task_store(
     status: str,
     result: Any = None,
     error: Optional[str] = None,
+    flow_control: Optional[Any] = None,
 ) -> None:
     """If *task_id* was WS-dispatched from the kanban board, update its status.
 
@@ -924,6 +925,8 @@ def _reconcile_task_store(
     if task_id not in dispatched_tasks:
         return
 
+    assignee = dispatched_tasks.get(task_id)
+
     try:
         if status in (TaskStatus.RUNNING.value,):
             # task_ack → mark as running
@@ -934,12 +937,20 @@ def _reconcile_task_store(
                 task_id, TaskStatus.COMPLETED.value,
                 result=json.dumps(result) if isinstance(result, dict) else result,
             )
+            # Notify flow control
+            if flow_control is not None and assignee:
+                flow_control.on_task_completed(assignee)
+                flow_control.on_task_departed(assignee)
             logger.info("Kanban task %s → completed (via WS)", task_id)
         elif status in (TaskStatus.FAILED.value, "error"):
             task_store.update_task_status(
                 task_id, TaskStatus.FAILED.value,
                 result=error or str(result) if result else "Agent reported failure",
             )
+            # Notify flow control
+            if flow_control is not None and assignee:
+                flow_control.on_task_failed(assignee)
+                flow_control.on_task_departed(assignee)
             logger.info("Kanban task %s → failed (via WS)", task_id)
     except Exception:
         logger.exception("Failed to reconcile kanban task '%s' with status '%s'",
