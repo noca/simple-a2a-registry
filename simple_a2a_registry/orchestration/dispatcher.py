@@ -21,6 +21,10 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
+from simple_a2a_registry.orchestration.flow_control import (
+    FlowControlConfig,
+    FlowController,
+)
 from simple_a2a_registry.orchestration.models import (
     Task,
     TaskStatus,
@@ -56,6 +60,17 @@ class DispatcherConfig:
         board_slug: Board slug to inject as ``KANBAN_BOARD`` env var.
         dispatcher_id: Unique identifier for this dispatcher instance.
         tenant: If set, the dispatcher only processes tasks from this tenant.
+        max_concurrent_tasks: Max tasks that can be dispatched to a single
+            agent simultaneously (default 5). 0 = unlimited.
+        circuit_breaker_threshold: Consecutive dispatch failures before
+            circuit breaker trips (default 3).
+        circuit_breaker_cooldown: Seconds to wait before auto-resetting
+            the circuit breaker (default 300).
+        retry_backoff_base: Base delay in seconds for exponential backoff
+            (default 30).
+        retry_backoff_max: Maximum backoff delay in seconds (default 3600).
+        flow_control: Optional pre-configured FlowController. If not set,
+            one is created from the other flow-control fields.
     """
 
     poll_interval: int = 5
@@ -65,6 +80,12 @@ class DispatcherConfig:
     board_slug: str = "default"
     dispatcher_id: str = "dispatcher-1"
     tenant: Optional[str] = None
+    max_concurrent_tasks: int = 5
+    circuit_breaker_threshold: int = 3
+    circuit_breaker_cooldown: int = 300
+    retry_backoff_base: int = 30
+    retry_backoff_max: int = 3600
+    flow_control: Optional[FlowController] = None
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +118,7 @@ class Dispatcher:
         ws_connections: Optional[Dict[str, Any]] = None,
         registry_store: Optional[Any] = None,
         http_session: Optional[aiohttp.ClientSession] = None,
+        flow_control: Optional[FlowController] = None,
     ) -> None:
         self.store = store
         self.ws_mgr = workspace_manager
@@ -110,6 +132,23 @@ class Dispatcher:
         # results from agents (the V2 TaskStore has its own lifecycle, but
         # the V1 WS handler needs to know which tasks to update).
         self._dispatched_ws_tasks: Dict[str, str] = {}  # task_id -> assignee
+
+        # Flow control — use explicit or create from config
+        if flow_control is not None:
+            self._flow_control = flow_control
+        elif self.config.flow_control is not None:
+            self._flow_control = self.config.flow_control
+        else:
+            fc_config = FlowControlConfig(
+                max_concurrent_tasks=self.config.max_concurrent_tasks,
+                circuit_breaker_threshold=self.config.circuit_breaker_threshold,
+                circuit_breaker_cooldown=self.config.circuit_breaker_cooldown,
+                retry_backoff_base=self.config.retry_backoff_base,
+                retry_backoff_max=self.config.retry_backoff_max,
+            )
+            self._flow_control = FlowController(fc_config)
+
+        self._flow_blocked_count = 0
 
     # ------------------------------------------------------------------
     # Lifecycle control
@@ -155,7 +194,11 @@ class Dispatcher:
             "ttl_released": 0,
             "retry_promoted": 0,
             "tasks_claimed": 0,
+            "flow_blocked": 0,
         }
+
+        # Reset flow blocked counter for this cycle
+        self._flow_blocked_count = 0
 
         # 1. TTL Release — expired claims → failed
         try:
@@ -181,6 +224,8 @@ class Dispatcher:
             stats["tasks_claimed"] = claimed
         except Exception:
             logger.exception("Claim+spawn step failed")
+
+        stats["flow_blocked"] = self._flow_blocked_count
 
         return stats
 
@@ -225,6 +270,9 @@ class Dispatcher:
 
         for group_key, group_tasks in groups.items():
             if group_key is _NO_GROUP:
+                # Sort: new tasks (consecutive_failures=0) first, so retry-promoted
+                # tasks don't consume circuit breaker slots before new tasks.
+                group_tasks.sort(key=lambda t: t.consecutive_failures)
                 # Individual tasks — dispatch one at a time
                 for task in group_tasks:
                     if task.id in dispatched_ids:
@@ -267,59 +315,80 @@ class Dispatcher:
             return 0
 
         assignee = task.assignee
-        ws = self.ws_connections.get(assignee) if self.ws_connections else None
 
-        if ws is not None and not ws.closed:
-            return await self._dispatch_via_ws(task, ws)
-
-        # Check if the assignee is a callback-mode agent
-        is_callback_agent = False
-        callback_url = ""
-        callback_token = ""
-        if self.registry_store is not None:
-            try:
-                agent_card = self.registry_store.get_agent(assignee)
-                if agent_card:
-                    pref_channel = agent_card.get("preferred_channel", "ws") or "ws"
-                    if pref_channel == "callback":
-                        callback_url = (agent_card.get("callback_url", "") or "").strip()
-                        callback_token = agent_card.get("callback_token", "") or ""
-                        is_callback_agent = bool(callback_url)
-            except Exception:
-                logger.exception("Failed to lookup agent '%s' in registry store", assignee)
-
-        if is_callback_agent:
-            return await self._dispatch_via_callback(task, callback_url, callback_token)
-
-        # Assignee not connected and not a callback agent → block
-        if self.ws_connections:
-            logger.info(
-                "Blocking task '%s' (assignee=%s) — agent not connected via WebSocket and no callback configured",
+        # Flow control gate — check before attempting dispatch
+        if not self._flow_control.can_dispatch(assignee):
+            logger.debug(
+                "Flow control blocked dispatch of task '%s' to agent '%s'",
                 task.id, assignee,
             )
-            try:
-                self.store.update_task_status(
-                    task.id, TaskStatus.BLOCKED.value,
-                )
-                self.store.add_comment(
-                    task.id, "dispatcher",
-                    f"assignee '{assignee}' is not connected via WebSocket and no callback_url configured",
-                )
-            except Exception:
-                logger.exception("Failed to block task '%s'", task.id)
+            self._flow_blocked_count += 1
             return 0
 
-        # worker_command mode (legacy polling workers)
-        if not self.config.worker_command:
-            logger.info(
-                "Skipping claim for task '%s' (assignee=%s) — "
-                "no worker_command configured; leaving in 'ready' "
-                "for polling workers.",
-                task.id, task.assignee,
-            )
-            return 0
+        ws = self.ws_connections.get(assignee) if self.ws_connections else None
 
-        return await self._dispatch_via_worker_command(task)
+        result = 0
+        if ws is not None and not ws.closed:
+            result = await self._dispatch_via_ws(task, ws)
+        else:
+            # Check if the assignee is a callback-mode agent
+            is_callback_agent = False
+            callback_url = ""
+            callback_token = ""
+            if self.registry_store is not None:
+                try:
+                    agent_card = self.registry_store.get_agent(assignee)
+                    if agent_card:
+                        pref_channel = agent_card.get("preferred_channel", "ws") or "ws"
+                        if pref_channel == "callback":
+                            callback_url = (agent_card.get("callback_url", "") or "").strip()
+                            callback_token = agent_card.get("callback_token", "") or ""
+                            is_callback_agent = bool(callback_url)
+                except Exception:
+                    logger.exception("Failed to lookup agent '%s' in registry store", assignee)
+
+            if is_callback_agent:
+                result = await self._dispatch_via_callback(task, callback_url, callback_token)
+            else:
+                # Assignee not connected and not a callback agent → block
+                if self.ws_connections:
+                    logger.info(
+                        "Blocking task '%s' (assignee=%s) — agent not connected via WebSocket and no callback configured",
+                        task.id, assignee,
+                    )
+                    try:
+                        self.store.update_task_status(
+                            task.id, TaskStatus.BLOCKED.value,
+                        )
+                        self.store.add_comment(
+                            task.id, "dispatcher",
+                            f"assignee '{assignee}' is not connected via WebSocket and no callback_url configured",
+                        )
+                    except Exception:
+                        logger.exception("Failed to block task '%s'", task.id)
+                    return 0
+
+                # worker_command mode (legacy polling workers)
+                if not self.config.worker_command:
+                    logger.info(
+                        "Skipping claim for task '%s' (assignee=%s) — "
+                        "no worker_command configured; leaving in 'ready' "
+                        "for polling workers.",
+                        task.id, task.assignee,
+                    )
+                    return 0
+
+                result = await self._dispatch_via_worker_command(task)
+
+        # Notify flow control about the result
+        if result > 0:
+            self._flow_control.on_task_dispatched(assignee)
+            self._flow_control.on_task_arrived(assignee)
+        else:
+            self._flow_control.on_task_failed(assignee)
+            self._flow_control.on_task_departed(assignee)
+
+        return result
 
     async def _dispatch_via_ws(self, task: Task, ws) -> int:
         """WebSocket dispatch — claim, allocate workspace, send task message."""

@@ -239,6 +239,14 @@ def _maybe_create_schema(engine: DatabaseEngine) -> None:
             engine.commit()
         except Exception:
             engine.rollback()
+        # Migration: add next_retry_at column to tasks if missing
+        try:
+            engine.execute(
+                "ALTER TABLE tasks ADD COLUMN next_retry_at INTEGER"
+            )
+            engine.commit()
+        except Exception:
+            engine.rollback()
     elif engine.driver == "mysql":
         for statement in _SCHEMA_SQL_MYSQL.split(";"):
             stripped = statement.strip()
@@ -818,6 +826,14 @@ class TaskStore:
                     updates.append("consecutive_failures = consecutive_failures + 1")
                     updates.append("last_failure_error = ?")
                     update_params.append(result)
+                    # Calculate next_retry_at using exponential backoff
+                    # (same formula as FlowController.get_retry_backoff)
+                    new_failures = task.consecutive_failures + 1
+                    if task.max_retries is not None and new_failures <= task.max_retries:
+                        backoff_delay = min(30.0 * (2 ** (new_failures - 1)), 3600.0)
+                        next_retry = int(now + backoff_delay)
+                        updates.append("next_retry_at = ?")
+                        update_params.append(next_retry)
 
             if new_status == TaskStatus.COMPLETED.value:
                 updates.append("consecutive_failures = 0")

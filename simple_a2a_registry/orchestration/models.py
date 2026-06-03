@@ -113,6 +113,7 @@ class Task:
     current_run_id: Optional[int] = None
     max_retries: Optional[int] = None
     parallel_group: Optional[str] = None
+    next_retry_at: Optional[int] = None
     summary: Optional[str] = None
     metadata: Optional[str] = None
     tags: Optional[str] = None
