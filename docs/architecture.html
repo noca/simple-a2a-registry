@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A2A Registry Architecture</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #020617;
+  color: #e2e8f0;
+  font-family: 'JetBrains Mono', monospace;
+  display: flex;
+  justify-content: center;
+  padding: 40px 20px;
+}
+.container { max-width: 1200px; width: 100%; }
+
+/* Header */
+.header { text-align: center; margin-bottom: 36px; }
+.header h1 { font-size: 22px; font-weight: 600; color: #f1f5f9; }
+.header .pulse {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: #34d399; margin-right: 10px;
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52,211,153,0.4); }
+  50% { opacity: 0.6; box-shadow: 0 0 0 6px rgba(52,211,153,0); }
+}
+.header .subtitle { font-size: 11px; color: #64748b; margin-top: 6px; }
+
+/* Diagram card */
+.diagram-card {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 24px;
+}
+.diagram-card svg { display: block; width: 100%; height: auto; }
+
+/* Summary cards */
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.card {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  padding: 16px 18px;
+}
+.card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.card-dot { width: 8px; height: 8px; border-radius: 50%; }
+.card-dot.cyan { background: #22d3ee; }
+.card-dot.emerald { background: #34d399; }
+.card-dot.violet { background: #a78bfa; }
+.card h3 { font-size: 13px; font-weight: 500; color: #f1f5f9; }
+.card ul { list-style: none; }
+.card li { font-size: 10.5px; color: #94a3b8; line-height: 1.8; letter-spacing: 0.2px; }
+
+/* Footer */
+.footer { text-align: center; font-size: 9px; color: #475569; }
+.footer span { color: #64748b; }
+</style>
+</head>
+<body>
+<div class="container">
+  <!-- Header -->
+  <div class="header">
+    <h1><span class="pulse"></span>Simple A2A Registry — Architecture</h1>
+    <div class="subtitle">The Kubernetes for AI Agents · v2.x · OAuth 2.1 · Kanban Engine · Swarm Topology</div>
+  </div>
+
+  <!-- SVG Diagram -->
+  <div class="diagram-card">
+    <svg viewBox="0 0 1100 780" xmlns="http://www.w3.org/2000/svg" font-family="'JetBrains Mono', monospace">
+      <defs>
+        <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+          <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+        </pattern>
+        <marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 Z" fill="#22d3ee"/>
+        </marker>
+        <marker id="arrow-emerald" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 Z" fill="#34d399"/>
+        </marker>
+        <marker id="arrow-violet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 Z" fill="#a78bfa"/>
+        </marker>
+        <marker id="arrow-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 Z" fill="#fb923c"/>
+        </marker>
+        <marker id="arrow-rose" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 Z" fill="#fb7185"/>
+        </marker>
+        <!-- Card renderer: opaque bg + translucent overlay -->
+        <g id="card">
+          <rect x="0" y="0" width="100%" height="100%" rx="6" fill="#0f172a"/>
+        </g>
+      </defs>
+
+      <!-- Background -->
+      <rect width="1100" height="780" fill="url(#grid)"/>
+
+      <!-- ====== CONNECTIONS (drawn first for correct Z-order) ====== -->
+
+      <!-- Caller → Registry arrows -->
+      <line x1="50" y1="100" x2="280" y2="100" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow-cyan)" stroke-dasharray="4,3"/>
+      <text x="100" y="88" fill="#22d3ee" font-size="7" opacity="0.8">HTTP/WS</text>
+
+      <!-- Registry → Agents -->
+      <path d="M 550 190 L 550 230 Q 550 240 560 240 L 850 240 Q 860 240 860 250 L 860 290" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)" stroke-dasharray="4,3"/>
+      <text x="670" y="228" fill="#34d399" font-size="7" opacity="0.8">WS push tasks</text>
+
+      <path d="M 550 190 L 550 230 Q 550 240 540 240 L 260 240 Q 250 240 250 250 L 250 290" fill="none" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrow-emerald)" stroke-dasharray="4,3"/>
+
+      <!-- Registry → Workers -->
+      <path d="M 550 590 L 550 620 Q 550 630 560 630 L 850 630 Q 860 630 860 640 L 860 670" fill="none" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrow-orange)"/>
+      <text x="670" y="618" fill="#fb923c" font-size="7" opacity="0.8">KANBAN dispatch</text>
+
+      <path d="M 550 590 L 550 620 Q 550 630 540 630 L 260 630 Q 250 630 250 640 L 250 670" fill="none" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrow-orange)"/>
+
+      <!-- Registry ↔ Database -->
+      <line x1="550" y1="690" x2="550" y2="730" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrow-violet)"/>
+      <text x="560" y="720" fill="#a78bfa" font-size="7" opacity="0.8">Alembic</text>
+
+      <!-- ====== EXTERNAL BOXES (Background) ====== -->
+
+      <!-- Agents / Workers background zone -->
+      <rect x="140" y="80" width="820" height="40" rx="4" fill="none" stroke="#475569" stroke-width="1" stroke-dasharray="6,4" opacity="0.4"/>
+      <text x="160" y="105" fill="#475569" font-size="8" opacity="0.6">EXTERNAL CLIENTS</text>
+
+      <!-- ====== CALLER ====== -->
+      <g transform="translate(50, 55)">
+        <rect width="190" height="80" rx="6" fill="#0f172a"/>
+        <rect width="190" height="80" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="54" y="58" fill="#22d3ee" font-size="11" font-weight="600">Caller / Client</text>
+        <text x="54" y="72" fill="#64748b" font-size="8">HTTP API caller / Browser SPA</text>
+      </g>
+
+      <!-- ====== REGISTRY SERVER BOUNDING BOX ====== -->
+      <rect x="270" y="45" width="560" height="700" rx="12" fill="none" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="8,4" opacity="0.5"/>
+      <text x="290" y="68" fill="#fbbf24" font-size="9" font-weight="500">A2A Registry Server — localhost:8321</text>
+
+      <!-- ===== LAYER 1: AGENT REGISTRY & DISPATCH ===== -->
+      <g transform="translate(295, 80)">
+        <rect width="510" height="110" rx="6" fill="#0f172a"/>
+        <rect width="510" height="110" rx="6" fill="rgba(6,78,59,0.35)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="16" y="22" fill="#34d399" font-size="10" font-weight="600">Agent Registry &amp; Dispatch</text>
+
+        <rect x="14" y="32" width="148" height="62" rx="4" fill="rgba(6,78,59,0.25)" stroke="#34d399" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="24" y="52" fill="#e2e8f0" font-size="9">Registration</text>
+        <text x="24" y="64" fill="#64748b" font-size="7.5">register / list / search</text>
+        <text x="24" y="76" fill="#64748b" font-size="7.5">deregister / agent cards</text>
+
+        <rect x="174" y="32" width="148" height="62" rx="4" fill="rgba(6,78,59,0.25)" stroke="#34d399" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="184" y="52" fill="#e2e8f0" font-size="9">Heartbeat</text>
+        <text x="184" y="64" fill="#64748b" font-size="7.5">POST heartbeat 120s TTL</text>
+        <text x="184" y="76" fill="#64748b" font-size="7.5">stale cleanup 300s</text>
+
+        <rect x="334" y="32" width="160" height="62" rx="4" fill="rgba(6,78,59,0.25)" stroke="#34d399" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="344" y="52" fill="#e2e8f0" font-size="9">WebSocket</text>
+        <text x="344" y="64" fill="#64748b" font-size="7.5">persistent connection</text>
+        <text x="344" y="76" fill="#64748b" font-size="7.5">auto-reconnect</text>
+      </g>
+
+      <!-- ===== LAYER 2: ORCHESTRATION ENGINE ===== -->
+      <g transform="translate(295, 205)">
+        <rect width="510" height="128" rx="6" fill="#0f172a"/>
+        <rect width="510" height="128" rx="6" fill="rgba(251,146,60,0.15)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="16" y="22" fill="#fb923c" font-size="10" font-weight="600">Kanban Orchestration Engine (V2)</text>
+
+        <rect x="14" y="32" width="148" height="80" rx="4" fill="rgba(251,146,60,0.12)" stroke="#fb923c" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="24" y="50" fill="#e2e8f0" font-size="9">State Machine</text>
+        <text x="24" y="62" fill="#64748b" font-size="7">todo→ready→running→done/failed/blocked</text>
+        <text x="24" y="74" fill="#64748b" font-size="7">DAG dependency chains</text>
+        <text x="24" y="86" fill="#64748b" font-size="7">Atomic claim locks + TTL</text>
+        <text x="24" y="98" fill="#64748b" font-size="7">Retry promotion</text>
+
+        <rect x="174" y="32" width="148" height="80" rx="4" fill="rgba(251,146,60,0.12)" stroke="#fb923c" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="184" y="50" fill="#e2e8f0" font-size="9">Dispatcher</text>
+        <text x="184" y="62" fill="#64748b" font-size="7">Poll loop → claim</text>
+        <text x="184" y="74" fill="#64748b" font-size="7">Flow control</text>
+        <text x="184" y="86" fill="#64748b" font-size="7">Subprocess pool</text>
+        <text x="184" y="98" fill="#64748b" font-size="7">Workspace mgmt</text>
+
+        <rect x="334" y="32" width="160" height="80" rx="4" fill="rgba(251,146,60,0.12)" stroke="#fb923c" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="344" y="50" fill="#e2e8f0" font-size="9">Swarm Topology</text>
+        <text x="344" y="62" fill="#64748b" font-size="7">N parallel workers</text>
+        <text x="344" y="74" fill="#64748b" font-size="7">→ verifier → synthesizer</text>
+        <text x="344" y="86" fill="#64748b" font-size="7">Shared blackboard</text>
+        <text x="344" y="98" fill="#64748b" font-size="7">DAG coordination</text>
+      </g>
+
+      <!-- ===== LAYER 3: AUTH & GOVERNANCE ===== -->
+      <g transform="translate(295, 348)">
+        <rect width="510" height="100" rx="6" fill="#0f172a"/>
+        <rect width="510" height="100" rx="6" fill="rgba(136,19,55,0.25)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="16" y="22" fill="#fb7185" font-size="10" font-weight="600">Auth &amp; Governance</text>
+
+        <rect x="14" y="32" width="148" height="54" rx="4" fill="rgba(136,19,55,0.15)" stroke="#fb7185" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="24" y="50" fill="#e2e8f0" font-size="9">OAuth 2.1</text>
+        <text x="24" y="62" fill="#64748b" font-size="7.5">JWT RS256/HS256</text>
+        <text x="24" y="74" fill="#64748b" font-size="7.5">Scope-based access</text>
+
+        <rect x="174" y="32" width="148" height="54" rx="4" fill="rgba(136,19,55,0.15)" stroke="#fb7185" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="184" y="50" fill="#e2e8f0" font-size="9">Multi-Tenancy</text>
+        <text x="184" y="62" fill="#64748b" font-size="7.5">X-Tenant-ID</text>
+        <text x="184" y="74" fill="#64748b" font-size="7.5">Full data isolation</text>
+
+        <rect x="334" y="32" width="160" height="54" rx="4" fill="rgba(136,19,55,0.15)" stroke="#fb7185" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="344" y="50" fill="#e2e8f0" font-size="9">Governance</text>
+        <text x="344" y="62" fill="#64748b" font-size="7.5">Rate limit / Audit log</text>
+        <text x="344" y="74" fill="#64748b" font-size="7.5">Plugin hooks</text>
+      </g>
+
+      <!-- ===== LAYER 4: OBSERVABILITY ===== -->
+      <g transform="translate(295, 463)">
+        <rect width="510" height="100" rx="6" fill="#0f172a"/>
+        <rect width="510" height="100" rx="6" fill="rgba(30,41,59,0.35)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="16" y="22" fill="#94a3b8" font-size="10" font-weight="600">Observability</text>
+
+        <rect x="14" y="32" width="148" height="54" rx="4" fill="rgba(30,41,59,0.25)" stroke="#94a3b8" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="24" y="50" fill="#e2e8f0" font-size="9">Prometheus</text>
+        <text x="24" y="62" fill="#64748b" font-size="7.5">Request count / latency</text>
+        <text x="24" y="74" fill="#64748b" font-size="7.5">agent / WS / DB gauges</text>
+
+        <rect x="174" y="32" width="148" height="54" rx="4" fill="rgba(30,41,59,0.25)" stroke="#94a3b8" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="184" y="50" fill="#e2e8f0" font-size="9">Structured Logging</text>
+        <text x="184" y="62" fill="#64748b" font-size="7.5">JSON / text dual mode</text>
+        <text x="184" y="74" fill="#64748b" font-size="7.5">request_id context</text>
+
+        <rect x="334" y="32" width="160" height="54" rx="4" fill="rgba(30,41,59,0.25)" stroke="#94a3b8" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="344" y="50" fill="#e2e8f0" font-size="9">Admin WS Hub</text>
+        <text x="344" y="62" fill="#64748b" font-size="7.5">Real-time task updates</text>
+        <text x="344" y="74" fill="#64748b" font-size="7.5">Web Dashboard SPA</text>
+      </g>
+
+      <!-- ===== LAYER 5: STORE ===== -->
+      <g transform="translate(295, 578)">
+        <rect width="510" height="105" rx="6" fill="#0f172a"/>
+        <rect width="510" height="105" rx="6" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="16" y="22" fill="#a78bfa" font-size="10" font-weight="600">Store (Unified Database Engine)</text>
+
+        <rect x="14" y="32" width="228" height="58" rx="4" fill="rgba(76,29,149,0.15)" stroke="#a78bfa" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="24" y="50" fill="#e2e8f0" font-size="9">DatabaseEngine ABC</text>
+        <text x="24" y="62" fill="#64748b" font-size="7.5">SQLiteEngine (WAL mode, dev)</text>
+        <text x="24" y="74" fill="#64748b" font-size="7.5">MySQLEngine (QueuePool, prod)</text>
+        <text x="24" y="84" fill="#64748b" font-size="7.5">RetryEngine (transient error)</text>
+
+        <rect x="256" y="32" width="238" height="58" rx="4" fill="rgba(76,29,149,0.15)" stroke="#a78bfa" stroke-width="0.8" stroke-opacity="0.5"/>
+        <text x="266" y="50" fill="#e2e8f0" font-size="9">Persistence Layer</text>
+        <text x="266" y="62" fill="#64748b" font-size="7.5">Agents / OAuth Clients / Tokens</text>
+        <text x="266" y="74" fill="#64748b" font-size="7.5">Tasks / Runs / Swarm Workspaces</text>
+        <text x="266" y="84" fill="#64748b" font-size="7.5">Audit Events / Users</text>
+      </g>
+
+      <!-- ====== AGENT A ====== -->
+      <g transform="translate(250, 290)">
+        <rect width="150" height="60" rx="6" fill="#0f172a"/>
+        <rect width="150" height="60" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="16" y="26" fill="#22d3ee" font-size="10" font-weight="600">Agent A</text>
+        <text x="16" y="40" fill="#64748b" font-size="7.5">HTTP + WS</text>
+        <text x="16" y="52" fill="#64748b" font-size="7.5">Task consumer</text>
+      </g>
+
+      <!-- ====== AGENT B ====== -->
+      <g transform="translate(560, 290)">
+        <rect width="150" height="60" rx="6" fill="#0f172a"/>
+        <rect width="150" height="60" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="16" y="26" fill="#22d3ee" font-size="10" font-weight="600">Agent B</text>
+        <text x="16" y="40" fill="#64748b" font-size="7.5">WS long connection</text>
+        <text x="16" y="52" fill="#64748b" font-size="7.5">Auto-reconnect</text>
+      </g>
+
+      <!-- ====== WORKER 1 ====== -->
+      <g transform="translate(250, 670)">
+        <rect width="150" height="55" rx="6" fill="#0f172a"/>
+        <rect width="150" height="55" rx="6" fill="rgba(251,146,60,0.15)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="16" y="24" fill="#fb923c" font-size="10" font-weight="600">Kanban Worker</text>
+        <text x="16" y="38" fill="#64748b" font-size="7.5">Subprocess pool</text>
+        <text x="16" y="50" fill="#64748b" font-size="7.5">stdin JSON-line</text>
+      </g>
+
+      <!-- ====== WORKER 2 ====== -->
+      <g transform="translate(560, 670)">
+        <rect width="150" height="55" rx="6" fill="#0f172a"/>
+        <rect width="150" height="55" rx="6" fill="rgba(251,146,60,0.15)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="16" y="24" fill="#fb923c" font-size="10" font-weight="600">Kanban Worker</text>
+        <text x="16" y="38" fill="#64748b" font-size="7.5">Auto-restart</text>
+        <text x="16" y="50" fill="#64748b" font-size="7.5">Claim tasks</text>
+      </g>
+
+      <!-- ====== DATABASE BOXES ====== -->
+      <!-- SQLite -->
+      <g transform="translate(480, 730)">
+        <rect width="68" height="40" rx="4" fill="#0f172a"/>
+        <rect width="68" height="40" rx="4" fill="rgba(76,29,149,0.25)" stroke="#a78bfa" stroke-width="1.2"/>
+        <text x="10" y="16" fill="#a78bfa" font-size="7.5">SQLite</text>
+        <text x="10" y="30" fill="#64748b" font-size="6.5">Dev (WAL)</text>
+      </g>
+      <!-- MySQL -->
+      <g transform="translate(558, 730)">
+        <rect width="68" height="40" rx="4" fill="#0f172a"/>
+        <rect width="68" height="40" rx="4" fill="rgba(76,29,149,0.25)" stroke="#a78bfa" stroke-width="1.2"/>
+        <text x="10" y="16" fill="#a78bfa" font-size="7.5">MySQL</text>
+        <text x="10" y="30" fill="#64748b" font-size="6.5">Prod</text>
+      </g>
+      <!-- Arrow between SQLite and MySQL -->
+      <line x1="548" y1="750" x2="558" y2="750" stroke="#a78bfa" stroke-width="1" stroke-dasharray="2,2"/>
+      <text x="555" y="742" fill="#64748b" font-size="6" opacity="0.7">⇆</text>
+
+      <!-- ====== LEGEND ====== -->
+      <g transform="translate(850, 680)">
+        <rect width="220" height="95" rx="6" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+        <text x="14" y="18" fill="#94a3b8" font-size="8" font-weight="500">Legend</text>
+        <line x1="14" y1="24" x2="206" y2="24" stroke="#1e293b" stroke-width="0.5"/>
+        <rect x="14" y="32" width="10" height="10" rx="2" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1"/>
+        <text x="30" y="40" fill="#64748b" font-size="7">Agent Registry &amp; Dispatch</text>
+        <rect x="14" y="46" width="10" height="10" rx="2" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="1"/>
+        <text x="30" y="54" fill="#64748b" font-size="7">Kanban Orchestration V2</text>
+        <rect x="14" y="60" width="10" height="10" rx="2" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/>
+        <text x="30" y="68" fill="#64748b" font-size="7">Auth &amp; Governance</text>
+        <rect x="14" y="74" width="10" height="10" rx="2" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1"/>
+        <text x="30" y="82" fill="#64748b" font-size="7">Database / Persistence</text>
+      </g>
+    </svg>
+  </div>
+
+  <!-- Summary Cards -->
+  <div class="summary-grid">
+    <div class="card">
+      <div class="card-header">
+        <div class="card-dot cyan"></div>
+        <h3>Agent Layer</h3>
+      </div>
+      <ul>
+        <li>• Register / deregister via Agent Card</li>
+        <li>• HTTP heartbeat — 120s TTL + 300s cleanup</li>
+        <li>• WebSocket persistent connection</li>
+        <li>• Real-time task push + result polling</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-dot emerald"></div>
+        <h3>Orchestration</h3>
+      </div>
+      <ul>
+        <li>• 8-state Kanban engine with DAG dependencies</li>
+        <li>• Swarm topology: N workers → verifier → synth</li>
+        <li>• Subprocess pool with auto-restart</li>
+        <li>• Flow control + workspace management</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-dot violet"></div>
+        <h3>Infrastructure</h3>
+      </div>
+      <ul>
+        <li>• SQLite (dev) / MySQL (prod) with RetryEngine</li>
+        <li>• OAuth 2.1 + JWT scope-based access control</li>
+        <li>• Multi-tenant data isolation</li>
+        <li>• Prometheus + structured audit logging</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span>Simple A2A Registry</span> · Architecture Diagram · v2.x
+  </div>
+</div>
+</body>
+</html>
