@@ -1,14 +1,16 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   Card, Table, Button, Tag, Row, Col, Select, Spin, Empty, Typography,
+  Modal, Input, Form, message,
 } from 'antd';
-import { ReloadOutlined } from '@ant-design/icons';
-import { listV1Tasks } from '../api/client';
+import { ReloadOutlined, PlusOutlined } from '@ant-design/icons';
+import { agentAPI } from '../api/client';
+import { listV1Tasks, dispatchV1Task } from '../api/client';
 import StatusTag from '../components/StatusTag';
 import PageTitle from '../components/PageTitle';
 import TaskDetailPanel from '../components/TaskDetailPanel';
 
-const { Text } = Typography;
+const { TextArea } = Input;
 
 interface TaskItem {
   id: string;
@@ -30,7 +32,12 @@ const Tasks: React.FC = () => {
 
   const [selectedTask, setSelectedTask] = useState<TaskItem | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [detailLoading, setDetailLoading] = useState(false);
+
+  // Create task modal
+  const [createOpen, setCreateOpen] = useState(false);
+  const [agents, setAgents] = useState<{ id: string; name: string }[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [form] = Form.useForm();
 
   const fetchTasks = useCallback(async () => {
     setLoading(true);
@@ -51,12 +58,42 @@ const Tasks: React.FC = () => {
   const openDetail = async (task: TaskItem) => {
     setSelectedTask(task);
     setDrawerOpen(true);
-    setDetailLoading(false);
   };
 
   const closeDrawer = () => {
     setDrawerOpen(false);
     setSelectedTask(null);
+  };
+
+  const openCreate = async () => {
+    try {
+      const data = await agentAPI.list();
+      const list = Array.isArray(data) ? data : data.agents || [];
+      setAgents(list.map((a: any) => ({ id: a.id, name: a.name || a.id })));
+    } catch {
+      setAgents([]);
+    }
+    setCreateOpen(true);
+  };
+
+  const handleCreate = async () => {
+    try {
+      const values = await form.validateFields();
+      setCreating(true);
+      const result = await dispatchV1Task(values.agent_id, values.query, values.session_id);
+      message.success(`Task dispatched: ${result.task_id}`);
+      setCreateOpen(false);
+      form.resetFields();
+      fetchTasks();
+    } catch (err: any) {
+      if (err?.response?.data?.error) {
+        message.error(err.response.data.error);
+      } else if (!err.errorFields) {
+        message.error('Failed to create task');
+      }
+    } finally {
+      setCreating(false);
+    }
   };
 
   const formatTime = (ts?: number) =>
@@ -103,7 +140,12 @@ const Tasks: React.FC = () => {
         title="Tasks"
         count={tasks.length}
         label="total"
-        extra={<Button icon={<ReloadOutlined />} onClick={fetchTasks}>Refresh</Button>}
+        extra={
+          <Row gutter={8}>
+            <Col><Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>Create Task</Button></Col>
+            <Col><Button icon={<ReloadOutlined />} onClick={fetchTasks}>Refresh</Button></Col>
+          </Row>
+        }
       />
 
       <Card bodyStyle={{ padding: '12px 16px' }} style={{ marginBottom: 16, borderRadius: 10 }}>
@@ -144,7 +186,6 @@ const Tasks: React.FC = () => {
         )}
       </Spin>
 
-      {/* Use the new TaskDetailPanel component with progress bar, timeline, metrics */}
       <TaskDetailPanel
         task={selectedTask ? {
           id: selectedTask.id,
@@ -154,12 +195,59 @@ const Tasks: React.FC = () => {
           created_at: selectedTask.created_at,
           updated_at: selectedTask.updated_at,
           result: selectedTask.result,
-          [Symbol('extra')]: selectedTask,
         } : null}
         open={drawerOpen}
         onClose={closeDrawer}
         fetchDetail={true}
       />
+
+      {/* Create Task Modal */}
+      <Modal
+        title="Create V1 Task"
+        open={createOpen}
+        onCancel={() => { setCreateOpen(false); form.resetFields(); }}
+        footer={null}
+        width={520}
+        destroyOnClose
+      >
+        <Form form={form} layout="vertical" onFinish={handleCreate}>
+          <Form.Item
+            name="agent_id"
+            label="Target Agent"
+            rules={[{ required: true, message: 'Please select an agent' }]}
+          >
+            <Select
+              placeholder="Select agent to dispatch task to"
+              showSearch
+              filterOption={(input, option) =>
+                (option?.label as string || '').toLowerCase().includes(input.toLowerCase())
+              }
+              options={agents.map((a) => ({
+                label: `${a.name} (${a.id.substring(0, 8)}…)`,
+                value: a.id,
+              }))}
+            />
+          </Form.Item>
+          <Form.Item
+            name="query"
+            label="Task Query"
+            rules={[{ required: true, message: 'Please enter task query' }]}
+          >
+            <TextArea rows={4} placeholder="Enter the task description or instruction for the agent" />
+          </Form.Item>
+          <Form.Item name="session_id" label="Session ID (optional)">
+            <Input placeholder="Leave empty for auto-generated ID" />
+          </Form.Item>
+          <Form.Item style={{ marginBottom: 0, textAlign: 'right' }}>
+            <Button onClick={() => { setCreateOpen(false); form.resetFields(); }} style={{ marginRight: 8 }}>
+              Cancel
+            </Button>
+            <Button type="primary" htmlType="submit" loading={creating}>
+              Dispatch Task
+            </Button>
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   );
 };

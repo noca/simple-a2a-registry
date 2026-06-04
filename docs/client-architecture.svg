@@ -1,0 +1,182 @@
+<svg viewBox="0 0 880 700" xmlns="http://www.w3.org/2000/svg" font-family="'JetBrains Mono', monospace">
+      <defs>
+        <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+          <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+        </pattern>
+        <marker id="arr-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 Z" fill="#22d3ee"/>
+        </marker>
+        <marker id="arr-emerald" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 Z" fill="#34d399"/>
+        </marker>
+        <marker id="arr-violet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 Z" fill="#a78bfa"/>
+        </marker>
+        <marker id="arr-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 Z" fill="#fb923c"/>
+        </marker>
+      </defs>
+      <rect width="880" height="700" fill="url(#grid)"/>
+
+      <!-- ====== CONNECTIONS ====== -->
+      <!-- Client --> Registry -->
+      <line x1="380" y1="60" x2="500" y2="60" stroke="#22d3ee" stroke-width="1.2" marker-end="url(#arr-cyan)"/>
+      <text x="410" y="50" fill="#22d3ee" font-size="6.5" opacity="0.7">HTTP/WS</text>
+
+      <!-- Registry -[dispatchTask]-> Client -->
+      <path d="M 630 140 L 630 170 Q 630 180 620 180 L 520 180 Q 510 180 510 190 L 510 210" fill="none" stroke="#34d399" stroke-width="1.2" marker-end="url(#arr-emerald)"/>
+      <text x="535" y="175" fill="#34d399" font-size="6" opacity="0.7">dispatch task</text>
+
+      <!-- Client -[reportResult]-> Registry -->
+      <line x1="510" y1="230" x2="600" y2="230" stroke="#fb923c" stroke-width="1.2" marker-end="url(#arr-orange)"/>
+      <text x="525" y="220" fill="#fb923c" font-size="6" opacity="0.7">report result/progress</text>
+
+      <!-- Auth -[getToken]-> Registry -->
+      <line x1="630" y1="40" x2="630" y2="100" stroke="#a78bfa" stroke-width="1.2" marker-end="url(#arr-violet)"/>
+      <text x="640" y="75" fill="#a78bfa" font-size="6" opacity="0.7">client_credentials</text>
+
+      <!-- ====== USER CODE BOX ====== -->
+      <g transform="translate(380, 20)">
+        <rect width="120" height="80" rx="6" fill="#0f172a"/>
+        <rect width="120" height="80" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.2"/>
+        <text x="12" y="26" fill="#22d3ee" font-size="9" font-weight="600">User Code</text>
+        <text x="12" y="42" fill="#64748b" font-size="7">A2AClient()</text>
+        <text x="12" y="56" fill="#64748b" font-size="7">dispatch_handler</text>
+        <text x="12" y="70" fill="#64748b" font-size="7">async with client</text>
+      </g>
+
+      <!-- ====== CLIENT SDK BOUNDING BOX ====== -->
+      <rect x="40" y="120" width="450" height="540" rx="10" fill="none" stroke="#34d399" stroke-width="1.2" stroke-dasharray="6,3" opacity="0.4"/>
+      <text x="58" y="142" fill="#34d399" font-size="9" font-weight="500">A2AClient — Python SDK</text>
+
+      <!-- ===== LAYER 1: AUTH ===== -->
+      <g transform="translate(60, 155)">
+        <rect width="410" height="68" rx="5" fill="#0f172a"/>
+        <rect width="410" height="68" rx="5" fill="rgba(76,29,149,0.25)" stroke="#a78bfa" stroke-width="1.2"/>
+        <text x="12" y="18" fill="#a78bfa" font-size="9" font-weight="600">OAuth 2.1 — Token Management</text>
+        <rect x="12" y="28" width="182" height="30" rx="3" fill="rgba(76,29,149,0.15)" stroke="#a78bfa" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="20" y="44" fill="#e2e8f0" font-size="8">_ensure_token()</text>
+        <text x="110" y="44" fill="#64748b" font-size="6.5">sync</text>
+        <rect x="204" y="28" width="192" height="30" rx="3" fill="rgba(76,29,149,0.15)" stroke="#a78bfa" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="212" y="44" fill="#e2e8f0" font-size="8">_async_ensure_token()</text>
+        <text x="340" y="44" fill="#64748b" font-size="6.5">async</text>
+        <text x="12" y="62" fill="#64748b" font-size="6.5">client_credentials grant · JWT RS256/HS256 · 30s 前自动刷新 · scope-based</text>
+      </g>
+
+      <!-- ===== LAYER 2: AGENT LIFECYCLE ===== -->
+      <g transform="translate(60, 235)">
+        <rect width="410" height="65" rx="5" fill="#0f172a"/>
+        <rect width="410" height="65" rx="5" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.2"/>
+        <text x="12" y="18" fill="#34d399" font-size="9" font-weight="600">Agent Lifecycle</text>
+        <rect x="12" y="28" width="88" height="27" rx="3" fill="rgba(6,78,59,0.2)" stroke="#34d399" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="20" y="45" fill="#e2e8f0" font-size="7.5">register</text>
+        <rect x="108" y="28" width="92" height="27" rx="3" fill="rgba(6,78,59,0.2)" stroke="#34d399" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="116" y="45" fill="#e2e8f0" font-size="7.5">deregister</text>
+        <rect x="208" y="28" width="100" height="27" rx="3" fill="rgba(6,78,59,0.2)" stroke="#34d399" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="216" y="45" fill="#e2e8f0" font-size="7.5">heartbeat</text>
+        <rect x="316" y="28" width="82" height="27" rx="3" fill="rgba(6,78,59,0.2)" stroke="#34d399" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="324" y="45" fill="#e2e8f0" font-size="7.5">list/search</text>
+      </g>
+
+      <!-- ===== LAYER 3: WEBSOCKET ===== -->
+      <g transform="translate(60, 315)">
+        <rect width="410" height="100" rx="5" fill="#0f172a"/>
+        <rect width="410" height="100" rx="5" fill="rgba(251,146,60,0.12)" stroke="#fb923c" stroke-width="1.2"/>
+        <text x="12" y="18" fill="#fb923c" font-size="9" font-weight="600">WebSocket — Persistent Connection</text>
+        <rect x="12" y="28" width="182" height="60" rx="3" fill="rgba(251,146,60,0.1)" stroke="#fb923c" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="20" y="44" fill="#e2e8f0" font-size="8">connect_websocket(agent_id)</text>
+        <text x="20" y="58" fill="#64748b" font-size="6.5">async_connect_websocket()</text>
+        <text x="20" y="72" fill="#64748b" font-size="6.5">dispatch_handler ← 收到任务回调</text>
+        <rect x="204" y="28" width="192" height="60" rx="3" fill="rgba(251,146,60,0.1)" stroke="#fb923c" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="212" y="44" fill="#e2e8f0" font-size="8">_ws_reconnect_loop()</text>
+        <text x="212" y="58" fill="#64748b" font-size="6.5">auto-reconnect (退避)</text>
+        <text x="212" y="72" fill="#64748b" font-size="6.5">心跳 + 任务推送接收</text>
+        <text x="12" y="90" fill="#64748b" font-size="6">aiohttp WS mode · 自动重连 · 退避策略 · WS JSON 消息协议</text>
+      </g>
+
+      <!-- ===== LAYER 4: TASK OPERATIONS ===== -->
+      <g transform="translate(60, 430)">
+        <rect width="410" height="95" rx="5" fill="#0f172a"/>
+        <rect width="410" height="95" rx="5" fill="rgba(30,41,59,0.35)" stroke="#94a3b8" stroke-width="1.2"/>
+        <text x="12" y="18" fill="#94a3b8" font-size="9" font-weight="600">Task Operations</text>
+        <rect x="12" y="28" width="120" height="55" rx="3" fill="rgba(30,41,59,0.25)" stroke="#94a3b8" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="20" y="44" fill="#e2e8f0" font-size="7.5">Dispatch (HTTP)</text>
+        <text x="20" y="56" fill="#64748b" font-size="6.5">async_dispatch_task()</text>
+        <text x="20" y="68" fill="#64748b" font-size="6.5">推送给 other agent</text>
+        <rect x="142" y="28" width="120" height="55" rx="3" fill="rgba(30,41,59,0.25)" stroke="#94a3b8" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="150" y="44" fill="#e2e8f0" font-size="7.5">Poll (HTTP)</text>
+        <text x="150" y="56" fill="#64748b" font-size="6.5">async_task_list()</text>
+        <text x="150" y="68" fill="#64748b" font-size="6.5">async_task_poll()</text>
+        <rect x="272" y="28" width="126" height="55" rx="3" fill="rgba(30,41,59,0.25)" stroke="#94a3b8" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="280" y="44" fill="#e2e8f0" font-size="7.5">Report (WS)</text>
+        <text x="280" y="56" fill="#64748b" font-size="6.5">report_result()</text>
+        <text x="280" y="68" fill="#64748b" font-size="6.5">report_progress()</text>
+      </g>
+
+      <!-- ===== LAYER 5: TRANSPORT ===== -->
+      <g transform="translate(60, 540)">
+        <rect width="410" height="55" rx="5" fill="#0f172a"/>
+        <rect width="410" height="55" rx="5" fill="rgba(8,51,68,0.3)" stroke="#22d3ee" stroke-width="1.2"/>
+        <text x="12" y="18" fill="#22d3ee" font-size="9" font-weight="600">Transport Layer</text>
+        <rect x="12" y="28" width="186" height="18" rx="3" fill="rgba(8,51,68,0.2)" stroke="#22d3ee" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="20" y="40" fill="#e2e8f0" font-size="7.5">Synchronous: requests 库</text>
+        <rect x="208" y="28" width="190" height="18" rx="3" fill="rgba(8,51,68,0.2)" stroke="#22d3ee" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="216" y="40" fill="#e2e8f0" font-size="7.5">Asynchronous: aiohttp 库</text>
+      </g>
+
+      <!-- ====== REGISTRY BOX ====== -->
+      <g transform="translate(540, 155)">
+        <rect width="280" height="180" rx="6" fill="#0f172a"/>
+        <rect width="280" height="180" rx="6" fill="rgba(6,78,59,0.15)" stroke="#34d399" stroke-width="1.2"/>
+        <text x="14" y="20" fill="#34d399" font-size="10" font-weight="600">A2A Registry Server</text>
+        <text x="14" y="34" fill="#64748b" font-size="7">:8321 — Agent Registry</text>
+        <line x1="14" y1="42" x2="266" y2="42" stroke="#1e293b" stroke-width="0.5"/>
+        <rect x="14" y="50" width="248" height="22" rx="3" fill="rgba(8,51,68,0.2)" stroke="#22d3ee" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="22" y="64" fill="#22d3ee" font-size="7.5">POST /auth/token</text>
+        <rect x="14" y="78" width="248" height="22" rx="3" fill="rgba(6,78,59,0.2)" stroke="#34d399" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="22" y="92" fill="#34d399" font-size="7.5">GET /v1/agents | POST /v1/agents</text>
+        <rect x="14" y="106" width="248" height="22" rx="3" fill="rgba(251,146,60,0.12)" stroke="#fb923c" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="22" y="120" fill="#fb923c" font-size="7.5">WS /v1/ws/agent/{id}</text>
+        <rect x="14" y="134" width="248" height="22" rx="3" fill="rgba(30,41,59,0.3)" stroke="#94a3b8" stroke-width="0.6" stroke-opacity="0.4"/>
+        <text x="22" y="148" fill="#94a3b8" font-size="7.5">POST /v2/tasks | GET /v2/tasks/{id}</text>
+      </g>
+
+      <!-- ====== DATA FLOW LABELS ====== -->
+      <!-- WS Flow -->
+      <path d="M 310 460 L 310 490 L 210 490 L 210 510" fill="none" stroke="#fb923c" stroke-width="0.8" stroke-dasharray="3,2" opacity="0.4"/>
+      <text x="220" y="485" fill="#fb923c" font-size="6" opacity="0.5">WS</text>
+      <!-- Auth Flow -->
+      <path d="M 470 175 L 530 175" fill="none" stroke="#a78bfa" stroke-width="0.8" stroke-dasharray="3,2" opacity="0.4"/>
+      <text x="478" y="168" fill="#a78bfa" font-size="6" opacity="0.5">Bearer token</text>
+
+      <!-- ====== LEGEND ====== -->
+      <g transform="translate(540, 370)">
+        <rect width="280" height="120" rx="6" fill="#0f172a" stroke="#1e293b" stroke-width="0.8"/>
+        <text x="14" y="18" fill="#94a3b8" font-size="8" font-weight="500">SDK Internal Modules</text>
+        <line x1="14" y1="24" x2="266" y2="24" stroke="#1e293b" stroke-width="0.5"/>
+        <rect x="14" y="32" width="10" height="10" rx="2" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="0.8"/>
+        <text x="30" y="40" fill="#64748b" font-size="6.5">OAuth 2.1 Token Manager (auto-refresh 30s)</text>
+        <rect x="14" y="48" width="10" height="10" rx="2" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="0.8"/>
+        <text x="30" y="56" fill="#64748b" font-size="6.5">Agent Lifecycle: register/heartbeat/deregister</text>
+        <rect x="14" y="64" width="10" height="10" rx="2" fill="rgba(251,146,60,0.15)" stroke="#fb923c" stroke-width="0.8"/>
+        <text x="30" y="72" fill="#64748b" font-size="6.5">WebSocket: persistent + auto-reconnect</text>
+        <rect x="14" y="80" width="10" height="10" rx="2" fill="rgba(30,41,59,0.4)" stroke="#94a3b8" stroke-width="0.8"/>
+        <text x="30" y="88" fill="#64748b" font-size="6.5">Task Ops: dispatch / poll / report</text>
+        <rect x="14" y="96" width="10" height="10" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="0.8"/>
+        <text x="30" y="104" fill="#64748b" font-size="6.5">Transport: requests (sync) / aiohttp (async)</text>
+      </g>
+
+      <!-- ====== BOTTOM FLOW ARROWS ====== -->
+      <!-- transport → registry -->
+      <path d="M 470 568 L 620 568" fill="none" stroke="#22d3ee" stroke-width="1" marker-end="url(#arr-cyan)"/>
+      <text x="510" y="560" fill="#22d3ee" font-size="6.5" opacity="0.7">HTTP / WSS</text>
+
+      <!-- ====== BOTTOM COMMUNICATION FLOW ====== -->
+      <g transform="translate(540, 510)">
+        <rect width="280" height="50" rx="5" fill="#0f172a"/>
+        <rect width="280" height="50" rx="5" fill="rgba(6,78,59,0.12)" stroke="#34d399" stroke-width="0.8" stroke-dasharray="4,2" opacity="0.5"/>
+        <text x="14" y="18" fill="#64748b" font-size="7">Communication Flow</text>
+        <text x="14" y="32" fill="#94a3b8" font-size="6.5">① Auth → Bearer Token → ② Register/HB</text>
+        <text x="14" y="44" fill="#94a3b8" font-size="6.5">③ WS connect → ④ Receive task → ⑤ Report</text>
+      </g>
+    </svg>

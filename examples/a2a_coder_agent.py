@@ -1,43 +1,49 @@
 """A2A-compliant Agent — wraps the Hermes Coder profile.
 
-Implements the Google A2A (Agent-to-Agent) protocol:
+Implements the Google A2A (Agent-to-Agent) protocol using the A2AClient SDK:
+
   GET  /.well-known/agent-card.json  — Agent Card (discovery)
   POST /tasks/send                   — submit a task (processed by Hermes CLI)
   GET  /tasks/{id}                   — get task status/result
 
-WebSocket integration with the A2A Registry:
-  - Connects to ws://<registry>/v1/agents/{agent_id}/ws on startup
-  - Receives tasks from Registry via WebSocket (type: "task")
-  - Reports progress and results via WebSocket (task_progress / task_result)
-  - Sends "ping" every 30s for keepalive
-  - Auto-reconnects with exponential backoff on disconnect
+WebSocket integration with the A2A Registry via the A2AClient SDK:
+  - Connects via A2AClient.async_connect_websocket() on startup
+  - Receives tasks from Registry via the SDK's dispatch_handler callback
+  - Reports progress/results via SDK's async_report_progress/async_report_result
+  - Auto-reconnect with exponential backoff (managed by the SDK)
 
-Also uses HTTP heartbeat as a fallback liveness mechanism.
-
-Registers with the A2A Registry on startup and heartbeats continuously.
 Each task is forwarded to the local Hermes Agent (coder profile) for
 real execution — code writing, debugging, PR management, devops, etc.
 """
+
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
 import logging
-import uuid
-import urllib.request
-import urllib.parse
-from urllib.error import HTTPError
 import os
-import time
 import subprocess
+import sys
+import time
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from aiohttp import web, ClientSession, WSMsgType, ClientWebSocketResponse
+from aiohttp import web
+
+# Add project root to path for direct script execution
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from simple_a2a_registry.client import (
+    A2AClient,
+    A2AClientError,
+    RegistryError,
+    NotFoundError,
+)
 
 logger = logging.getLogger("a2a.coder-agent")
 
@@ -52,21 +58,8 @@ HERMES_PROFILE = "coder"
 HERMES_TIMEOUT = 300  # max seconds for a task
 
 # ── Config file paths (overridable via CLI args) ──────────────────────────
-# auth.json: {"client_id": "...", "client_secret": "..."}
-# agent.json: {"agent_id": "..."}
 _DEFAULT_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".a2a-coder")
-AUTH_CONFIG_PATH: str = os.path.join(_DEFAULT_CONFIG_DIR, "auth.json")
 AGENT_CONFIG_PATH: str = os.path.join(_DEFAULT_CONFIG_DIR, "agent.json")
-
-# Loaded at startup
-OAUTH_CLIENT_ID = ""
-OAUTH_CLIENT_SECRET = ""
-OAUTH_ACCESS_TOKEN = ""
-OAUTH_TOKEN_EXPIRES_AT = 0.0
-
-# When True, the registry is running with --auth-enabled and all API calls
-# carry a Bearer token obtained via client_credentials grant.
-REGISTRY_AUTH_ENABLED = True
 
 
 def _ensure_config_dir(path: str) -> None:
@@ -74,38 +67,6 @@ def _ensure_config_dir(path: str) -> None:
     parent = os.path.dirname(path)
     if parent and not os.path.isdir(parent):
         os.makedirs(parent, exist_ok=True)
-
-
-def _load_auth_config(path: str) -> dict:
-    """Load auth config from *path* and update global OAUTH_CLIENT_ID/SECRET.
-
-    Falls back to environment variables ``OAUTH_CLIENT_ID`` /
-    ``OAUTH_CLIENT_SECRET`` for backward compatibility.
-    Returns a dict with ``client_id`` and ``client_secret`` (both may be empty).
-    """
-    global OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET
-
-    # Env vars take precedence (backward compat)
-    env_id = os.environ.get("OAUTH_CLIENT_ID", "")
-    env_secret = os.environ.get("OAUTH_CLIENT_SECRET", "")
-    if env_id and env_secret:
-        OAUTH_CLIENT_ID = env_id
-        OAUTH_CLIENT_SECRET = env_secret
-        return {"client_id": env_id, "client_secret": env_secret}
-
-    # Load from JSON file
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        OAUTH_CLIENT_ID = data.get("client_id", "")
-        OAUTH_CLIENT_SECRET = data.get("client_secret", "")
-        logger.debug("Loaded auth config from %s", path)
-    except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
-        logger.debug("No auth config at %s (%s)", path, e)
-        OAUTH_CLIENT_ID = ""
-        OAUTH_CLIENT_SECRET = ""
-
-    return {"client_id": OAUTH_CLIENT_ID, "client_secret": OAUTH_CLIENT_SECRET}
 
 
 def _load_agent_config(path: str) -> str:
@@ -138,8 +99,6 @@ def _save_agent_config(path: str, agent_id: str) -> None:
     except OSError as e:
         logger.warning("Failed to save agent_id to %s: %s", path, e)
 
-# ── WebSocket Registry client config ─────────────────────────────────────
-REGISTRY_WS_URL = f"{REGISTRY_URL.replace('http', 'ws')}/v1/agents"
 
 # ── A2A Agent Card — skills taken from the Hermes Coder profile ───────────
 
@@ -196,17 +155,11 @@ SKILLS = [
 ]
 
 
-def build_agent_card() -> Dict[str, Any]:
+def build_agent_card(auth_enabled: bool = True) -> Dict[str, Any]:
     """Build the A2A v1.0 Agent Card for the Coder Agent.
 
-    Returns a v1.0-style card with top-level ``skills`` (not nested in
-    ``capabilities.skills``), ``supported_interfaces``, and no deprecated
-    fields (``id``, ``tags`` removed from AgentCard model).
-
-    When ``REGISTRY_AUTH_ENABLED`` is True, includes an ``OAuth2SecurityScheme``
-    declaring the agent's supported OAuth flows.  The OAuth client is
-    pre-provisioned by the admin (方案C) — see environment variables
-    ``OAUTH_CLIENT_ID`` / ``OAUTH_CLIENT_SECRET``.
+    When *auth_enabled* is True, includes an ``OAuth2SecurityScheme``
+    declaring the agent's supported OAuth flows.
     """
     card = {
         "name": "Hermes Coder Agent",
@@ -235,8 +188,7 @@ def build_agent_card() -> Dict[str, Any]:
         "skills": SKILLS,
     }
 
-    # Include OAuth2SecurityScheme when Registry auth is enabled
-    if REGISTRY_AUTH_ENABLED:
+    if auth_enabled:
         card["security_schemes"] = {
             "registry-oauth": {
                 "scheme_type": "oauth2",
@@ -258,79 +210,6 @@ def build_agent_card() -> Dict[str, Any]:
         }
 
     return card
-
-
-# ── OAuth Token Management ────────────────────────────────────────────────
-
-
-def _ensure_token() -> str:
-    """Get or refresh an OAuth 2.1 access token from the Registry.
-
-    Uses the client_credentials grant with the pre-provisioned
-    ``OAUTH_CLIENT_ID`` / ``OAUTH_CLIENT_SECRET`` (read from env vars).
-    Caches the token and auto-refreshes shortly before expiry (30 s grace margin).
-
-    When ``REGISTRY_AUTH_ENABLED`` is False, returns an empty string and
-    is effectively a no-op.  When ``OAUTH_CLIENT_ID`` is empty but auth is
-    enabled, logs a warning and returns empty (the caller should check).
-    """
-    global OAUTH_ACCESS_TOKEN, OAUTH_TOKEN_EXPIRES_AT
-
-    if not REGISTRY_AUTH_ENABLED:
-        return ""
-
-    if not OAUTH_CLIENT_ID or not OAUTH_CLIENT_SECRET:
-        logger.warning(
-            "OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET not set — "
-            "cannot obtain token.  Set these via environment variables."
-        )
-        return ""
-
-    # Still valid, return cached token (with 30 s grace margin)
-    if OAUTH_ACCESS_TOKEN and time.time() < OAUTH_TOKEN_EXPIRES_AT - 30:
-        return OAUTH_ACCESS_TOKEN
-
-    # Request a fresh token via client_credentials grant
-    body = urllib.parse.urlencode({
-        "grant_type": "client_credentials",
-        "client_id": OAUTH_CLIENT_ID,
-        "client_secret": OAUTH_CLIENT_SECRET,
-        "scope": "task:read task:write agent:read agent:register",
-    }).encode()
-
-    req = urllib.request.Request(
-        f"{REGISTRY_URL}/auth/token",
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            result = json.loads(resp.read())
-    except HTTPError as e:
-        logger.warning("OAuth token request failed (HTTP %s): %s", e.code, e.read().decode()[:200])
-        return ""
-    except Exception as e:
-        logger.warning("OAuth token request failed: %s", e)
-        return ""
-
-    OAUTH_ACCESS_TOKEN = result["access_token"]
-    OAUTH_TOKEN_EXPIRES_AT = time.time() + result.get("expires_in", 3600)
-    logger.debug("Obtained OAuth token (expires in %ss)", result.get("expires_in", 3600))
-    return OAUTH_ACCESS_TOKEN
-
-
-def _auth_header() -> Dict[str, str]:
-    """Return the ``Authorization: Bearer …`` header dict.
-
-    Returns an empty dict when ``REGISTRY_AUTH_ENABLED`` is False,
-    making callers transparently skip auth by merging ``**_auth_header()``
-    into the request headers.
-    """
-    if not REGISTRY_AUTH_ENABLED:
-        return {}
-    token = _ensure_token()
-    return {"Authorization": f"Bearer {token}"}
 
 
 # ── A2A Task States (per A2A spec) ─────────────────────────────────────────
@@ -374,16 +253,9 @@ class A2ATask:
 # ── In-memory task store ────────────────────────────────────────────────────
 
 _tasks: Dict[str, A2ATask] = {}
-
-# Active subprocesses for cancellation tracking
 _active_procs: Dict[str, subprocess.Popen] = {}
-# Cancellation signals per task — set when server sends task_cancel
 _cancel_events: Dict[str, asyncio.Event] = {}
 
-# ── WebSocket connection state ────────────────────────────────────────────
-_ws_session: Optional[ClientSession] = None
-_ws_connection: Optional[ClientWebSocketResponse] = None
-_ws_agent_id: str = ""
 
 # ── Real Hermes CLI task processing ─────────────────────────────────────────
 
@@ -393,15 +265,16 @@ def _clean_hermes_output(raw: str) -> str:
     # Strip ANSI escape sequences
     text = re.sub(r'\x1b\[[0-9;]*[mK]', '', raw)
     # Strip Unicode box-drawing characters
-    text = re.sub(r'[─┌┐└┘├┤┬┴┼╭╮╯╰│╱╲╴╵╶╷╸╹╺╻╼╽╾╿▌▐▀▄█░▒▓■□▪▫▲△▼▽◆◇○●◐◑◒◓◔◕★☆☐☑☒♠♣♥♦]', '', text)
-    # Strip common Hermes framing lines
+    text = re.sub(
+        r'[─┌┐└┘├┤┬┴┼╭╮╯╰│╱╲╴╵╶╷╸╹╺╻╼╽╾╿▌▐▀▄█░▒▓■□▪▫▲△▼▽◆◇○●◐◑◒◓◔◕★☆☐☑☒♠♣♥♦]',
+        '', text,
+    )
     lines = []
     skip_prefixes = ("┌─", "└─", "╭─", "╰─", "├─", "─", "  ┌─ Reasoning", "  └─", "  ╭─", "  ╰─")
     in_reasoning = False
     in_hermes_header = False
     for line in text.splitlines():
         stripped = line.strip()
-        # Skip reasoning blocks
         if stripped.startswith("┌─ Reasoning") or stripped.startswith("╭─ Reasoning"):
             in_reasoning = True
             continue
@@ -410,7 +283,6 @@ def _clean_hermes_output(raw: str) -> str:
             continue
         if in_reasoning:
             continue
-        # Skip Hermes header/footer
         if stripped.startswith("╭─ ⚕ Hermes") or stripped.startswith("╭─ Hermes"):
             in_hermes_header = True
             continue
@@ -419,7 +291,6 @@ def _clean_hermes_output(raw: str) -> str:
             continue
         if in_hermes_header:
             continue
-        # Skip framing lines
         if any(stripped.startswith(p) for p in skip_prefixes):
             continue
         if stripped in ("", "╮", "╯", "│"):
@@ -427,17 +298,15 @@ def _clean_hermes_output(raw: str) -> str:
         lines.append(line)
 
     text = "\n".join(lines)
-    # Collapse multiple blank lines
     text = re.sub(r'\n{3,}', '\n\n', text)
-    # Strip leading/trailing whitespace
     return text.strip()
 
 
-async def process_task(task: A2ATask) -> None:
-    """Forward the task to the real local Hermes Coder profile."""
+async def process_http_task(task: A2ATask) -> None:
+    """Forward an HTTP-submitted task to the local Hermes Coder profile."""
     task.state = TaskState.WORKING
     task.updated_at = time.time()
-    logger.info("Spawning Hermes (coder) for task %s: %s", task.id, task.query[:80])
+    logger.info("Spawning Hermes (coder) for HTTP task %s: %s", task.id, task.query[:80])
 
     cmd = [
         "hermes", "chat",
@@ -465,7 +334,7 @@ async def process_task(task: A2ATask) -> None:
             task.state = TaskState.FAILED
             task.error = f"Task timed out after {HERMES_TIMEOUT}s"
             task.updated_at = time.time()
-            logger.warning("Task %s timed out", task.id)
+            logger.warning("HTTP task %s timed out", task.id)
             _active_procs.pop(task.id, None)
             return
 
@@ -473,18 +342,14 @@ async def process_task(task: A2ATask) -> None:
 
         if proc.returncode != 0:
             stderr_text = stderr.decode("utf-8", errors="replace")[:2000]
-            logger.warning("Hermes exited with code %d for task %s", proc.returncode, task.id)
+            logger.warning("Hermes exited with code %d for HTTP task %s", proc.returncode, task.id)
             task.state = TaskState.FAILED
             task.error = f"Hermes process exited with code {proc.returncode}: {stderr_text}"
             task.updated_at = time.time()
             return
 
-        # Extract the actual response from Hermes output
         full_output = stdout.decode("utf-8", errors="replace")
         cleaned = _clean_hermes_output(full_output)
-
-        # Also capture stderr for diagnostics
-        stderr_text = stderr.decode("utf-8", errors="replace")[:500]
 
         # Try to extract the session ID from the output
         session_id = ""
@@ -493,7 +358,6 @@ async def process_task(task: A2ATask) -> None:
                 session_id = line.strip()
                 break
 
-        # Determine which skill was used based on the query
         matched_skill = "software-development"
         query_lower = task.query.lower()
         for skill in SKILLS:
@@ -512,200 +376,27 @@ async def process_task(task: A2ATask) -> None:
             "sessionId": session_id,
             "processingTime": round(task.updated_at - task.created_at, 2),
         }
-        logger.info("Task %s completed (skill=%s, time=%ss, output=%d chars)",
+        logger.info("HTTP task %s completed (skill=%s, time=%ss, output=%d chars)",
                     task.id, matched_skill, task.artifact["processingTime"], len(cleaned))
 
     except Exception as e:
-        logger.exception("Task %s failed with exception", task.id)
+        logger.exception("HTTP task %s failed with exception", task.id)
         task.state = TaskState.FAILED
         task.error = str(e)[:2000]
         task.updated_at = time.time()
         _active_procs.pop(task.id, None)
 
 
-# ── WebSocket task processing ────────────────────────────────────────────
+# ── WS task processing via A2AClient SDK ────────────────────────────────────
 
-async def _send_ws_json(msg: Dict[str, Any]) -> bool:
-    """Send a JSON message via the active WebSocket connection. Returns True on success."""
-    global _ws_connection
-    ws = _ws_connection
-    if ws is None or ws.closed:
-        logger.debug("WS not connected, dropping message: %s", msg.get("type"))
-        return False
-    try:
-        await ws.send_json(msg)
-        return True
-    except Exception as e:
-        logger.warning("WS send failed: %s", e)
-        return False
-
-
-def _build_active_tasks() -> List[Dict[str, Any]]:
-    """Build the ``active_tasks`` list for state_sync from in-memory state.
-
-    Collects all non-terminal tasks from the HTTP task store (``_tasks``)
-    and from currently running WS subprocesses (``_active_procs``).
+async def _execute_hermes_cli(query: str) -> Dict[str, Any]:
+    """Run Hermes CLI with *query* and return the result dict.
 
     Returns:
-        A list of ``{"id": str, "status": str, "started_at": float}`` dicts.
+        On success: ``{"success": True, "output": str, "elapsed": float}``
+        On failure: ``{"success": False, "error": str, "elapsed": float}``
+        On timeout: ``{"success": False, "error": "timeout", "elapsed": float}``
     """
-    active: List[Dict[str, Any]] = []
-    seen_ids: set[str] = set()
-
-    # 1. HTTP _tasks — only non-terminal
-    for task_id, task in list(_tasks.items()):
-        if task.state in (TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELED):
-            continue
-        active.append({
-            "id": task_id,
-            "status": task.state.value,
-            "started_at": task.created_at,
-        })
-        seen_ids.add(task_id)
-
-    # 2. Active WS subprocesses (tasks being processed right now)
-    for task_id, _proc in list(_active_procs.items()):
-        if task_id not in seen_ids:
-            active.append({
-                "id": task_id,
-                "status": "working",
-                "started_at": time.time(),
-            })
-
-    return active
-
-
-async def _handle_state_sync_reply(data: Dict[str, Any]) -> None:
-    """Handle a ``state_sync_reply`` from the server after reconnection.
-
-    The server sends orphaned tasks — tasks it considers terminal
-    (completed / failed) that the agent may not have reported yet.
-    We re-send ``task_complete`` / ``task_fail`` for each orphaned task
-    so the server can properly reconcile its records.
-
-    Expected payload::
-
-        {"type": "state_sync_reply", "orphaned_tasks": [
-            {"id": "...", "status": "completed", "result": ...},
-            {"id": "...", "status": "failed", "error": "..."},
-        ]}
-    """
-    orphaned = data.get("orphaned_tasks", [])
-    if not orphaned:
-        logger.debug("WS: state_sync_reply has no orphaned tasks")
-        return
-
-    logger.info("WS: processing %d orphaned task(s) from state_sync_reply",
-                len(orphaned))
-    for ot in orphaned:
-        task_id = ot.get("id", "")
-        status = ot.get("status", "")
-        result = ot.get("result")
-        error = ot.get("error")
-
-        if not task_id:
-            continue
-
-        if status in ("completed", "success", "done"):
-            await _send_ws_json({
-                "type": "task_complete",
-                "id": task_id,
-                "status": "completed",
-                "result": result or {"text": "(orphaned task — recovered via state_sync)"},
-                "metrics": {"recovered": True},
-            })
-            logger.info("WS: re-sent task_complete for orphaned task %s", task_id)
-        elif status in ("failed", "error"):
-            await _send_ws_json({
-                "type": "task_fail",
-                "id": task_id,
-                "status": "failed",
-                "error": error or "(orphaned task — recovered via state_sync)",
-                "code": "ORPHANED",
-                "metrics": {"recovered": True},
-            })
-            logger.info("WS: re-sent task_fail for orphaned task %s", task_id)
-        else:
-            logger.debug("WS: ignoring orphaned task %s with status '%s'", task_id, status)
-
-
-async def _periodic_progress(task_id: str, cancel_event: asyncio.Event, started_at: float) -> None:
-    """Send task_progress every 15s with estimated progress percentage.
-
-    Runs as a background asyncio task alongside process_ws_task.
-    Exits cleanly when ``cancel_event`` is set (task completes, fails, or is cancelled).
-    Progress percentage is estimated from elapsed vs HERMES_TIMEOUT (capped at 99%).
-    """
-    while not cancel_event.is_set():
-        try:
-            await asyncio.wait_for(cancel_event.wait(), timeout=15.0)
-            return  # Cancelled or task done
-        except asyncio.TimeoutError:
-            # 15s elapsed — send a progress update
-            elapsed = time.time() - started_at
-            pct = min(99, int((elapsed / HERMES_TIMEOUT) * 100))
-            await _send_ws_json({
-                "type": "task_progress",
-                "id": task_id,
-                "status": "working",
-                "progress": pct,
-            })
-
-
-async def process_ws_task(task_msg: Dict[str, Any]) -> None:
-    """Process a task received via WebSocket with full lifecycle.
-
-    Lifecycle (per spec):
-      1. task_ack  (immediate — 0.5s within receipt)  → status=accepted
-      2. task_progress  (on execution start, then every 15s)  → status=working + progress%
-      3. task_complete  (on success)  → status=completed + result + metrics
-      4. task_fail      (on error)    → status=failed + error + code
-      5. task_cancel    (external signal)  → stop execution, clean up, report canceled
-
-    Supports two message formats:
-      A2A-style:  {"type":"task","id":"uuid","query":"...","sessionId":"..."}
-      Kanban-style:  {"type":"task","id":"uuid","title":"...","body":"...","workspace_path":"..."}
-    """
-    task_id = task_msg.get("id", "")
-    # Kanban tasks → body; A2A tasks → query
-    query = (
-        task_msg.get("body") or task_msg.get("query") or task_msg.get("title") or ""
-    ).strip()
-    session_id = task_msg.get("sessionId", "")
-    workspace_path = task_msg.get("workspace_path", "")
-
-    if not task_id or not query:
-        logger.warning("Invalid WS task message: missing id or query: %s", task_msg)
-        return
-
-    # ── 1. Immediately send task_ack → accepted ──
-    await _send_ws_json({
-        "type": "task_ack",
-        "id": task_id,
-        "status": "accepted",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
-    logger.debug("WS task %s: sent task_ack (accepted)", task_id)
-
-    # ── 2. Set up cancellation tracking ──
-    cancel_event = asyncio.Event()
-    _cancel_events[task_id] = cancel_event
-    started_at = time.time()
-
-    # ── 3. Send task_progress → working (progress=0) ──
-    await _send_ws_json({
-        "type": "task_progress",
-        "id": task_id,
-        "status": "working",
-        "progress": 0,
-    })
-
-    # ── 4. Start periodic progress reporter (fires every 15s) ──
-    progress_task = asyncio.create_task(
-        _periodic_progress(task_id, cancel_event, started_at)
-    )
-
-    # ── 5. Build Hermes CLI command ──
     cmd = [
         "hermes", "chat",
         "-q", query,
@@ -714,13 +405,14 @@ async def process_ws_task(task_msg: Dict[str, Any]) -> None:
         "-Q",
     ]
 
+    started_at = time.time()
+
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _active_procs[task_id] = proc
 
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -729,92 +421,112 @@ async def process_ws_task(task_msg: Dict[str, Any]) -> None:
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            _active_procs.pop(task_id, None)
-            cancel_event.set()
-            await asyncio.wait_for(progress_task, timeout=5.0)
-            _cancel_events.pop(task_id, None,)
-            elapsed = round(time.time() - started_at, 1)
-            await _send_ws_json({
-                "type": "task_fail",
-                "id": task_id,
-                "status": "failed",
+            return {
+                "success": False,
                 "error": f"Task timed out after {HERMES_TIMEOUT}s",
-                "code": "TIMEOUT",
-                "metrics": {"elapsed_seconds": elapsed},
-            })
-            logger.warning("WS task %s timed out after %ss", task_id, HERMES_TIMEOUT)
-            return
-
-        # ── 6. Clean up progress reporter ──
-        # Snapshot: was cancel_event already set externally (task_cancel from server)?
-        # We need this BEFORE setting it ourselves to stop the progress reporter.
-        _was_externally_cancelled = cancel_event.is_set()
-        cancel_event.set()
-        await asyncio.wait_for(progress_task, timeout=5.0)
-        _active_procs.pop(task_id, None)
-        _cancel_events.pop(task_id, None)
-
-        elapsed = round(time.time() - started_at, 1)
-
-        # Check if task was externally cancelled (server sent task_cancel)
-        # When cancelled, the subprocess was killed externally, so returncode != 0
-        # We report canceled status instead of failed
-        if _was_externally_cancelled:
-            await _send_ws_json({
-                "type": "task_fail",
-                "id": task_id,
-                "status": "canceled",
-                "error": "Task cancelled by server",
-                "code": "CANCELED",
-                "metrics": {"elapsed_seconds": elapsed},
-            })
-            logger.info("WS task %s was cancelled (%ss)", task_id, elapsed)
-            return
+                "elapsed": round(time.time() - started_at, 2),
+            }
 
         if proc.returncode != 0:
             stderr_text = stderr.decode("utf-8", errors="replace")[:2000]
-            logger.warning("Hermes exited with code %d for WS task %s", proc.returncode, task_id)
-            await _send_ws_json({
-                "type": "task_fail",
-                "id": task_id,
-                "status": "failed",
+            return {
+                "success": False,
                 "error": f"Hermes process exited with code {proc.returncode}: {stderr_text}",
-                "code": f"EXIT_{proc.returncode}",
-                "metrics": {"elapsed_seconds": elapsed},
-            })
-            return
+                "elapsed": round(time.time() - started_at, 2),
+            }
 
-        # ── 7. Send task_complete with result and metrics ──
         full_output = stdout.decode("utf-8", errors="replace")
         cleaned = _clean_hermes_output(full_output)
 
-        await _send_ws_json({
-            "type": "task_complete",
-            "id": task_id,
-            "status": "completed",
-            "result": {"text": cleaned or "(Hermes returned no output)"},
-            "metrics": {
-                "elapsed_seconds": elapsed,
-                "output_chars": len(cleaned),
-            },
-        })
-        logger.info("WS task %s completed (%d chars in %ss)", task_id, len(cleaned), elapsed)
+        matched_skill = "software-development"
+        query_lower = query.lower()
+        for skill in SKILLS:
+            skill_words = skill["name"].lower().split()
+            if any(w in query_lower for w in skill_words):
+                matched_skill = skill["id"]
+                break
+
+        return {
+            "success": True,
+            "output": cleaned or "(Hermes returned no output)",
+            "skill": matched_skill,
+            "elapsed": round(time.time() - started_at, 2),
+        }
 
     except Exception as e:
-        logger.exception("WS task %s failed with exception", task_id)
-        _active_procs.pop(task_id, None)
-        cancel_event.set()
-        if not progress_task.done():
-            await asyncio.wait_for(progress_task, timeout=5.0)
-        _cancel_events.pop(task_id, None)
-        await _send_ws_json({
-            "type": "task_fail",
-            "id": task_id,
-            "status": "failed",
+        return {
+            "success": False,
             "error": str(e)[:2000],
-            "code": "EXCEPTION",
-            "metrics": {"elapsed_seconds": round(time.time() - started_at, 1)},
-        })
+            "elapsed": round(time.time() - started_at, 2),
+        }
+
+
+async def process_ws_task(client: A2AClient, data: Dict[str, Any]) -> None:
+    """Process a task received via WebSocket, using A2AClient SDK for reporting.
+
+    Lifecycle:
+      1. Send task_progress (working)  → client.async_report_progress()
+      2. Run Hermes CLI
+      3. Send task_result             → client.async_report_result()
+    """
+    task_id = data.get("id", "")
+    query = (
+        data.get("body") or data.get("query") or data.get("title") or ""
+    ).strip()
+    session_id = data.get("sessionId", "")
+
+    if not task_id or not query:
+        logger.warning("Invalid WS task message: missing id or query: %s", data)
+        return
+
+    logger.info("WS task %s: starting (query=%s)", task_id, query[:80])
+
+    # ── 1. Report progress (working) ──
+    await client.async_report_progress(task_id, status="working")
+
+    # ── 2. Set up cancellation tracking ──
+    cancel_event = asyncio.Event()
+    _cancel_events[task_id] = cancel_event
+    started_at = time.time()
+
+    # ── 3. Run Hermes CLI ──
+    result = await _execute_hermes_cli(query)
+
+    # ── 4. Check if externally cancelled ──
+    # Note: WS task_cancel from the server is not dispatched by the SDK;
+    # external cancellation is handled via the HTTP /tasks/{id}/cancel endpoint
+    # which sets the cancel event (if registered in _cancel_events).
+    # The Hermes subprocess from _execute_hermes_cli is already cleaned up
+    # inside that function, so we just check the event and report accordingly.
+    if cancel_event.is_set():
+        await client.async_report_result(
+            task_id,
+            {"text": "(cancelled)"},
+            error="Task cancelled by server",
+        )
+        logger.info("WS task %s was cancelled (after %ss)", task_id,
+                     round(time.time() - started_at, 2))
+    elif result["success"]:
+        await client.async_report_result(
+            task_id,
+            {
+                "text": result["output"],
+                "skill": result["skill"],
+                "processingTime": result["elapsed"],
+            },
+        )
+        logger.info("WS task %s completed (skill=%s, time=%ss, output=%d chars)",
+                    task_id, result["skill"], result["elapsed"], len(result["output"]))
+    else:
+        await client.async_report_result(
+            task_id,
+            {"text": result["error"]},
+            error=result["error"],
+        )
+        logger.warning("WS task %s failed (%s)", task_id, result["error"])
+
+    # Clean up
+    _cancel_events.pop(task_id, None)
 
 
 # ── HTTP Handlers ───────────────────────────────────────────────────────────
@@ -825,7 +537,9 @@ def _json(data: Any, status: int = 200, headers: Optional[Dict] = None) -> web.R
 
 async def handle_agent_card(request: web.Request) -> web.Response:
     """GET /.well-known/agent-card.json — A2A Agent discovery."""
-    card = build_agent_card()
+    client = request.app.get("client")
+    auth_enabled = client._auth_enabled if client else True
+    card = build_agent_card(auth_enabled=auth_enabled)
     return _json(card, headers={"Cache-Control": "public, max-age=300"})
 
 
@@ -865,7 +579,7 @@ async def handle_send_task(request: web.Request) -> web.Response:
     _tasks[task.id] = task
 
     # Start async processing via real Hermes CLI
-    asyncio.create_task(process_task(task))
+    asyncio.create_task(process_http_task(task))
 
     return _json({
         "jsonrpc": "2.0",
@@ -913,6 +627,11 @@ async def handle_cancel_task(request: web.Request) -> web.Response:
         except Exception:
             pass
 
+    # Signal cancellation via event (for WS task processing)
+    cancel_evt = _cancel_events.get(task_id)
+    if cancel_evt:
+        cancel_evt.set()
+
     task.state = TaskState.CANCELED
     task.updated_at = time.time()
     return _json({
@@ -922,7 +641,7 @@ async def handle_cancel_task(request: web.Request) -> web.Response:
 
 
 async def handle_list_skills(request: web.Request) -> web.Response:
-    """GET /skills — list all available skills and their descriptions."""
+    """GET /skills — list all available skills."""
     return _json({
         "skills": SKILLS,
     })
@@ -939,408 +658,26 @@ async def handle_health(request: web.Request) -> web.Response:
     })
 
 
-# ── Registry Integration ────────────────────────────────────────────────────
+# ── Background heartbeat task ─────────────────────────────────────────────
 
-def register_with_registry(auth_config: str = AUTH_CONFIG_PATH,
-                           agent_config: str = AGENT_CONFIG_PATH) -> str:
-    """Register this agent with the A2A Registry. Returns agent_id.
-
-    Uses Bearer token auth when ``REGISTRY_AUTH_ENABLED`` is True (方案C).
-    The OAuth client is loaded from *auth_config* (or env vars as fallback).
-
-    On successful registration or lookup, the agent_id is persisted to
-    *agent_config* so subsequent restarts reuse the same ID.
-    """
-    _load_auth_config(auth_config)
-    card = build_agent_card()
-    payload = {k: v for k, v in card.items() if v is not None}
-
-    # Obtain Bearer token first if auth is enabled and client is pre-provisioned
-    token = _ensure_token() if REGISTRY_AUTH_ENABLED else ""
-
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    req = urllib.request.Request(
-        f"{REGISTRY_URL}/v1/agents",
-        data=json.dumps(payload).encode(),
-        headers=headers,
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read())
-            agent_id = data["id"]
-            _save_agent_config(agent_config, agent_id)
-            logger.info("Registered with A2A Registry as '%s'", agent_id)
-    except HTTPError as e:
-        body = e.read().decode()
-        if e.code == 409:
-            if REGISTRY_AUTH_ENABLED:
-                logger.info("Agent already registered, fetching ID with auth...")
-                _ensure_token()
-                auth_headers = _auth_header()
-                search_url = f"{REGISTRY_URL}/v1/agents?q={urllib.parse.quote('Hermes Coder Agent')}"
-                req2 = urllib.request.Request(
-                    search_url,
-                    headers=auth_headers if auth_headers else {},
-                    method="GET",
-                )
-                with urllib.request.urlopen(req2) as resp:
-                    agents = json.loads(resp.read())["agents"]
-                    agent_id = agents[0]["id"] if agents else "a2a:coder-agent"
-            else:
-                logger.info("Agent already registered, fetching ID...")
-                search_url = f"{REGISTRY_URL}/v1/agents?q={urllib.parse.quote('Hermes Coder Agent')}"
-                with urllib.request.urlopen(search_url) as resp:
-                    agents = json.loads(resp.read())["agents"]
-                    agent_id = agents[0]["id"] if agents else "a2a:coder-agent"
-            _save_agent_config(agent_config, agent_id)
-        else:
-            raise RuntimeError(f"Registry registration failed ({e.code}): {body}")
-
-    return agent_id
-
-
-def heartbeat_loop(agent_id: str) -> None:
-    """Send heartbeats to the registry in a loop.
-
-    Uses Bearer token auth when ``REGISTRY_AUTH_ENABLED`` is True.
-    """
+async def heartbeat_loop(client: A2AClient, agent_id: str) -> None:
+    """Periodically send heartbeats to the registry."""
     while True:
         try:
-            req = urllib.request.Request(
-                f"{REGISTRY_URL}/v1/agents/{agent_id}/heartbeat",
-                headers={**_auth_header()},
-                method="POST",
-            )
-            with urllib.request.urlopen(req) as resp:
-                time.sleep(HEARTBEAT_INTERVAL)
+            await client.async_heartbeat(agent_id)
+            logger.debug("Heartbeat sent for agent '%s'", agent_id)
         except Exception as e:
-            logger.warning("Heartbeat failed: %s (retrying in %ss)", e, HEARTBEAT_INTERVAL)
-            time.sleep(HEARTBEAT_INTERVAL)
+            logger.warning("Heartbeat failed for '%s': %s", agent_id, e)
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
 
 
-async def _ensure_registered() -> str:
-    """(Re-)register with the registry. Returns the agent_id.
+# ── Application factory ────────────────────────────────────────────────────
 
-    Safe to call repeatedly — handles 409 (already registered) gracefully.
-    Also handles the case where the registry has restarted and our previous
-    registration was lost.
-
-    Uses _ws_session (aiohttp) for async HTTP — avoids blocking the event loop.
-    Falls back to urllib if _ws_session is None (e.g. startup).
-    """
-    global _ws_agent_id, _ws_session
-
-    card = build_agent_card()
-    payload = {k: v for k, v in card.items() if v is not None}
-
-    logger.debug("_ensure_registered: ws_session=%s, agent_id=%s", _ws_session, _ws_agent_id)
-
-    # First try a lightweight check: does our agent_id still exist?
-    if _ws_agent_id and _ws_session is not None:
-        try:
-            logger.debug("_ensure_registered: checking if agent '%s' still exists...", _ws_agent_id)
-            async with _ws_session.get(
-                f"{REGISTRY_URL}/v1/agents/{_ws_agent_id}",
-                headers=_auth_header(),
-            ) as resp:
-                logger.debug("_ensure_registered: GET /v1/agents/%s -> status=%s", _ws_agent_id, resp.status)
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("id"):
-                        logger.debug("Agent '%s' still registered, skipping re-register", _ws_agent_id)
-                        return _ws_agent_id  # still registered
-                elif resp.status != 404:
-                    logger.debug("Agent check returned %s — will re-register", resp.status)
-        except Exception as e:
-            logger.warning("_ensure_registered: agent check failed: %s: %s", type(e).__name__, e)
-
-    # Register fresh
-    logger.debug("_ensure_registered: registering fresh...")
-    try:
-        if _ws_session is not None:
-            async with _ws_session.post(
-                f"{REGISTRY_URL}/v1/agents",
-                json=payload,
-                headers=_auth_header(),
-            ) as resp:
-                if resp.status == 200 or resp.status == 201:
-                    data = await resp.json()
-                    aid = data["id"]
-                    _save_agent_config(AGENT_CONFIG_PATH, aid)
-                    logger.info("(Re-)registered with A2A Registry as '%s'", aid)
-                    return aid
-                elif resp.status == 409:
-                    # Already registered — search by name (needs auth)
-                    async with _ws_session.get(
-                        f"{REGISTRY_URL}/v1/agents?q={urllib.parse.quote(card['name'])}",
-                        headers=_auth_header(),
-                    ) as search_resp:
-                        agents = (await search_resp.json())["agents"]
-                        if agents:
-                            aid = agents[0]["id"]
-                            _save_agent_config(AGENT_CONFIG_PATH, aid)
-                            logger.info("Agent already registered as '%s'", aid)
-                            return aid
-                        logger.warning("Agent 409 but not found by name — using fallback ID")
-                        return "a2a:coder-agent"
-                else:
-                    body = await resp.text()
-                    raise RuntimeError(f"Registry registration failed ({resp.status}): {body}")
-        else:
-            # Fallback: synchronous urllib if session not ready
-            return _ensure_registered_sync(card, payload)
-    except RuntimeError:
-        raise
-    except Exception as e:
-        raise RuntimeError(f"Registry registration failed: {e}") from e
-
-
-def _ensure_registered_sync(card: Dict[str, Any], payload: Dict[str, Any]) -> str:
-    """Synchronous fallback for _ensure_registered (used at startup before session is ready)."""
-    global _ws_agent_id
-
-    if _ws_agent_id:
-        try:
-            req = urllib.request.Request(
-                f"{REGISTRY_URL}/v1/agents/{_ws_agent_id}",
-                headers={**_auth_header()},
-                method="GET",
-            )
-            with urllib.request.urlopen(req) as resp:
-                data = json.loads(resp.read())
-                if data.get("id"):
-                    return _ws_agent_id
-        except HTTPError:
-            pass
-        except Exception:
-            pass
-
-    try:
-        req = urllib.request.Request(
-            f"{REGISTRY_URL}/v1/agents",
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read())
-            aid = data["id"]
-            _save_agent_config(AGENT_CONFIG_PATH, aid)
-            logger.info("(Re-)registered with A2A Registry as '%s'", aid)
-            return aid
-    except HTTPError as e:
-        body = e.read().decode()
-        if e.code == 409:
-            search_url = f"{REGISTRY_URL}/v1/agents?q={urllib.parse.quote(card['name'])}"
-            search_req = urllib.request.Request(
-                search_url,
-                headers={**_auth_header()},
-                method="GET",
-            )
-            with urllib.request.urlopen(search_req) as resp:
-                agents = json.loads(resp.read())["agents"]
-                if agents:
-                    aid = agents[0]["id"]
-                    _save_agent_config(AGENT_CONFIG_PATH, aid)
-                    logger.info("Agent already registered as '%s'", aid)
-                    return aid
-            logger.warning("Agent 409 but not found by name — using fallback ID")
-            return "a2a:coder-agent"
-        raise RuntimeError(f"Registry registration failed ({e.code}): {body}")
-
-
-# ── WebSocket client loop ────────────────────────────────────────────────
-
-async def ws_connect_loop(close_event: asyncio.Event) -> None:
-    """Maintain a persistent WebSocket connection to the Registry.
-
-    - Connects to ws://<registry>/v1/agents/{agent_id}/ws
-    - Listens for 'task' messages and dispatches them to process_ws_task
-    - Sends a 'ping' every 30 seconds
-    - Auto-reconnects with exponential backoff on disconnect
-    - Re-registers on each reconnect attempt in case registry restarted
-    """
-    global _ws_session, _ws_connection, _ws_agent_id
-    logger.debug("ws_connect_loop: starting")
-    retry_delay = 1.0
-    _ws_session = ClientSession()
-    logger.debug("ws_connect_loop: ClientSession created (session=%s)", _ws_session)
-
-    while not close_event.is_set():
-        if not _ws_agent_id:
-            logger.info("WS: waiting for agent_id to be set...")
-            await asyncio.sleep(2)
-            continue
-
-        # Re-register before each WS reconnect attempt — registry may have restarted
-        logger.debug("ws_connect_loop: calling _ensure_registered...")
-        try:
-            new_agent_id = await _ensure_registered()
-            logger.debug("ws_connect_loop: _ensure_registered returned '%s'", new_agent_id)
-            if new_agent_id != _ws_agent_id:
-                _ws_agent_id = new_agent_id
-        except Exception as e:
-            logger.warning("WS: re-registration failed: %s (will retry)", e)
-            await asyncio.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 60.0)
-            continue
-
-        if REGISTRY_AUTH_ENABLED:
-            token = _ensure_token()
-            ws_url = f"{REGISTRY_WS_URL}/{_ws_agent_id}/ws?token={urllib.parse.quote(token, safe='')}"
-        else:
-            ws_url = f"{REGISTRY_WS_URL}/{_ws_agent_id}/ws"
-        logger.info("WS: connecting to %s", ws_url)
-
-        try:
-            ws = await _ws_session.ws_connect(
-                ws_url,
-                heartbeat=30.0,  # aiohttp keepalive
-            )
-        except Exception as e:
-            logger.warning("WS: connection failed: %s (retry in %.1fs)", e, retry_delay)
-            await asyncio.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 60.0)
-            continue
-
-        # Connected — reset backoff
-        _ws_connection = ws
-        retry_delay = 1.0
-        logger.info("WS: connected to Registry")
-
-        # ── Send state_sync immediately after reconnection ──
-        active_tasks = _build_active_tasks()
-        await ws.send_json({
-            "type": "state_sync",
-            "agent_id": _ws_agent_id,
-            "active_tasks": active_tasks,
-        })
-        logger.info("WS: sent state_sync with %d active task(s)", len(active_tasks))
-
-        # Last ping timestamp for our own 30s ping
-        last_ping_time = time.time()
-
-        try:
-            async for msg in ws:
-                if msg.type == WSMsgType.TEXT:
-                    try:
-                        data = json.loads(msg.data)
-                    except json.JSONDecodeError:
-                        logger.warning("WS: invalid JSON: %s", msg.data[:200])
-                        continue
-
-                    msg_type = data.get("type", "")
-                    logger.debug("WS: received type=%s id=%s", msg_type, data.get("id", ""))
-
-                    if msg_type == "task":
-                        # Spawn task processing as a fire-and-forget task
-                        asyncio.create_task(process_ws_task(data))
-                    elif msg_type == "task_cancel":
-                        task_id = data.get("id", "")
-                        if task_id:
-                            logger.info("WS: received task_cancel for %s", task_id)
-                            # Kill the running Hermes subprocess
-                            proc = _active_procs.get(task_id)
-                            if proc:
-                                try:
-                                    proc.kill()
-                                    logger.debug("WS: killed subprocess for cancelled task %s", task_id)
-                                except Exception as e:
-                                    logger.warning("WS: failed to kill subprocess for %s: %s", task_id, e)
-                            # Signal cancellation via event (process_ws_task reads this)
-                            cancel_evt = _cancel_events.get(task_id)
-                            if cancel_evt:
-                                cancel_evt.set()
-                    elif msg_type == "ping":
-                        # Respond to server ping (some WS frameworks expect this)
-                        pass
-                    elif msg_type == "state_sync_reply":
-                        # Handle orphaned tasks after reconnection state sync
-                        asyncio.create_task(_handle_state_sync_reply(data))
-                    elif msg_type == "close":
-                        logger.info("WS: server requested close")
-                        break
-
-                elif msg.type == WSMsgType.PING:
-                    await ws.pong()
-                elif msg.type == WSMsgType.CLOSED:
-                    logger.info("WS: connection closed by server")
-                    break
-                elif msg.type == WSMsgType.ERROR:
-                    logger.warning("WS: connection error")
-                    break
-
-                # Send our own ping every 30 seconds to keep the connection alive
-                # Ping carries active_task / task_status / task_progress for
-                # real-time task panel (P2.1 protocol spec).
-                now = time.time()
-                if now - last_ping_time >= 30.0:
-                    try:
-                        ping_msg: Dict[str, Any] = {"type": "ping"}
-                        # Find the current active task (first non-terminal)
-                        active_tasks = _build_active_tasks()
-                        if active_tasks:
-                            # Use the first active task as the current one
-                            at = active_tasks[0]
-                            ping_msg["active_task"] = at["id"]
-                            ping_msg["task_status"] = at.get("status", "working")
-                            # Estimate progress from elapsed time
-                            started = at.get("started_at", now)
-                            elapsed = now - started
-                            ping_msg["task_progress"] = min(
-                                0.99, elapsed / HERMES_TIMEOUT
-                            )
-                        await ws.send_json(ping_msg)
-                        logger.debug("WS: sent ping%s",
-                                     f" active_task={ping_msg.get('active_task', '')}" if active_tasks else "")
-                    except Exception:
-                        pass
-                    last_ping_time = now
-
-        except asyncio.CancelledError:
-            logger.info("WS: loop cancelled")
-            break
-        except Exception as e:
-            logger.warning("WS: connection lost: %s (reconnecting in %.1fs)", e, retry_delay)
-        finally:
-            _ws_connection = None
-            if not ws.closed:
-                await ws.close()
-
-        # Reconnect with exponential backoff
-        await asyncio.sleep(retry_delay)
-        retry_delay = min(retry_delay * 2, 60.0)
-
-    # Clean up session on exit
-    await _ws_session.close()
-    _ws_session = None
-
-
-async def ws_shutdown(close_event: asyncio.Event) -> None:
-    """Signal the WS loop to shut down gracefully."""
-    close_event.set()
-    # Force-close the active connection to unblock the loop
-    global _ws_connection
-    ws = _ws_connection
-    if ws and not ws.closed:
-        try:
-            await ws.send_json({"type": "close"})
-        except Exception:
-            pass
-        await ws.close()
-    _ws_connection = None
-
-
-# ── Main ────────────────────────────────────────────────────────────────────
-
-def create_app() -> web.Application:
+def create_app(client: A2AClient) -> web.Application:
     """Create and configure the A2A Coder Agent application."""
     app = web.Application()
     app["started_at"] = time.time()
+    app["client"] = client
 
     app.router.add_get("/.well-known/agent-card.json", handle_agent_card)
     app.router.add_get("/health", handle_health)
@@ -1352,15 +689,23 @@ def create_app() -> web.Application:
     return app
 
 
+# ── Main ────────────────────────────────────────────────────────────────────
+
 def main() -> None:
-    """Entry point: load configs, (re-)use persistent agent_id, start services."""
+    """Entry point: connect to Registry, register, start services."""
     parser = argparse.ArgumentParser(description="A2A Coder Agent")
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG-level logging")
     parser.add_argument("--log-file", default=None, help="Log to file instead of stderr")
-    parser.add_argument("--auth-config", default=AUTH_CONFIG_PATH,
-                        help=f"Path to auth config file (default: {AUTH_CONFIG_PATH})")
+    parser.add_argument("--no-auth", dest="auth", action="store_false", default=True,
+                        help="Disable OAuth authentication (default: enabled)")
+    parser.add_argument("--client-id", default=os.environ.get("OAUTH_CLIENT_ID", ""),
+                        help="OAuth client ID (or $OAUTH_CLIENT_ID)")
+    parser.add_argument("--client-secret", default=os.environ.get("OAUTH_CLIENT_SECRET", ""),
+                        help="OAuth client secret (or $OAUTH_CLIENT_SECRET)")
     parser.add_argument("--agent-config", default=AGENT_CONFIG_PATH,
                         help=f"Path to agent config file (default: {AGENT_CONFIG_PATH})")
+    parser.add_argument("--registry", default=os.environ.get("A2A_REGISTRY_URL", REGISTRY_URL),
+                        help="Registry base URL (default: http://localhost:8321, or $A2A_REGISTRY_URL)")
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.debug else logging.INFO
@@ -1375,78 +720,112 @@ def main() -> None:
     logger.setLevel(log_level)
     logging.getLogger("a2a_registry").setLevel(log_level)
 
-    auth_config = args.auth_config
-    agent_config = args.agent_config
-
-    # 1. Load OAuth client credentials from config file (or env vars)
-    _load_auth_config(auth_config)
-
-    # 2. Try to reuse a previously persisted agent_id
-    global _ws_agent_id
-    _ws_agent_id = _load_agent_config(agent_config)
-    if _ws_agent_id:
-        logger.info("Found stored agent_id '%s' — validating...", _ws_agent_id)
-        # Quick check: does this agent_id still exist in the registry?
-        try:
-            req = urllib.request.Request(
-                f"{REGISTRY_URL}/v1/agents/{_ws_agent_id}",
-                headers={**_auth_header()},
-                method="GET",
-            )
-            with urllib.request.urlopen(req) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read())
-                    if data.get("id"):
-                        logger.info("Reusing existing agent_id '%s'", _ws_agent_id)
-                    else:
-                        _ws_agent_id = ""
-        except (HTTPError, OSError, json.JSONDecodeError):
-            logger.warning("Stored agent_id '%s' no longer valid — re-registering", _ws_agent_id)
-            _ws_agent_id = ""
-    else:
-        logger.info("No stored agent_id found — registering fresh")
-
-    # 3. Register (or re-register) if we don't have a valid agent_id
-    if not _ws_agent_id:
-        logger.info("Registering with A2A Registry at %s...", REGISTRY_URL)
-        _ws_agent_id = register_with_registry(auth_config, agent_config)
-    else:
-        # Even if we have a valid agent_id, persist it again (defensive)
-        _save_agent_config(agent_config, _ws_agent_id)
-
-    import threading
-    hb_thread = threading.Thread(target=heartbeat_loop, args=(_ws_agent_id,), daemon=True)
-    hb_thread.start()
-    logger.info("Heartbeat thread started (interval=%ss)", HEARTBEAT_INTERVAL)
+    _save_config = args.agent_config
 
     async def _run() -> None:
-        app = create_app()
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, AGENT_HOST, AGENT_PORT)
-        await site.start()
-        logger.info("A2A Coder Agent HTTP on %s:%s", AGENT_HOST, AGENT_PORT)
+        # ── 1. Create the A2AClient SDK instance ──
+        auth_enabled = args.auth and bool(args.client_id and args.client_secret)
+        async with A2AClient(
+            registry_url=args.registry,
+            client_id=args.client_id,
+            client_secret=args.client_secret,
+            auth_enabled=auth_enabled,
+        ) as client:
+            logger.info("Created A2AClient for %s (auth=%s)", args.registry, auth_enabled)
 
-        # Start WS loop in background
-        ws_close_event = asyncio.Event()
-        ws_task = asyncio.create_task(ws_connect_loop(ws_close_event))
-        logger.debug("ws_connect_loop task created (id=%s)", id(ws_task))
+            # ── 2. Check health ──
+            try:
+                health = await client.async_health()
+                logger.info("Registry health: %s (v%s, uptime=%ss)",
+                            health["status"], health["version"], health["uptime_seconds"])
+            except Exception as e:
+                logger.warning("Registry health check failed: %s", e)
+                logger.warning("Continuing anyway...")
 
-        try:
-            # Sleep forever — Ctrl+C / SIGINT cancels this
-            logger.debug("_run: entering main event loop (waiting forever)")
-            await asyncio.Event().wait()
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            logger.info("Shutting down...")
-        finally:
-            await ws_shutdown(ws_close_event)
-            if ws_task and not ws_task.done():
-                ws_task.cancel()
+            # ── 3. Build Agent Card ──
+            agent_card = build_agent_card(auth_enabled=auth_enabled)
+
+            # ── 4. Try to reuse stored agent_id ──
+            agent_id = _load_agent_config(_save_config)
+            if agent_id:
+                logger.info("Found stored agent_id '%s' — validating...", agent_id)
                 try:
-                    await ws_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            await runner.cleanup()
+                    info = await client.async_get_agent(agent_id)
+                    if info.get("id"):
+                        logger.info("Reusing existing agent_id '%s'", agent_id)
+                except (NotFoundError, RegistryError):
+                    logger.warning("Stored agent_id '%s' no longer valid — re-registering", agent_id)
+                    agent_id = ""
+                except Exception as e:
+                    logger.warning("Agent lookup failed: %s — will re-register", e)
+                    agent_id = ""
+
+            # ── 5. Register (or re-register) ──
+            if not agent_id:
+                logger.info("Registering with A2A Registry at %s...", args.registry)
+                try:
+                    agent_id = await client.async_register_agent(agent_card=agent_card)
+                    logger.info("Registered as '%s'", agent_id)
+                    _save_agent_config(_save_config, agent_id)
+                except RegistryError as e:
+                    if e.status == 409:
+                        logger.info("Agent already registered (409) — finding by name")
+                        try:
+                            result = await client.async_list_agents(q=agent_card["name"])
+                            agents = result.get("agents", [])
+                            if agents:
+                                agent_id = agents[0]["id"]
+                                _save_agent_config(_save_config, agent_id)
+                                logger.info("Found existing agent: '%s'", agent_id)
+                            else:
+                                logger.warning("409 but no agent found — using name as fallback ID")
+                                agent_id = agent_card["name"]
+                        except Exception as e2:
+                            logger.warning("Failed to search for agent: %s", e2)
+                            agent_id = agent_card["name"]
+                    else:
+                        logger.error("Registration failed: %s", e)
+                        logger.error("Exiting — cannot continue without registration")
+                        return
+                except Exception as e:
+                    logger.error("Registration failed: %s", e)
+                    return
+
+            # ── 6. Set up dispatch handler for WS tasks ──
+            async def on_task(data: Dict[str, Any]) -> None:
+                """Dispatch handler called by the SDK for each incoming WS task."""
+                asyncio.create_task(process_ws_task(client, data))
+
+            client.dispatch_handler = on_task
+            logger.info("Dispatch handler set up")
+
+            # ── 7. Connect WebSocket ──
+            try:
+                await client.async_connect_websocket(agent_id)
+                logger.info("WebSocket connecting for agent '%s' (background)", agent_id)
+            except Exception as e:
+                logger.warning("WebSocket connection failed: %s", e)
+
+            # ── 8. Start heartbeat loop ──
+            asyncio.create_task(heartbeat_loop(client, agent_id))
+            logger.info("Heartbeat loop started (interval=%ss)", HEARTBEAT_INTERVAL)
+
+            # ── 9. Start HTTP server ──
+            app = create_app(client)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, AGENT_HOST, AGENT_PORT)
+            await site.start()
+            logger.info("A2A Coder Agent HTTP on %s:%s", AGENT_HOST, AGENT_PORT)
+
+            # ── 10. Wait forever (Ctrl+C to exit) ──
+            try:
+                await asyncio.Event().wait()
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                logger.info("Shutting down...")
+            finally:
+                await runner.cleanup()
+                logger.info("A2A Coder Agent stopped")
 
     try:
         asyncio.run(_run())

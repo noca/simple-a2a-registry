@@ -6,8 +6,8 @@ import { useAuthStore } from '../store/authStore';
 const navItems = [
   { key: 'dashboard', icon: '📊', label: 'Dashboard' },
   { key: 'agents', icon: '🤖', label: 'Agents' },
-  { key: 'kanban', icon: '📋', label: 'Kanban' },
   { key: 'tasks', icon: '🔨', label: 'Tasks' },
+  { key: 'kanban', icon: '📋', label: 'Kanban' },
   { key: 'swarm', icon: '🕸️', label: 'Swarm' },
   { key: 'clients', icon: '🔑', label: 'Clients' },
   { key: 'audit', icon: '📝', label: 'Audit Log' },

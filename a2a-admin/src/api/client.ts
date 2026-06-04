@@ -134,6 +134,12 @@ export const logout = authAPI.logout;
 export const listV1Tasks = (params?: Record<string, any>) =>
   api.get('/v1/tasks', { params }).then((r) => r.data);
 
+export const dispatchV1Task = (agentId: string, query: string, sessionId?: string) =>
+  api.post(`/v1/agents/${agentId}/dispatch`, {
+    query,
+    session_id: sessionId || undefined,
+  }).then((r) => r.data);
+
 export const listClients = () => adminAPI.listClients();
 export const createClient = (data: Record<string, unknown>) => adminAPI.createClient(data);
 export const deleteClient = (id: string) => adminAPI.deleteClient(id);
