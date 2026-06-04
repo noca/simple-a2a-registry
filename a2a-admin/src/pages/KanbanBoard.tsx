@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { taskAPI } from '../api/client';
+import { taskAPI, agentAPI } from '../api/client';
 import { useStore } from '../store/useStore';
 import StatusTag from '../components/StatusTag';
 import TaskTimeline from '../components/TaskTimeline';
@@ -30,6 +30,16 @@ const KanbanBoard: React.FC = () => {
   const [search, setSearch] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [newTask, setNewTask] = useState({ title: '', body: '', status: 'todo', priority: 'normal', assignee: '' });
+  const [agents, setAgents] = useState<{ id: string; name: string }[]>([]);
+
+  // Fetch registered agents for assignee dropdown
+  const fetchAgents = useCallback(async () => {
+    try {
+      const data = await agentAPI.list();
+      const list = Array.isArray(data) ? data : data.agents || [];
+      setAgents(list.map((a: any) => ({ id: a.id, name: a.name || a.id })));
+    } catch { setAgents([]); }
+  }, []);
 
   // Detail drawer state
   const [selectedTask, setSelectedTask] = useState<any>(null);
@@ -200,6 +210,7 @@ const KanbanBoard: React.FC = () => {
     setEditing(false);
     setConfirmDelete(false);
     setCommentText('');
+    fetchAgents();
     try {
       const data = await taskAPI.getV2(id);
       const task = data.task || data;
@@ -568,7 +579,7 @@ const KanbanBoard: React.FC = () => {
             取消选择 ({selectedIds.size})
           </button>
         )}
-        <button onClick={() => setShowCreate(true)}
+        <button onClick={() => { fetchAgents(); setShowCreate(true); }}
           style={{ ...btnStyle, ...btnPrimaryStyle }}>+ New Task</button>
       </div>
 
@@ -718,7 +729,7 @@ const KanbanBoard: React.FC = () => {
                       </>
                     ) : (
                       <>
-                        <button onClick={() => setEditing(true)} style={{ ...miniBtn }}>✏️ 编辑</button>
+                        <button onClick={() => { fetchAgents(); setEditing(true); }} style={{ ...miniBtn }}>✏️ 编辑</button>
                         <button onClick={closeDrawer} style={{ ...miniBtn }}>✕ 关闭</button>
                       </>
                     )}
@@ -796,9 +807,12 @@ const KanbanBoard: React.FC = () => {
                       </div>
                       <div>
                         <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.3px', marginBottom: 3 }}>负责人 (assignee)</div>
-                        <input value={editForm.assignee}
+                        <select value={editForm.assignee}
                           onChange={(e) => setEditForm({ ...editForm, assignee: e.target.value })}
-                          style={inputStyle} />
+                          style={inputStyle}>
+                          <option value="">Unassigned</option>
+                          {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                        </select>
                       </div>
                       <div>
                         <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.3px', marginBottom: 3 }}>优先级</div>
@@ -1032,9 +1046,12 @@ const KanbanBoard: React.FC = () => {
                 <option value="normal">Normal</option>
                 <option value="high">High</option>
               </select>
-              <input placeholder="Assignee" value={newTask.assignee}
+              <select value={newTask.assignee}
                 onChange={(e) => setNewTask({ ...newTask, assignee: e.target.value })}
-                style={inputStyle} />
+                style={inputStyle}>
+                <option value="">Unassigned</option>
+                {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
               <button onClick={() => setShowCreate(false)}
