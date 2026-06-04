@@ -549,6 +549,8 @@ class RegistryHandler:
         - When auth is enabled: pass ``?token=xxx`` query parameter
           (WS upgrade doesn't support Bearer header from browser contexts)
         """
+        # Bypass the 30s timeout middleware — WS connections are long-lived
+        request["timeout_seconds"] = 86400  # 24h
         agent_id = request.match_info["agent_id"]
 
         # Extract tenant from WebSocket query param (or later from JWT token).

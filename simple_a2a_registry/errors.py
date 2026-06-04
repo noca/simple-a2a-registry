@@ -281,13 +281,17 @@ async def timeout_middleware(
     """请求级超时控制中间件。
 
     默认超时 30 秒，可通过 request 的 ``timeout_seconds`` 属性自定义。
-    超时后返回 503 错误。
+    超时后返回 503 错误。WebSocket 升级请求被自动跳过（长连）。
 
     用法：:
 
         # 自定义超时（某个特定端点）
         request["timeout_seconds"] = 60
     """
+    # WebSocket upgrade requests are long-lived — skip timeout wrapping
+    if request.headers.get("Upgrade", "").lower() == "websocket":
+        return await handler(request)
+
     timeout = request.get("timeout_seconds", 30)
     try:
         response = await asyncio.wait_for(handler(request), timeout=timeout)
