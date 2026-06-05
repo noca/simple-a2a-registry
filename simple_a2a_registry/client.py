@@ -752,6 +752,19 @@ class A2AClient:
                     return data
                 else:
                     body = await _async_read_body(resp)
+                    # Token expired/invalid — force refresh and retry once
+                    if resp.status in (401, 403):
+                        self._token = None
+                        logger.info("Heartbeat 401 — refreshing token and retrying")
+                        async with session.post(
+                            f"{self._base_url}/v1/agents/{agent_id}/heartbeat",
+                            headers=await self._async_auth_header(),
+                        ) as retry_resp:
+                            if retry_resp.status in (200, 203):
+                                data = await retry_resp.json()
+                                return data
+                            body = await _async_read_body(retry_resp)
+                            _raise_from_resp(retry_resp, body, "Heartbeat failed")
                     _raise_from_resp(resp, body, "Heartbeat failed")
         except asyncio.TimeoutError as e:
             raise ConnectionError(
@@ -1349,15 +1362,12 @@ class A2AClient:
                     404, f"Agent '{agent_id}' not found on WebSocket connect",
                     error="agent_not_found",
                 ) from e
-            if e.status == 401:
+            if e.status in (401, 403):
+                # Force token refresh: server may have rotated its JWT key
+                self._token = None
                 raise AuthError(
-                    401, "WebSocket auth failed — invalid token",
+                    e.status, "WebSocket auth failed — invalid token",
                     error="unauthorized",
-                ) from e
-            if e.status == 403:
-                raise AuthError(
-                    403, "WebSocket auth failed — token mismatch",
-                    error="forbidden",
                 ) from e
             raise ConnectionError(
                 f"WebSocket connect failed (HTTP {e.status}): {e.message}"

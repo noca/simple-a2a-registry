@@ -660,14 +660,28 @@ async def handle_health(request: web.Request) -> web.Response:
 
 # ── Background heartbeat task ─────────────────────────────────────────────
 
-async def heartbeat_loop(client: A2AClient, agent_id: str) -> None:
-    """Periodically send heartbeats to the registry."""
+async def heartbeat_loop(client: A2AClient, agent_id: str, agent_card: dict) -> None:
+    """Periodically send heartbeats to the registry, re-registering on 404."""
+    nonlocal_agent_id = agent_id  # allow re-assignment on re-register
     while True:
         try:
-            await client.async_heartbeat(agent_id)
-            logger.debug("Heartbeat sent for agent '%s'", agent_id)
+            await client.async_heartbeat(nonlocal_agent_id)
+            logger.debug("Heartbeat sent for agent '%s'", nonlocal_agent_id)
+        except RegistryError as e:
+            if e.status == 404:
+                logger.warning("Agent '%s' not found — re-registering", nonlocal_agent_id)
+                try:
+                    new_id = await client.async_register_agent(agent_card=agent_card)
+                    logger.info("Re-registered as '%s'", new_id)
+                    nonlocal_agent_id = new_id
+                    _save_agent_id(AGENT_ID_FILE, new_id)
+                    continue
+                except Exception as re:
+                    logger.error("Re-registration failed: %s", re)
+            else:
+                logger.warning("Heartbeat failed for '%s': %s", nonlocal_agent_id, e)
         except Exception as e:
-            logger.warning("Heartbeat failed for '%s': %s", agent_id, e)
+            logger.warning("Heartbeat failed for '%s': %s", nonlocal_agent_id, e)
         await asyncio.sleep(HEARTBEAT_INTERVAL)
 
 
@@ -807,7 +821,7 @@ def main() -> None:
                 logger.warning("WebSocket connection failed: %s", e)
 
             # ── 8. Start heartbeat loop ──
-            asyncio.create_task(heartbeat_loop(client, agent_id))
+            asyncio.create_task(heartbeat_loop(client, agent_id, agent_card))
             logger.info("Heartbeat loop started (interval=%ss)", HEARTBEAT_INTERVAL)
 
             # ── 9. Start HTTP server ──
