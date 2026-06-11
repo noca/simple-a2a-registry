@@ -13,6 +13,8 @@ import AuditLog from './pages/AuditLog';
 import Settings from './pages/Settings';
 import UserManagement from './pages/UserManagement';
 import SwarmTopology from './pages/SwarmTopology';
+import SecurityEvents from './pages/SecurityEvents';
+import AuthorizationMatrix from './pages/AuthorizationMatrix';
 import { useAuthStore } from './store/authStore';
 
 const GuestRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -92,6 +94,8 @@ const App: React.FC = () => {
                     <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
                     <Route path="/users" element={<ErrorBoundary><UserManagement /></ErrorBoundary>} />
                     <Route path="/swarm" element={<ErrorBoundary><SwarmTopology /></ErrorBoundary>} />
+                    <Route path="/security-events" element={<ErrorBoundary><SecurityEvents /></ErrorBoundary>} />
+                    <Route path="/authorizations" element={<ErrorBoundary><AuthorizationMatrix /></ErrorBoundary>} />
                     <Route path="/" element={<Navigate to="/dashboard" replace />} />
                     <Route path="*" element={<Navigate to="/dashboard" replace />} />
                   </Routes>

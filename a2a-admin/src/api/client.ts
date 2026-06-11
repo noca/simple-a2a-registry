@@ -70,6 +70,8 @@ export const taskAPI = {
     api.post(`/v2/tasks/${id}/depend`, { parent_id: parentId }).then((r) => r.data),
   undepend: (id: string, parentId: string) =>
     api.delete(`/v2/tasks/${id}/depend/${parentId}`).then((r) => r.data),
+  getProvenance: (id: string) =>
+    api.get(`/v2/tasks/${id}/provenance`).then((r) => r.data),
   batchUpdateStatus: (body: { task_ids: string[]; status: string }) =>
     api.post('/v2/tasks/batch/status', body).then((r) => r.data),
   batchDelete: (body: { task_ids: string[] }) =>
@@ -102,6 +104,22 @@ export const adminAPI = {
   listSettings: () => api.get('/admin/settings').then((r) => r.data),
   updateSettings: (data: Record<string, unknown>) =>
     api.put('/admin/settings', data).then((r) => r.data),
+};
+
+// --- Security Events API (P0 security harness) ---
+export const securityEventsAPI = {
+  list: (params?: Record<string, string>) =>
+    api.get('/admin/security-events', { params }).then((r) => r.data),
+};
+
+// --- Delegation Matrix API (P1-D) ---
+export const delegationAPI = {
+  list: (params?: Record<string, string>) =>
+    api.get('/admin/delegations', { params }).then((r) => r.data),
+  create: (data: Record<string, unknown>) =>
+    api.post('/admin/delegations', data).then((r) => r.data),
+  remove: (id: string) =>
+    api.delete(`/admin/delegations/${id}`).then((r) => r.data),
 };
 
 // --- Swarm APIs ---
