@@ -2257,7 +2257,17 @@ def create_app(
 
     # Health / well-known
     # Kubernetes-style health probes via HealthChecker
-    app.router.add_get("/health", make_liveness_handler(health_checker))
+    app.router.add_get("/health", make_liveness_handler(
+        health_checker,
+        extra_data_fn=lambda: {
+            "stats": {
+                "total_agents": handler.store.stats().get("totalAgents", 0),
+                "alive_agents": handler.store.stats().get("aliveAgents", 0),
+                "stale_agents": handler.store.stats().get("staleAgents", 0),
+                "connected_via_ws": len(handler._ws_connections),
+            },
+        },
+    ))
     app.router.add_get("/health/ready", make_readiness_handler(health_checker))
     app.router.add_get("/health/startup", make_startup_handler(health_checker))
     app.router.add_get("/.well-known/agent-card.json", handler.handle_well_known)

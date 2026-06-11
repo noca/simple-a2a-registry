@@ -309,13 +309,30 @@ class HealthChecker:
 # ---------------------------------------------------------------------------
 
 
-def make_liveness_handler(checker: HealthChecker) -> Any:
-    """Return an aiohttp handler for ``GET /health`` (liveness)."""
+def make_liveness_handler(
+    checker: HealthChecker,
+    extra_data_fn: Optional[Callable[[], Dict[str, Any]]] = None,
+) -> Any:
+    """Return an aiohttp handler for ``GET /health`` (liveness).
+
+    When ``extra_data_fn`` is provided, its return dict is merged into the
+    JSON response alongside the standard HealthReport fields.  Use this to
+    attach agent stats, pool sizes, or other operational data without
+    breaking the K8s probe contract.
+    """
 
     async def handler(request: web.Request) -> web.Response:
         report = await checker.check_liveness()
+        data = report.to_dict()
+        if extra_data_fn is not None:
+            try:
+                extra = extra_data_fn()
+                if isinstance(extra, dict):
+                    data.update(extra)
+            except Exception:
+                logger.warning("health extra_data_fn raised", exc_info=True)
         status = 200 if report.status == "healthy" else 200  # always 200 for liveness
-        return web.json_response(report.to_dict(), status=status)
+        return web.json_response(data, status=status)
 
     return handler
 

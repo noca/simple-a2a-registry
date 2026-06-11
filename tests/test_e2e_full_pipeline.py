@@ -90,7 +90,7 @@ class TestE2EFullPipeline:
         r = client.get("/health")
         assert r.status_code == 200
         data = r.json()
-        assert data.get("status") == "ok"
+        assert data.get("status") == "healthy"
 
     def test_register_agent(self, client) -> None:
         """Register a test agent and verify it appears in listing."""
