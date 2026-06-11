@@ -75,6 +75,20 @@ class TokenRecord:
     expires_at: float
 
 
+@dataclass
+class AuthorizationRecord:
+    """An agent-to-agent authorization record."""
+    id: int
+    source_agent_id: str
+    target_agent_id: str
+    allowed_actions: List[str]
+    scope_restriction: Optional[str] = None
+    max_depth: int = 5
+    tenant_id: str = ""
+    created_at: float = 0.0
+    expires_at: Optional[float] = None
+
+
 # ---------------------------------------------------------------------------
 # SQL schema — SQLite version
 # ---------------------------------------------------------------------------
@@ -129,6 +143,22 @@ CREATE TABLE IF NOT EXISTS auth_codes (
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_client_id ON oauth_tokens(client_id);
 CREATE INDEX IF NOT EXISTS idx_agents_heartbeat ON agents(heartbeat_at);
 CREATE INDEX IF NOT EXISTS idx_agents_channel ON agents(preferred_channel);
+
+CREATE TABLE IF NOT EXISTS agent_authorizations (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_agent_id     TEXT NOT NULL,
+    target_agent_id     TEXT NOT NULL,
+    allowed_actions     TEXT NOT NULL DEFAULT '["*"]',
+    scope_restriction   TEXT,
+    max_depth           INTEGER NOT NULL DEFAULT 5,
+    tenant_id           TEXT NOT NULL DEFAULT '',
+    created_at          REAL NOT NULL,
+    expires_at          REAL,
+    UNIQUE(source_agent_id, target_agent_id, tenant_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_authz_source ON agent_authorizations(source_agent_id);
+CREATE INDEX IF NOT EXISTS idx_authz_target ON agent_authorizations(target_agent_id);
 """
 
 # ---------------------------------------------------------------------------
@@ -180,6 +210,23 @@ CREATE TABLE IF NOT EXISTS auth_codes (
 
 CREATE INDEX idx_oauth_tokens_client_id ON oauth_tokens(client_id);
 CREATE INDEX idx_agents_heartbeat ON agents(heartbeat_at);
+CREATE INDEX idx_agents_tenant ON agents(tenant_id);
+
+CREATE TABLE IF NOT EXISTS agent_authorizations (
+    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    source_agent_id     VARCHAR(255) NOT NULL,
+    target_agent_id     VARCHAR(255) NOT NULL,
+    allowed_actions     TEXT NOT NULL DEFAULT '["*"]',
+    scope_restriction   TEXT,
+    max_depth           INT NOT NULL DEFAULT 5,
+    tenant_id           VARCHAR(255) NOT NULL DEFAULT '',
+    created_at          DOUBLE NOT NULL,
+    expires_at          DOUBLE,
+    UNIQUE KEY uk_authz_pair (source_agent_id, target_agent_id, tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE INDEX idx_authz_source ON agent_authorizations(source_agent_id);
+CREATE INDEX idx_authz_target ON agent_authorizations(target_agent_id);
 """
 
 # ---------------------------------------------------------------------------
@@ -313,6 +360,8 @@ class Store:
         else:
             self._engine = RetryEngine(data_dir_or_engine)
             self._data_dir = ""
+            # Ensure schema when using a pre-configured engine
+            _maybe_create_schema(data_dir_or_engine)
 
         self._maybe_migrate_from_json()
         self._bootstrap_registry()
@@ -1256,6 +1305,113 @@ class Store:
             return result_data
 
     # -- Auth stats -------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Agent Authorization Matrix CRUD
+    # ------------------------------------------------------------------
+
+    def create_authorization(
+        self,
+        *,
+        source_agent_id: str,
+        target_agent_id: str,
+        allowed_actions: Optional[List[str]] = None,
+        scope_restriction: Optional[str] = None,
+        max_depth: int = 5,
+        expires_at: Optional[float] = None,
+        tenant: str = "",
+    ) -> Dict[str, Any]:
+        """Create an agent-to-agent authorization record.
+
+        Returns the created record as a dict (including the new ``id``).
+        Raises on duplicate (source, target, tenant) violation.
+        """
+        actions_json = json.dumps(allowed_actions or ["*"])
+        now = time.time()
+        with self._tx() as engine:
+            result = engine.execute(
+                "INSERT INTO agent_authorizations "
+                "(source_agent_id, target_agent_id, allowed_actions, "
+                " scope_restriction, max_depth, tenant_id, created_at, expires_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (source_agent_id, target_agent_id, actions_json,
+                 scope_restriction, max_depth, tenant, now, expires_at),
+            )
+            rowid = result.lastrowid
+        created = self.get_authorization(rowid)
+        assert created is not None, "Failed to retrieve created authorization"
+        return created
+
+    def get_authorization(self, authz_id: int) -> Optional[Dict[str, Any]]:
+        """Get a single authorization record by id."""
+        with self._tx("DEFERRED") as engine:
+            result = engine.execute(
+                "SELECT * FROM agent_authorizations WHERE id=?", (authz_id,),
+            )
+            row = result.fetchone()
+            if row is None:
+                return None
+            return self._row_to_authz(row)
+
+    def list_authorizations(
+        self,
+        *,
+        source: Optional[str] = None,
+        target: Optional[str] = None,
+        tenant: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List authorization records, optionally filtered."""
+        conditions: List[str] = []
+        params: List[Any] = []
+        if source:
+            conditions.append("source_agent_id=?")
+            params.append(source)
+        if target:
+            conditions.append("target_agent_id=?")
+            params.append(target)
+        if tenant is not None:
+            conditions.append("tenant_id=?")
+            params.append(tenant)
+
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
+        sql = f"SELECT * FROM agent_authorizations {where} ORDER BY created_at DESC"
+
+        with self._tx("DEFERRED") as engine:
+            result = engine.execute(sql, tuple(params))
+            rows = result.fetchall()
+            return [self._row_to_authz(r) for r in rows]
+
+    def delete_authorization(self, authz_id: int) -> bool:
+        """Delete an authorization record by id.
+
+        Returns True if the record existed and was deleted.
+        """
+        with self._tx() as engine:
+            result = engine.execute(
+                "DELETE FROM agent_authorizations WHERE id=?", (authz_id,),
+            )
+            return result.rowcount > 0
+
+    def _row_to_authz(self, row: Any) -> Dict[str, Any]:
+        """Convert a DB row to an authorization dict."""
+        try:
+            actions = json.loads(row["allowed_actions"]) if row.get("allowed_actions") else ["*"]
+        except (json.JSONDecodeError, TypeError):
+            actions = ["*"]
+        return {
+            "id": row["id"],
+            "source_agent_id": row["source_agent_id"],
+            "target_agent_id": row["target_agent_id"],
+            "allowed_actions": actions,
+            "scope_restriction": row.get("scope_restriction"),
+            "max_depth": row.get("max_depth", 5),
+            "tenant_id": row.get("tenant_id", ""),
+            "created_at": row["created_at"],
+            "expires_at": row.get("expires_at"),
+        }
+
+    # ------------------------------------------------------------------
+    # Auth store helpers
 
     def auth_stats(self) -> Dict[str, Any]:
         """Return OAuth store statistics."""

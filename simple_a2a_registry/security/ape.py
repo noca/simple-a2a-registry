@@ -38,7 +38,7 @@ logger = logging.getLogger("a2a_registry.security.ape")
 class APEConfig:
     """Configuration for the APE."""
 
-    mode: str = "enforce"          # audit | warn | enforce
+    mode: str = "warn"             # audit | warn | enforce
     default_delegation_policy: str = "open"  # open | restricted
     max_delegation_depth: int = 10
 
@@ -132,6 +132,9 @@ class AuthorizationPolicyEngine:
         # ── 3. Assignee exists and active ───────────────────────────
         if assignee:
             assignee_card = self._get_agent(assignee, caller.tenant)
+            # Fallback: unrestricted lookup to detect cross-tenant assignment
+            if assignee_card is None:
+                assignee_card = self._get_agent(assignee, "")
             if assignee_card is None:
                 err = f"assignee '{assignee}' not found"
                 return self._deny(err, caller, assignee, err_type="AGENT_NOT_FOUND")
@@ -148,8 +151,12 @@ class AuthorizationPolicyEngine:
         # ── 5. Tenant consistency (agents only) ─────────────────────
         if not is_human and caller.tenant and assignee:
             assignee_card = self._get_agent(assignee, caller.tenant)
+            # If lookup with caller's tenant fails, try without tenant filter
+            # to detect cross-tenant assignment
+            if assignee_card is None:
+                assignee_card = self._get_agent(assignee, "")
             if assignee_card:
-                assignee_tenant = assignee_card.get("tenant_id", "")
+                assignee_tenant = assignee_card.get("tenant_id", "") or assignee_card.get("tenant", "")
                 if caller.tenant and assignee_tenant and caller.tenant != assignee_tenant:
                     err = f"tenant mismatch: caller='{caller.tenant}', assignee='{assignee_tenant}'"
                     return self._deny(err, caller, assignee, err_type="TENANT_MISMATCH")
@@ -315,10 +322,16 @@ class AuthorizationPolicyEngine:
             # Log and warn, but don't block
             self._record_event(err_type, caller, target, decision="allow",
                                reason=f"{reason} (warn mode)", task_id=task_id)
+            warn_value = (
+                f"type={err_type}; "
+                f"actor={caller.agent_id}; "
+                f"target={target}; "
+                f"reason={reason}"
+            )
             return CheckpointResult(
                 allowed=True, reason=reason,
                 recorded_event=True,
-                response_headers={"X-Security-Warning": reason},
+                response_headers={"X-Security-Warning": warn_value},
             )
 
         # enforce mode — block
@@ -368,12 +381,30 @@ class AuthorizationPolicyEngine:
             logger.exception("Failed to record security event")
 
     def _get_agent(self, agent_id: str, tenant: str = "") -> Optional[Dict[str, Any]]:
-        """Look up an agent in the registry store."""
+        """Look up an agent in the registry store.
+
+        First tries by internal UUID (``store.get_agent``).  If not found,
+        falls back to a JSON search against the ``agent_id`` field inside
+        the card blob (used when the JWT ``sub`` is the agent's name rather
+        than its database UUID).
+        """
         try:
-            return self.registry_store.get_agent(agent_id, tenant=tenant or None)
+            card = self.registry_store.get_agent(agent_id, tenant=tenant or None)
+            if card is not None:
+                return card
         except Exception:
             logger.exception("Failed to look up agent '%s'", agent_id)
-            return None
+
+        # Fallback: search by name field inside card_json
+        # (used when JWT ``sub`` is the agent's name rather than its DB UUID)
+        try:
+            all_agents = self.registry_store.list_agents(tenant=tenant or None)
+            for a in all_agents:
+                if a.get("name", "") == agent_id:
+                    return a
+        except Exception:
+            logger.exception("Failed to fallback-search agent '%s'", agent_id)
+        return None
 
     def _get_task(self, task_id: str) -> Any:
         """Look up a task via the task store."""

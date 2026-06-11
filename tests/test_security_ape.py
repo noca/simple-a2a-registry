@@ -44,15 +44,15 @@ def store_and_ids(shared_engine):
     names = {}
     for tag, card in [
         ("alpha", {"agent_id": "agent-alpha", "name": "Alpha Agent",
-                    "tenant_id": "default", "scopes": ["task:write", "task:read"],
+                    "tenant": "default", "scopes": ["task:write", "task:read"],
                     "disabled": 0}),
         ("beta",  {"agent_id": "agent-beta",  "name": "Beta Agent",
-                    "tenant_id": "default", "scopes": ["task:read"],
+                    "tenant": "default", "scopes": ["task:read"],
                     "disabled": 0}),
         ("gamma", {"agent_id": "agent-gamma", "name": "Gamma Agent (disabled)",
-                    "tenant_id": "default", "scopes": [], "disabled": 1}),
+                    "tenant": "default", "scopes": [], "disabled": 1}),
         ("tx",    {"agent_id": "agent-tenant-x", "name": "Tenant-X Agent",
-                    "tenant_id": "tenant-x", "scopes": ["task:write"],
+                    "tenant": "tenant-x", "scopes": ["task:write"],
                     "disabled": 0}),
     ]:
         uid = store.register_agent(card)
@@ -266,7 +266,11 @@ class TestAPEModes:
         assert result.allowed is True
         assert result.recorded_event is True
         assert "X-Security-Warning" in result.response_headers
-        assert result.response_headers["X-Security-Warning"]
+        header = result.response_headers["X-Security-Warning"]
+        assert "type=" in header
+        assert "actor=no-such-agent" in header
+        assert "reason=" in header
+        assert "target=" in header
 
     async def test_enforce_blocks(self, ape_enforce):
         """TC-APE-17: enforce → denies, returning allowed=False."""
