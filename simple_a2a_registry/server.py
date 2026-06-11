@@ -1332,9 +1332,11 @@ class AdminHandler:
     """
 
     def __init__(self, auth_store: Store,
-                 audit_store: Optional[AuditStore] = None) -> None:
+                 audit_store: Optional[AuditStore] = None,
+                 event_store: Optional[SecurityEventStore] = None) -> None:
         self.auth_store = auth_store
         self.audit_store = audit_store
+        self.event_store = event_store
 
     async def handle_create_client(self, request: web.Request) -> web.Response:
         """POST /admin/clients — create a new OAuth client.
@@ -1572,6 +1574,91 @@ class AdminHandler:
         if tenant:
             response["tenant"] = tenant
         return web.json_response(response)
+
+    async def handle_list_security_events(self, request: web.Request) -> web.Response:
+        """GET /admin/security-events — list security events with optional filters.
+
+        Query params:
+            event_type: Filter by event type (AUTH_FAILURE, SCOPE_DENIED, etc.)
+            actor:      Filter by actor
+            tenant:     Filter by tenant
+            task_id:    Filter by task_id
+            since:      Unix timestamp — only events at or after this time
+            until:      Unix timestamp — only events before this time
+            limit:      Max results (default 50, max 1000)
+            offset:     Pagination offset (default 0)
+
+        Returns::
+
+            {
+                "total": 42,
+                "limit": 50,
+                "offset": 0,
+                "events": [...]
+            }
+        """
+        if self.event_store is None:
+            return web.json_response(
+                {"error": "events_disabled",
+                 "detail": "Security event storage is not configured (enable security_harness)"},
+                status=404,
+            )
+
+        try:
+            limit = min(int(request.query.get("limit", 50)), 1000)
+        except (ValueError, TypeError):
+            limit = 50
+        try:
+            offset = max(int(request.query.get("offset", 0)), 0)
+        except (ValueError, TypeError):
+            offset = 0
+
+        event_type = request.query.get("event_type") or None
+        actor = request.query.get("actor") or None
+        tenant = request.query.get("tenant") or None
+        task_id = request.query.get("task_id") or None
+
+        since = None
+        raw_since = request.query.get("since")
+        if raw_since:
+            try:
+                since = float(raw_since)
+            except (ValueError, TypeError):
+                pass
+
+        until = None
+        raw_until = request.query.get("until")
+        if raw_until:
+            try:
+                until = float(raw_until)
+            except (ValueError, TypeError):
+                pass
+
+        total = self.event_store.count_all(
+            event_type=event_type,
+            actor=actor,
+            tenant=tenant,
+            task_id=task_id,
+            since=since,
+            until=until,
+        )
+        events = self.event_store.list_all(
+            event_type=event_type,
+            actor=actor,
+            tenant=tenant,
+            task_id=task_id,
+            since=since,
+            until=until,
+            limit=limit,
+            offset=offset,
+        )
+
+        return web.json_response({
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "events": [e.to_dict() for e in events],
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -2043,7 +2130,11 @@ def create_app(
     app["admin_ws_hub"] = admin_ws_hub
     app["anomaly_scanner"] = anomaly_scanner
     app["sla_calculator"] = sla_calculator
-    app["sla_updater"] = sla_updater
+    app['sla_updater'] = sla_updater
+
+    # Wire security harness stores onto app (set only when security_harness enabled)
+    if event_store is not None:
+        app['event_store'] = event_store
 
     # HTTP client session for callback dispatch (created on startup, closed on cleanup)
     async def _init_client_session(app_: web.Application) -> None:
@@ -2214,7 +2305,8 @@ def create_app(
             logger.warning("Failed to create JWKS endpoint (non-fatal): %s", e)
 
         # Admin REST API — create/list/delete OAuth clients
-        admin_handler = AdminHandler(store, audit_store=audit_store)
+        admin_handler = AdminHandler(store, audit_store=audit_store,
+                                     event_store=event_store)
         app.router.add_post(
             "/admin/clients",
             require_scope("registry:admin")(admin_handler.handle_create_client),
@@ -2226,6 +2318,10 @@ def create_app(
         app.router.add_get(
             "/admin/audit",
             require_scope("registry:admin")(admin_handler.handle_list_audit),
+        )
+        app.router.add_get(
+            "/admin/security-events",
+            require_scope("registry:admin")(admin_handler.handle_list_security_events),
         )
         app.router.add_delete(
             "/admin/clients/{client_id}",

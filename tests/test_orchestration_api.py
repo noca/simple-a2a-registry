@@ -1582,3 +1582,107 @@ class TestV2BatchDelete:
             data = await resp.json()
             assert data["deleted"] == 0
             assert data["failed"] == []
+
+
+# ===================================================================
+# ProvenanceTracker Integration
+# ===================================================================
+
+
+class TestProvenanceIntegration:
+    """Test that ProvenanceTracker hooks fire during task lifecycle."""
+
+    async def test_create_task_records_provenance(self, api_client):
+        """POST /v2/tasks with assignee should create chain + delegation hop."""
+        async with await api_client() as client:
+            resp = await client.post("/v2/tasks", json={
+                "title": "PT Test",
+                "assignee": "worker-a",
+                "created_by": "user-x",
+            })
+            assert resp.status == 201
+            data = await resp.json()
+            task_id = data["task"]["id"]
+
+        # Verify provenance via GET detail — PT requires security harness
+        # which is off by default in tests, so the provenance field will be absent.
+        # The PT should be None (not crash) when security_harness is disabled.
+        # This test verifies the no-crash path.
+        # For full PT testing we need a separate fixture with config.
+
+    async def test_provenance_with_security_enabled(self, api_client):
+        """POST /v2/tasks → claim → detail with security_harness enabled."""
+        from simple_a2a_registry.config import (
+            Config,
+            DatabaseConfig,
+            SecurityHarnessConfig,
+        )
+
+        tmpdir_obj = tempfile.TemporaryDirectory()
+        try:
+            data_dir = tmpdir_obj.name
+            db_path = f"{data_dir}/registry.db"
+            config = Config(
+                database=DatabaseConfig(driver="sqlite", sqlite_path=db_path),
+                security_harness=SecurityHarnessConfig(enabled=True),
+            )
+            app = create_app(
+                data_dir=data_dir,
+                base_url="http://localhost:8321",
+                config=config,
+                dispatcher_enabled=False,
+            )
+            server = TestServer(app)
+            await server.start_server()
+            client = TestClient(server)
+
+            try:
+                # 1. Create a task with assignee and created_by
+                resp = await client.post("/v2/tasks", json={
+                    "title": "Provenance Task",
+                    "assignee": "agent-beta",
+                    "created_by": "agent-alpha",
+                })
+                assert resp.status == 201
+                data = await resp.json()
+                task_id = data["task"]["id"]
+                assert task_id.startswith("t_")
+
+                # 2. GET detail — should include provenance now
+                detail = await client.get(f"/v2/tasks/{task_id}")
+                assert detail.status == 200
+                detail_data = await detail.json()
+                assert "provenance" in detail_data, (
+                    f"Expected 'provenance' in response, got keys: "
+                    f"{list(detail_data.keys())}"
+                )
+                prov = detail_data["provenance"]
+                assert prov["chain_id"] == task_id
+                assert prov["origin_agent"] == "agent-alpha"
+                assert prov["root_task_id"] == task_id
+                assert len(prov["hops"]) == 1
+                hop = prov["hops"][0]
+                assert hop["from_agent"] == "agent-alpha"
+                assert hop["to_agent"] == "agent-beta"
+                assert hop["action"] == "delegate"
+
+                # 3. Claim the task
+                claim_resp = await client.post(
+                    f"/v2/tasks/{task_id}/claim",
+                    json={"worker_id": "worker-b", "pid": 12345},
+                )
+                assert claim_resp.status == 200
+
+                # 4. GET detail again — claim hop should be recorded
+                detail2 = await client.get(f"/v2/tasks/{task_id}")
+                assert detail2.status == 200
+                detail2_data = await detail2.json()
+                prov2 = detail2_data["provenance"]
+                assert len(prov2["hops"]) == 2
+                assert prov2["hops"][1]["action"] == "claim"
+                assert prov2["hops"][1]["to_agent"] == "worker-b"
+            finally:
+                await client.close()
+                await server.close()
+        finally:
+            tmpdir_obj.cleanup()

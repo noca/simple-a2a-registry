@@ -26,6 +26,8 @@ from aiohttp import web
 
 from simple_a2a_registry.auth import require_scope
 from simple_a2a_registry.orchestration.store import DEFAULT_CLAIM_TTL, TaskStore
+from simple_a2a_registry.security.pt import ProvenanceTracker
+from simple_a2a_registry.security.events import SecurityEventStore, SecurityEventType
 from simple_a2a_registry.orchestration.models import (
     TaskStatus,
     TaskRunStatus,
@@ -101,6 +103,74 @@ def _run_to_dict(run) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Provenance helpers
+# ---------------------------------------------------------------------------
+
+
+def _record_provenance_create(
+    handler: OrchestrationHandler,
+    task,
+    request: web.Request,
+) -> None:
+    """Record a provenance chain + delegation hop after task creation."""
+    if handler.pt is None:
+        return
+    # Use task.created_by when available (explicitly provided in the API call);
+    # fall back to request.agent_id set by auth middleware or "anonymous".
+    caller = task.created_by or request.get("agent_id", "anonymous")
+    origin_tenant = task.tenant or ""
+    # Determine root task ID from parent chain
+    root_task_id = task.id
+    parent_task_id: Optional[str] = None
+    if task.parents:
+        first_parent = task.parents[0]
+        root_task_id = first_parent.get("id", task.id)
+        parent_task_id = first_parent.get("id")
+    handler.pt.ensure_chain(
+        chain_id=task.id,
+        origin_agent=caller,
+        origin_tenant=origin_tenant,
+        root_task_id=root_task_id,
+        parent_task_id=parent_task_id,
+        task_id=task.id,
+    )
+    if task.assignee:
+        token_payload = request.get("token_payload", {})
+        handler.pt.record_hop(
+            chain_id=task.id,
+            from_agent=caller,
+            to_agent=task.assignee,
+            action="delegate",
+            scope_at=request.get("token_scopes", ""),
+            token_jti=token_payload.get("jti", ""),
+        )
+
+
+def _record_provenance_claim(
+    handler: OrchestrationHandler,
+    task_id: str,
+    request: web.Request,
+    worker_id: str,
+) -> None:
+    """Record a provenance hop after a task claim."""
+    if handler.pt is None:
+        return
+    task = handler.store.get_task(task_id)
+    if task is None:
+        return
+    from_agent = task.assignee or "unknown"
+    token_payload = request.get("token_payload", {})
+    handler.pt.record_hop(
+        chain_id=task_id,
+        from_agent=from_agent,
+        to_agent=worker_id,
+        action="claim",
+        scope_at=request.get("token_scopes", ""),
+        token_jti=token_payload.get("jti", ""),
+    )
+
+
+# ---------------------------------------------------------------------------
 # OrchestrationHandler
 # ---------------------------------------------------------------------------
 
@@ -115,6 +185,11 @@ class OrchestrationHandler:
         # Callback for broadcasting events to Admin UI WebSocket clients.
         # Wired up by create_app in server.py.
         self._broadcast_fn = None  # async callable(event_type: str, data: dict)
+        # Security Harness — wired up by create_app in server.py.
+        self.pt: Optional[ProvenanceTracker] = None
+        self.ape: Optional[Any] = None
+        self.dtm: Optional[Any] = None
+        self.event_store: Optional[Any] = None
 
     # ----------------------------------------------------------
     # POST /v2/tasks — Create
@@ -168,6 +243,37 @@ class OrchestrationHandler:
             if "not found" in msg.lower():
                 return _json_error(400, "parent_not_found", msg)
             return _json_error(400, "validation_error", msg)
+
+        # Record provenance for task creation
+        if self.pt is not None:
+            _record_provenance_create(self, task, request)
+
+        # Record security events after task creation
+        if self.event_store is not None:
+            caller = request.get("agent_id", task.created_by or request.remote or "unknown")
+            assignee = body.get("assignee", "")
+            if self.registry_store is not None:
+                caller_agent = self.registry_store.get_agent(caller)
+                if caller_agent is None:
+                    self.event_store.record(
+                        event_type=SecurityEventType.AGENT_NOT_FOUND.value,
+                        actor=caller,
+                        target=assignee or "unknown",
+                        decision="deny",
+                        tenant=task.tenant or "",
+                        reason=f"Caller agent '{caller}' is not registered",
+                        task_id=task.id,
+                    )
+            # Always record an AUTHORIZATION_ALLOWED for successful task creation
+            self.event_store.record(
+                event_type=SecurityEventType.AUTHORIZATION_ALLOWED.value,
+                actor=caller,
+                target=assignee or "unknown",
+                decision="allow",
+                tenant=task.tenant or "",
+                reason="Task created successfully",
+                task_id=task.id,
+            )
 
         # Broadcast to Admin UI WebSocket clients
         if self._broadcast_fn:
@@ -312,13 +418,53 @@ class OrchestrationHandler:
         comments = self.store.get_comments(task_id)
         events = self.store.get_events(task_id)
 
-        return web.json_response({
+        response = {
             "task": _task_to_detail(task),
             "parents": parents,
             "children": children,
             "runs": [_run_to_dict(r) for r in runs],
             "comments": [c.to_dict() for c in comments],
             "events": [e.to_dict() for e in events],
+        }
+
+        # Attach provenance chain if available
+        if self.pt is not None:
+            chain = self.pt.get_chain_by_task(task_id)
+            if chain is not None:
+                response["provenance"] = chain.to_dict()
+
+        return web.json_response(response)
+
+    # ----------------------------------------------------------
+    # GET /v2/tasks/{id}/provenance — Provenance chain
+    # ----------------------------------------------------------
+
+    async def handle_get_provenance(self, request: web.Request) -> web.Response:
+        """GET /v2/tasks/{id}/provenance — return provenance chain for a task.
+
+        Returns::
+
+            {
+                "task_id": "t_xxx",
+                "provenance": { ... } | null
+            }
+        """
+        task_id = request.match_info["id"]
+        # Verify the task exists
+        task = self.store.get_task(task_id)
+        if task is None:
+            return web.json_response({
+                "task_id": task_id,
+                "provenance": None,
+            })
+        provenance = None
+        if self.pt is not None:
+            chain = self.pt.get_chain_by_task(task_id)
+            if chain is not None:
+                provenance = chain.to_dict()
+        return web.json_response({
+            "task_id": task_id,
+            "provenance": provenance,
         })
 
     # ----------------------------------------------------------
@@ -353,6 +499,10 @@ class OrchestrationHandler:
                 409, "claim_conflict",
                 f"Task '{task_id}' is not ready or already claimed",
             )
+
+        # Record provenance for claim
+        if self.pt is not None:
+            _record_provenance_claim(self, task_id, request, worker_id)
 
         # Broadcast to Admin UI WebSocket clients
         if self._broadcast_fn:
@@ -902,6 +1052,8 @@ def register_v2_routes(app: web.Application, handler: OrchestrationHandler) -> N
     app.router.add_post("/v2/tasks/{id}/comment", require_scope("task:write")(handler.handle_add_comment))
     # DELETE /v2/tasks/{id} — archive (task:write)
     app.router.add_delete("/v2/tasks/{id}", require_scope("task:write")(handler.handle_delete_task))
+    # GET /v2/tasks/{id}/provenance — provenance chain (task:read)
+    app.router.add_get("/v2/tasks/{id}/provenance", require_scope("task:read")(handler.handle_get_provenance))
     # POST /v2/tasks/{id}/depend — add dependency (task:write)
     app.router.add_post("/v2/tasks/{id}/depend", require_scope("task:write")(handler.handle_add_dependency))
     # DELETE /v2/tasks/{id}/depend/{parent_id} — remove dependency (task:write)

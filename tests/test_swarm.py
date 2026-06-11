@@ -18,6 +18,10 @@ from simple_a2a_registry.orchestration.swarm import (
     read_blackboard,
     get_swarm_status,
 )
+from simple_a2a_registry.orchestration.blackboard_store import (
+    BlackboardStore,
+    OptimisticLockError,
+)
 from simple_a2a_registry.orchestration.store import TaskStore
 from simple_a2a_registry.orchestration.models import TaskStatus
 from simple_a2a_registry.server import create_app
@@ -409,3 +413,309 @@ class TestSwarmAPI:
                 "synthesizer": {"profile": "s"},
             })
             assert resp.status == 400
+
+
+# ===================================================================
+# Blackboard Store unit tests
+# ===================================================================
+
+
+class TestBlackboardStore:
+    """Tests for BlackboardStore's structured KV API."""
+
+    def _create_root(self, store: TaskStore) -> str:
+        """Helper: create a task to act as swarm root."""
+        task = store.create_task(title="Swarm Root", body="Root")
+        root_id = task.id
+        store.update_task_status(root_id, TaskStatus.RUNNING.value)
+        store.update_task_status(root_id, TaskStatus.COMPLETED.value)
+        return root_id
+
+    def test_write_and_read(self, store: TaskStore) -> None:
+        """Write a value and read it back."""
+        root_id = self._create_root(store)
+        bb = BlackboardStore(store.db_engine)
+
+        # Write
+        result = bb.write(
+            root_id, key="phase1", value={"summary": "GDP at 3%"},
+            created_by="researcher-a",
+        )
+        assert result["key"] == "phase1"
+        assert result["version"] == 1
+
+        # Read
+        entries = bb.read(root_id)
+        assert "phase1" in entries
+        assert entries["phase1"]["value"] == {"summary": "GDP at 3%"}
+        assert entries["phase1"]["version"] == 1
+        assert entries["phase1"]["created_by"] == "researcher-a"
+
+    def test_upsert_increments_version(self, store: TaskStore) -> None:
+        """Overwriting the same key increments version."""
+        root_id = self._create_root(store)
+        bb = BlackboardStore(store.db_engine)
+        bb.write(root_id, key="k", value="v1", created_by="a1")
+        r2 = bb.write(root_id, key="k", value="v2", created_by="a2")
+        assert r2["version"] == 2
+
+        entries = bb.read(root_id)
+        assert entries["k"]["value"] == "v2"
+        assert entries["k"]["version"] == 2
+
+    def test_optimistic_lock_success(self, store: TaskStore) -> None:
+        """CAS succeeds when expected_version matches."""
+        root_id = self._create_root(store)
+        bb = BlackboardStore(store.db_engine)
+        bb.write(root_id, key="k", value="v1", created_by="a")
+        r = bb.write(root_id, key="k", value="v2", created_by="a",
+                      expected_version=1)
+        assert r["version"] == 2
+
+    def test_optimistic_lock_conflict(self, store: TaskStore) -> None:
+        """CAS raises OptimisticLockError on version mismatch."""
+        root_id = self._create_root(store)
+        bb = BlackboardStore(store.db_engine)
+        bb.write(root_id, key="k", value="v1", created_by="a")
+        with pytest.raises(OptimisticLockError, match="version mismatch"):
+            bb.write(root_id, key="k", value="v2", created_by="a",
+                      expected_version=99)
+
+    def test_optimistic_lock_new_key(self, store: TaskStore) -> None:
+        """CAS with expected_version=0 works for new keys."""
+        root_id = self._create_root(store)
+        bb = BlackboardStore(store.db_engine)
+        r = bb.write(root_id, key="new_k", value="v1", created_by="a",
+                      expected_version=0)
+        assert r["version"] == 1
+
+    def test_optimistic_lock_new_key_mismatch(self, store: TaskStore) -> None:
+        """CAS with expected_version>0 on new key raises error."""
+        root_id = self._create_root(store)
+        bb = BlackboardStore(store.db_engine)
+        with pytest.raises(OptimisticLockError, match="does not exist"):
+            bb.write(root_id, key="no_k", value="v1", created_by="a",
+                      expected_version=5)
+
+    def test_delete_existing_key(self, store: TaskStore) -> None:
+        """Delete an existing key returns True."""
+        root_id = self._create_root(store)
+        bb = BlackboardStore(store.db_engine)
+        bb.write(root_id, key="k", value="v", created_by="a")
+        assert bb.delete(root_id, key="k") is True
+        assert bb.read(root_id).get("k") is None
+
+    def test_delete_nonexistent_key(self, store: TaskStore) -> None:
+        """Delete a missing key returns False."""
+        root_id = self._create_root(store)
+        bb = BlackboardStore(store.db_engine)
+        assert bb.delete(root_id, key="nonexistent") is False
+
+    def test_batch_read(self, store: TaskStore) -> None:
+        """Batch read returns only the requested keys."""
+        root_id = self._create_root(store)
+        bb = BlackboardStore(store.db_engine)
+        bb.write(root_id, key="k1", value=1, created_by="a")
+        bb.write(root_id, key="k2", value=2, created_by="a")
+        bb.write(root_id, key="k3", value=3, created_by="a")
+
+        entries = bb.read(root_id, keys=["k1", "k3"])
+        assert "k1" in entries
+        assert "k3" in entries
+        assert "k2" not in entries
+        assert entries["_authors"]["k1"] == "a"
+
+    def test_get_version(self, store: TaskStore) -> None:
+        """get_version returns current version or None."""
+        root_id = self._create_root(store)
+        bb = BlackboardStore(store.db_engine)
+        assert bb.get_version(root_id, "no_key") is None
+        bb.write(root_id, key="k", value="v", created_by="a")
+        assert bb.get_version(root_id, "k") == 1
+
+    def test_read_legacy_compat(self, store: TaskStore) -> None:
+        """read_legacy_compat returns flattened {key: value} + _authors."""
+        root_id = self._create_root(store)
+        bb = BlackboardStore(store.db_engine)
+        bb.write(root_id, key="k1", value="v1", created_by="a")
+        bb.write(root_id, key="k2", value="v2", created_by="b")
+        compat = bb.read_legacy_compat(root_id)
+        assert compat["k1"] == "v1"
+        assert compat["k2"] == "v2"
+        assert compat["_authors"]["k1"] == "a"
+        assert compat["_authors"]["k2"] == "b"
+
+
+# ===================================================================
+# Blackboard v2 API integration tests
+# ===================================================================
+
+
+@pytest.mark.asyncio
+class TestBlackboardV2API:
+    """Tests for the v2 structured blackboard API endpoints."""
+
+    async def _create_root(self, client):
+        """Helper: create a swarm and return its root_id."""
+        r = await client.post("/v2/swarm", json={
+            "goal": "Test blackboard v2",
+            "workers": [{"profile": "w", "title": "W1"}],
+            "verifier": {"profile": "v"},
+            "synthesizer": {"profile": "s"},
+        })
+        data = await r.json()
+        return data["swarm"]["root_id"]
+
+    async def test_write_and_read(self, api_client):
+        """POST /v2/swarm/{root_id}/blackboard then GET reads it back."""
+        async with await api_client() as client:
+            root_id = await self._create_root(client)
+
+            # Write
+            r1 = await client.post(
+                f"/v2/swarm/{root_id}/blackboard",
+                json={"key": "phase1", "value": {"summary": "GDP at 3%"}, "created_by": "researcher"},
+            )
+            assert r1.status == 201
+            data1 = await r1.json()
+            assert data1["key"] == "phase1"
+            assert data1["version"] == 1
+
+            # Read back
+            r2 = await client.get(f"/v2/swarm/{root_id}/blackboard")
+            assert r2.status == 200
+            bb = await r2.json()
+            assert "phase1" in bb
+            assert bb["phase1"]["value"] == {"summary": "GDP at 3%"}
+
+    async def test_write_with_version_tracking(self, api_client):
+        """Version increments on consecutive writes to the same key."""
+        async with await api_client() as client:
+            root_id = await self._create_root(client)
+
+            r1 = await client.post(
+                f"/v2/swarm/{root_id}/blackboard",
+                json={"key": "k", "value": "v1", "created_by": "a"},
+            )
+            v1 = (await r1.json())["version"]
+
+            r2 = await client.post(
+                f"/v2/swarm/{root_id}/blackboard",
+                json={"key": "k", "value": "v2", "created_by": "b"},
+            )
+            v2 = (await r2.json())["version"]
+
+            assert v2 == v1 + 1
+
+    async def test_optimistic_lock_success(self, api_client):
+        """CAS write succeeds when expected_version matches."""
+        async with await api_client() as client:
+            root_id = await self._create_root(client)
+
+            # First write
+            await client.post(
+                f"/v2/swarm/{root_id}/blackboard",
+                json={"key": "k", "value": "v1", "created_by": "a"},
+            )
+
+            # CAS write with correct version
+            r = await client.post(
+                f"/v2/swarm/{root_id}/blackboard",
+                json={"key": "k", "value": "v2", "created_by": "a", "expected_version": 1},
+            )
+            assert r.status == 201
+            assert (await r.json())["version"] == 2
+
+    async def test_optimistic_lock_conflict(self, api_client):
+        """CAS write returns 409 on version mismatch."""
+        async with await api_client() as client:
+            root_id = await self._create_root(client)
+
+            await client.post(
+                f"/v2/swarm/{root_id}/blackboard",
+                json={"key": "k", "value": "v1", "created_by": "a"},
+            )
+
+            r = await client.post(
+                f"/v2/swarm/{root_id}/blackboard",
+                json={"key": "k", "value": "v2", "created_by": "a", "expected_version": 99},
+            )
+            assert r.status == 409
+            data = await r.json()
+            assert "version_conflict" in data.get("error", "")
+
+    async def test_batch_read_with_keys(self, api_client):
+        """GET ?keys=k1,k2 returns only the specified keys."""
+        async with await api_client() as client:
+            root_id = await self._create_root(client)
+
+            # Write 3 keys
+            for k in ["k1", "k2", "k3"]:
+                await client.post(
+                    f"/v2/swarm/{root_id}/blackboard",
+                    json={"key": k, "value": k, "created_by": "a"},
+                )
+
+            # Batch read
+            r = await client.get(f"/v2/swarm/{root_id}/blackboard?keys=k1,k3")
+            assert r.status == 200
+            bb = await r.json()
+            assert "k1" in bb
+            assert "k3" in bb
+            assert "k2" not in bb
+
+    async def test_delete_key(self, api_client):
+        """DELETE removes a key, subsequent GET doesn't include it."""
+        async with await api_client() as client:
+            root_id = await self._create_root(client)
+
+            await client.post(
+                f"/v2/swarm/{root_id}/blackboard",
+                json={"key": "temp", "value": "delete me", "created_by": "a"},
+            )
+
+            # Delete
+            r1 = await client.delete(f"/v2/swarm/{root_id}/blackboard/temp")
+            assert r1.status == 200
+            assert (await r1.json())["deleted"] is True
+
+            # Verify gone
+            r2 = await client.get(f"/v2/swarm/{root_id}/blackboard")
+            bb = await r2.json()
+            assert "temp" not in bb
+
+    async def test_delete_nonexistent_returns_404(self, api_client):
+        """DELETE a nonexistent key returns 404."""
+        async with await api_client() as client:
+            root_id = await self._create_root(client)
+            r = await client.delete(f"/v2/swarm/{root_id}/blackboard/nonexistent")
+            assert r.status == 404
+
+    async def test_write_missing_key(self, api_client):
+        """POST without key returns 400."""
+        async with await api_client() as client:
+            root_id = await self._create_root(client)
+            r = await client.post(
+                f"/v2/swarm/{root_id}/blackboard",
+                json={"value": "no key", "created_by": "a"},
+            )
+            assert r.status == 400
+
+    async def test_write_missing_value(self, api_client):
+        """POST without value returns 400."""
+        async with await api_client() as client:
+            root_id = await self._create_root(client)
+            r = await client.post(
+                f"/v2/swarm/{root_id}/blackboard",
+                json={"key": "k", "created_by": "a"},
+            )
+            assert r.status == 400
+
+    async def test_write_nonexistent_root(self, api_client):
+        """POST to nonexistent root returns 404."""
+        async with await api_client() as client:
+            r = await client.post(
+                "/v2/swarm/t_nonexistent/blackboard",
+                json={"key": "k", "value": "v", "created_by": "a"},
+            )
+            assert r.status == 404
