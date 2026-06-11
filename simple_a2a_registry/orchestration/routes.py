@@ -26,6 +26,9 @@ from aiohttp import web
 
 from simple_a2a_registry.auth import require_scope
 from simple_a2a_registry.orchestration.store import DEFAULT_CLAIM_TTL, TaskStore
+from simple_a2a_registry.security.ape import (
+    AuthorizationPolicyEngine, CallerIdentity, CheckpointResult,
+)
 from simple_a2a_registry.security.pt import ProvenanceTracker
 from simple_a2a_registry.security.events import SecurityEventStore, SecurityEventType
 from simple_a2a_registry.orchestration.models import (
@@ -50,6 +53,35 @@ def _json_error(status: int, error_code: str, detail: str) -> web.Response:
     return web.json_response(
         {"error": error_code, "detail": detail},
         status=status,
+    )
+
+
+def _build_caller_from_request(request: web.Request) -> CallerIdentity:
+    """Extract caller identity from auth middleware metadata on the request."""
+    return CallerIdentity(
+        agent_id=request.get("agent_id", "anonymous"),
+        tenant=request.get("tenant", ""),
+        scope=request.get("token_scopes", ""),
+        token_payload=request.get("token_payload", {}),
+    )
+
+
+def _ape_response_or_403(
+    checkpoint: CheckpointResult,
+    caller: CallerIdentity,
+) -> Optional[web.Response]:
+    """Map an APE CheckpointResult to an HTTP response.
+
+    In enforce mode (allowed=False), return a 403 response.
+    In warn/audit mode (allowed=True), return None so the request continues.
+    Any response_headers (e.g. X-Security-Warning) are attached to the
+    actual response by the caller.
+    """
+    if checkpoint.allowed:
+        return None  # Proceed normally
+    return _json_error(
+        403, "security_denied",
+        checkpoint.reason,
     )
 
 
@@ -219,6 +251,21 @@ class OrchestrationHandler:
             except (ValueError, TypeError):
                 priority = 0
 
+        # ── APE checkpoint: task_create ─────────────────────────────────
+        ape_response_headers: dict = {}
+        if self.ape is not None:
+            caller = _build_caller_from_request(request)
+            checkpoint = await self.ape.check_task_create(
+                caller=caller,
+                task_data=body,
+            )
+            deny_resp = _ape_response_or_403(checkpoint, caller)
+            if deny_resp is not None:
+                return deny_resp
+            # Collect response headers (e.g. X-Security-Warning in warn mode)
+            if checkpoint.response_headers:
+                ape_response_headers.update(checkpoint.response_headers)
+
         parents: Optional[List] = body.get("parents")
 
         try:
@@ -279,10 +326,14 @@ class OrchestrationHandler:
         if self._broadcast_fn:
             await self._broadcast_fn("created", _task_to_detail(task))
 
-        return web.json_response(
+        resp = web.json_response(
             {"task": _task_to_detail(task)},
             status=201,
         )
+        # Inject APE response headers (X-Security-Warning in warn mode)
+        for key, val in ape_response_headers.items():
+            resp.headers[key] = val
+        return resp
 
     # ----------------------------------------------------------
     # PATCH /v2/tasks/{id} — Update metadata
@@ -484,6 +535,22 @@ class OrchestrationHandler:
         pid = body.get("pid", 0)
         ttl = body.get("ttl")  # optional claim TTL override
 
+        # ── APE checkpoint: task_claim ──────────────────────────────────
+        ape_claim_headers: dict = {}
+        if self.ape is not None:
+            caller = _build_caller_from_request(request)
+            delegation_token = body.get("delegation_token")
+            checkpoint = await self.ape.check_task_claim(
+                caller=caller,
+                task_id=task_id,
+                delegation_token_str=delegation_token,
+            )
+            deny_resp = _ape_response_or_403(checkpoint, caller)
+            if deny_resp is not None:
+                return deny_resp
+            if checkpoint.response_headers:
+                ape_claim_headers.update(checkpoint.response_headers)
+
         result = self.store.claim_task(
             task_id, worker_id, pid,
             ttl=ttl if ttl is not None else DEFAULT_CLAIM_TTL,
@@ -510,7 +577,10 @@ class OrchestrationHandler:
             if task_data:
                 await self._broadcast_fn("status_changed", _task_to_detail(task_data))
 
-        return web.json_response(result)
+        resp = web.json_response(result)
+        for key, val in ape_claim_headers.items():
+            resp.headers[key] = val
+        return resp
 
     # ----------------------------------------------------------
     # POST /v2/tasks/{id}/complete
@@ -529,6 +599,21 @@ class OrchestrationHandler:
         summary = body.get("summary")
         result = body.get("result")
         metadata = body.get("metadata")
+
+        # ── APE checkpoint: task_complete ──────────────────────────────
+        ape_complete_headers: dict = {}
+        if self.ape is not None:
+            caller = _build_caller_from_request(request)
+            checkpoint = await self.ape.check_task_complete(
+                caller=caller,
+                task_id=task_id,
+                claim_lock=claim_lock,
+            )
+            deny_resp = _ape_response_or_403(checkpoint, caller)
+            if deny_resp is not None:
+                return deny_resp
+            if checkpoint.response_headers:
+                ape_complete_headers.update(checkpoint.response_headers)
 
         # Serialize result if it's a dict/object
         result_str: Optional[str] = None
@@ -562,10 +647,13 @@ class OrchestrationHandler:
             if task_data:
                 await self._broadcast_fn("status_changed", _task_to_detail(task_data))
 
-        return web.json_response({
+        resp = web.json_response({
             "task_id": task_id,
             "status": TaskStatus.COMPLETED.value,
         })
+        for key, val in ape_complete_headers.items():
+            resp.headers[key] = val
+        return resp
 
     # ----------------------------------------------------------
     # POST /v2/tasks/{id}/block
