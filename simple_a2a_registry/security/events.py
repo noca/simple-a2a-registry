@@ -5,6 +5,7 @@ that is persisted in the ``security_events`` table and queryable via API.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -142,11 +143,16 @@ CREATE INDEX idx_sec_events_actor ON security_events(actor, created_at);
 
 
 class SecurityEventStore:
-    """Persistent store for SecurityEvents, sharing the TaskStore's engine."""
+    """Persistent store for SecurityEvents, sharing the TaskStore's engine.
 
-    def __init__(self, engine: DatabaseEngine) -> None:
+    When *event_bus* is provided, security events are also published to the
+    EventBus for real-time SSE streaming to consumers.
+    """
+
+    def __init__(self, engine: DatabaseEngine, event_bus: Any = None) -> None:
         self._engine = engine
         self._lock = threading.RLock()
+        self._event_bus = event_bus
 
     def ensure_schema(self) -> None:
         """Create the security_events table if it doesn't exist."""
@@ -207,6 +213,20 @@ class SecurityEventStore:
                 ),
             )
             self._engine.commit()
+
+        # Publish to EventBus (non-blocking — fire-and-forget via ensure_future)
+        if self._event_bus is not None:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self._event_bus.publish(
+                        event_type=f"security.{event_type.lower()}",
+                        data=event.to_dict(),
+                        tenant=tenant,
+                    ))
+            except RuntimeError:
+                pass
+
         return event
 
     def list_by_task(

@@ -32,6 +32,13 @@ from simple_a2a_registry.metrics import (
     update_db_pool_size,
 )
 from simple_a2a_registry.rate_limiter import rate_limit_middleware_factory
+from simple_a2a_registry.health import (
+    HealthChecker,
+    make_db_probe,
+    make_liveness_handler,
+    make_readiness_handler,
+    make_startup_handler,
+)
 from simple_a2a_registry.models import make_agent_card, make_agent_skill
 from simple_a2a_registry.validation import (
     validate_agent_card,
@@ -87,6 +94,7 @@ from simple_a2a_registry.security import (
     ProvenanceTracker,
     SecurityEventStore,
 )
+from simple_a2a_registry.events import EventBus, SSEEventHandler, EventTypes
 from simple_a2a_registry.registry_handler import (
     WSContext,
     create_default_router,
@@ -1966,6 +1974,24 @@ def create_app(
     store = Store(_shared_engine if _shared_engine is not None else data_dir, bootstrap_secret=bootstrap_secret)
     handler = RegistryHandler(store, base_url, audit_store=audit_store)
 
+    # ------------------------------------------------------------------
+    # Health checker — liveness / readiness / startup probes
+    # ------------------------------------------------------------------
+    health_checker = HealthChecker(
+        version=REGISTRY_VERSION,
+        started_at=time.time(),
+    )
+
+    # DB ping probe (shared for readiness + startup)
+    if _shared_engine is not None:
+        db_probe = make_db_probe(lambda: _shared_engine.ping() if hasattr(_shared_engine, 'ping') else True)
+    else:
+        db_probe = make_db_probe(lambda: _legacy_engine.ping() if hasattr(_legacy_engine, 'ping') else True)
+
+    health_checker.add_liveness_probe(db_probe)
+    health_checker.add_readiness_probe(db_probe)
+    health_checker.add_startup_probe(db_probe)
+
     # OAuth 2.1 Authentication — generate keys EARLY so UserHandler can create Bearer tokens on login
     # Generate RSA key pair at startup (RS256 primary, HS256 dev fallback)
     if auth_enabled:
@@ -2050,6 +2076,30 @@ def create_app(
     handler._broadcast_progress_fn = _broadcast_agent_progress
     logger.info("RegistryHandler agent progress callback wired to AdminWSHub")
 
+    # ── P3-B: EventBus + SSE Push ─────────────────────────────────────────
+    event_bus = EventBus()
+    sse_handler = SSEEventHandler(event_bus)
+
+    # Wire both AdminWSHub and EventBus into the broadcast bridge
+    async def _event_bus_bridge(event_type: str, data: dict) -> None:
+        """Publish events to AdminWSHub AND EventBus simultaneously."""
+        # AdminWSHub (WebSocket)
+        task_id = data.get("id", "")
+        await admin_ws_hub.broadcast_task_update(task_id, event_type, data)
+        # EventBus (SSE consumers)
+        await event_bus.publish(f"task.{event_type}", data)
+
+    # Replace the old broadcast callback with the dual bridge
+    orch_handler._broadcast_fn = _event_bus_bridge
+    logger.info("OrchestrationHandler broadcast → AdminWSHub + EventBus wired")
+
+    # Also wire SwarmHandler broadcast (will be created later)
+    # Stored on app for later wiring.
+
+    logger.info(
+        "EventBus initialised with SSE handler at GET /v2/events",
+    )
+
     # P2.4: Anomaly Scanner — background orphan/timeout detection every 60s
     anomaly_scanner = AnomalyScanner(
         task_store=task_store,
@@ -2084,7 +2134,7 @@ def create_app(
     dtm: Optional[DelegatedTokenManager] = None
     _engine = _shared_engine if _shared_engine else task_store._engine
     if config is not None and hasattr(config, 'security_harness') and config.security_harness.enabled:
-        event_store = SecurityEventStore(_engine)
+        event_store = SecurityEventStore(_engine, event_bus=event_bus)
         event_store.ensure_schema()
         orch_handler.event_store = event_store
         pt_tracker = ProvenanceTracker(_engine)
@@ -2159,7 +2209,9 @@ def create_app(
     app["admin_ws_hub"] = admin_ws_hub
     app["anomaly_scanner"] = anomaly_scanner
     app["sla_calculator"] = sla_calculator
-    app['sla_updater'] = sla_updater
+    app["sla_updater"] = sla_updater
+    app["event_bus"] = event_bus
+    app["sse_handler"] = sse_handler
 
     # Wire security harness stores onto app (set only when security_harness enabled)
     if event_store is not None:
@@ -2204,7 +2256,10 @@ def create_app(
     app.on_cleanup.append(_close_client_session)
 
     # Health / well-known
-    app.router.add_get("/health", handler.handle_health)
+    # Kubernetes-style health probes via HealthChecker
+    app.router.add_get("/health", make_liveness_handler(health_checker))
+    app.router.add_get("/health/ready", make_readiness_handler(health_checker))
+    app.router.add_get("/health/startup", make_startup_handler(health_checker))
     app.router.add_get("/.well-known/agent-card.json", handler.handle_well_known)
 
     # Prometheus metrics endpoint (conditional on config)
@@ -2312,11 +2367,15 @@ def create_app(
     swarm_handler = SwarmHandler(task_store)
     register_swarm_routes(app, swarm_handler)
     app["swarm_handler"] = swarm_handler
-    # Wire SwarmHandler broadcast callback to AdminWSHub (shares the same bridge)
-    swarm_handler._broadcast_fn = _broadcast_task_event
+    # Wire SwarmHandler broadcast callback to AdminWSHub + EventBus (shares the same bridge)
+    swarm_handler._broadcast_fn = _event_bus_bridge
 
     # Admin WebSocket — real-time task updates via AdminWSHub
     app.router.add_get("/v2/ws/admin", admin_ws_hub.register)
+
+    # SSE endpoint — real-time event stream via EventBus
+    app.router.add_get("/v2/events", sse_handler.handle_sse_stream)
+    logger.info("SSE endpoint registered: GET /v2/events")
 
     # OAuth 2.1 Token / Registration endpoints (always registered, public)
     app.router.add_post("/auth/token", auth_handler.handle_token)
