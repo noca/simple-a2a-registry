@@ -55,6 +55,41 @@ from simple_a2a_registry.orchestration.sla import (
     SlaSnapshot,
     WindowStat,
 )
+from simple_a2a_registry.orchestration.memory import (
+    AgentMemoryStore,
+    _maybe_create_memory_schema,
+)
+from simple_a2a_registry.orchestration.memory_routes import (
+    MemoryHandler,
+    register_memory_routes,
+)
+from simple_a2a_registry.orchestration.blackboard_store import (
+    BlackboardStore,
+    OptimisticLockError,
+    KeyNotFoundError,
+)
+from simple_a2a_registry.orchestration.cron import (
+    CronTask,
+    CronExecution,
+    CronTaskStore,
+    CronScheduler,
+    _maybe_create_schema as _maybe_create_cron_schema,
+)
+from simple_a2a_registry.orchestration.cron_routes import (
+    CronHandler,
+    register_cron_routes,
+)
+from simple_a2a_registry.orchestration.workflow_routes import (
+    WorkflowHandler,
+    register_workflow_routes,
+)
+from simple_a2a_registry.orchestration.shared_workspace import (
+    SharedWorkspaceManager,
+)
+from simple_a2a_registry.orchestration.shared_workspace_routes import (
+    SharedWorkspaceHandler,
+    register_shared_workspace_routes,
+)
 
 __all__ = [
     "Task",
@@ -92,4 +127,28 @@ __all__ = [
     "get_swarm_status",
     "SwarmHandler",
     "register_swarm_routes",
+    # P0-A: Agent Memory
+    "AgentMemoryStore",
+    "_maybe_create_memory_schema",
+    "MemoryHandler",
+    "register_memory_routes",
+    # P2-F: Blackboard Store
+    "BlackboardStore",
+    "OptimisticLockError",
+    "KeyNotFoundError",
+    # P2-F: Cron Scheduler
+    "CronTask",
+    "CronExecution",
+    "CronTaskStore",
+    "CronScheduler",
+    "_maybe_create_cron_schema",
+    "CronHandler",
+    "register_cron_routes",
+    # P2-F: Workflow
+    "WorkflowHandler",
+    "register_workflow_routes",
+    # P2-F: Shared Workspace
+    "SharedWorkspaceManager",
+    "SharedWorkspaceHandler",
+    "register_shared_workspace_routes",
 ]

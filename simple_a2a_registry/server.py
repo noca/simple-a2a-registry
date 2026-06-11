@@ -80,6 +80,10 @@ from simple_a2a_registry.orchestration import (
     SlaUpdater,
 )
 from simple_a2a_registry.ws_admin import AdminWSHub
+from simple_a2a_registry.security import (
+    ProvenanceTracker,
+    SecurityEventStore,
+)
 from simple_a2a_registry.registry_handler import (
     WSContext,
     create_default_router,
@@ -1983,6 +1987,19 @@ def create_app(
     handler.task_store = task_store
     if dispatcher:
         handler._dispatched_ws_tasks = dispatcher._dispatched_ws_tasks
+
+    # Security Events — P0 security audit event store + ProvenanceTracker — P1 task delegation chain tracking
+    event_store: Optional[SecurityEventStore] = None
+    pt_tracker: Optional[ProvenanceTracker] = None
+    _engine = _shared_engine if _shared_engine else task_store._engine
+    if config is not None and hasattr(config, 'security_harness') and config.security_harness.enabled:
+        event_store = SecurityEventStore(_engine)
+        event_store.ensure_schema()
+        orch_handler.event_store = event_store
+        pt_tracker = ProvenanceTracker(_engine)
+        pt_tracker.ensure_schema()
+        orch_handler.pt = pt_tracker
+        logger.info("Security harness initialised: event_store + ProvenanceTracker wired to OrchestrationHandler")
 
     app = web.Application(middlewares=[
         cors_middleware_factory(
