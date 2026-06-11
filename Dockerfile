@@ -90,8 +90,8 @@ COPY migrations/ migrations/
 # Copy pre-built frontend assets
 COPY --from=frontend-build /build/data/web ./data/web
 
-# Data directory for runtime persistence
-RUN mkdir -p /app/data && chown -R a2a:a2a /app/data
+# Fix ownership for non-root user
+RUN mkdir -p /app/data && chown -R a2a:a2a /app
 
 # Health check (Kubernetes-friendly)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
