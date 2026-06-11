@@ -31,6 +31,7 @@ from simple_a2a_registry.orchestration.models import (
     TaskRunStatus,
 )
 from simple_a2a_registry.orchestration.store import TaskStore
+from simple_a2a_registry.orchestration.memory import AgentMemoryStore
 from simple_a2a_registry.orchestration.workspace import (
     WorkspaceManager,
     WorkspaceAllocationError,
@@ -119,8 +120,10 @@ class Dispatcher:
         registry_store: Optional[Any] = None,
         http_session: Optional[aiohttp.ClientSession] = None,
         flow_control: Optional[FlowController] = None,
+        memory_store: Optional[AgentMemoryStore] = None,
     ) -> None:
         self.store = store
+        self.memory_store = memory_store
         self.ws_mgr = workspace_manager
         self.config = config or DispatcherConfig()
         self.ws_connections = ws_connections
@@ -224,6 +227,18 @@ class Dispatcher:
             stats["tasks_claimed"] = claimed
         except Exception:
             logger.exception("Claim+spawn step failed")
+
+        # 4. Memory TTL Purge — clean expired memory entries
+        if self.memory_store is not None:
+            try:
+                purged = self.memory_store.purge_expired()
+                if purged:
+                    logger.info("Memory purge: %d expired entr(y/ies) removed", purged)
+                stats["memory_purged"] = purged
+            except Exception:
+                logger.exception("Memory TTL purge step failed")
+        else:
+            stats["memory_purged"] = 0
 
         stats["flow_blocked"] = self._flow_blocked_count
 

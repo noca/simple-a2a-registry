@@ -81,6 +81,9 @@ from simple_a2a_registry.orchestration import (
 )
 from simple_a2a_registry.ws_admin import AdminWSHub
 from simple_a2a_registry.security import (
+    APEConfig,
+    AuthorizationPolicyEngine,
+    DelegatedTokenManager,
     ProvenanceTracker,
     SecurityEventStore,
 )
@@ -2078,6 +2081,7 @@ def create_app(
     # Security Events — P0 security audit event store + ProvenanceTracker — P1 task delegation chain tracking
     event_store: Optional[SecurityEventStore] = None
     pt_tracker: Optional[ProvenanceTracker] = None
+    dtm: Optional[DelegatedTokenManager] = None
     _engine = _shared_engine if _shared_engine else task_store._engine
     if config is not None and hasattr(config, 'security_harness') and config.security_harness.enabled:
         event_store = SecurityEventStore(_engine)
@@ -2086,7 +2090,32 @@ def create_app(
         pt_tracker = ProvenanceTracker(_engine)
         pt_tracker.ensure_schema()
         orch_handler.pt = pt_tracker
-        logger.info("Security harness initialised: event_store + ProvenanceTracker wired to OrchestrationHandler")
+
+        # DTM — delegated token manager (warn mode uses it via APE check_task_claim)
+        dtm = DelegatedTokenManager(
+            _engine, private_key, public_key,
+            default_ttl=config.security_harness.delegation_token_ttl_seconds,
+            max_depth=config.security_harness.max_delegation_depth,
+        )
+        dtm.ensure_schema()
+
+        # APE — Authorization Policy Engine (3-phase: audit → warn → enforce)
+        ape = AuthorizationPolicyEngine(
+            config=APEConfig(
+                mode=config.security_harness.mode,
+                default_delegation_policy=config.security_harness.default_delegation_policy,
+                max_delegation_depth=config.security_harness.max_delegation_depth,
+            ),
+            dtm=dtm,
+            event_store=event_store,
+            registry_store=store,
+            task_store=task_store,
+        )
+        orch_handler.ape = ape
+        logger.info(
+            "Security harness initialised: event_store + PT + DTM + APE (mode=%s) wired to OrchestrationHandler",
+            config.security_harness.mode,
+        )
 
     app = web.Application(middlewares=[
         cors_middleware_factory(

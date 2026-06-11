@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
-  Card, Table, Button, Modal, Form, Input, Select, Space, Tag, Typography, Spin, message, Empty, InputNumber,
+  Card, Table, Button, Modal, Form, Select, Space, Tag, Typography, Spin, message, Empty, InputNumber,
 } from 'antd';
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, CloseOutlined } from '@ant-design/icons';
 import { delegationAPI, agentAPI } from '../api/client';
