@@ -289,7 +289,7 @@ const TaskDetailPanel: React.FC<TaskDetailPanelProps> = ({
               <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>优先级</div>
               <div style={{ fontSize: 18, fontWeight: 600 }}>
                 <Tag color={displayTask.priority == null ? 'default' :
-                  Number(displayTask.priority) > 5 ? 'red' : Number(displayTask.priority) > 0 ? 'orange' : 'default'
+                  Number(displayTask.priority ?? 0) > 5 ? 'red' : Number(displayTask.priority ?? 0) > 0 ? 'orange' : 'default'
                 }>
                   {displayTask.priority ?? 0}
                 </Tag>

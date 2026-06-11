@@ -7,6 +7,7 @@ Provides:
 - ``request_id_middleware`` — ``aiohttp`` middleware that injects ``request_id``.
 - ``setup_logging()`` — one-call logger configuration from ``Config``.
 - ``log_key_event()`` — structured logging for high-value events.
+- Log rotation (size-based or time-based via RotatingFileHandler).
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import sys
 import traceback
 from contextvars import ContextVar
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
 import time as _time_mod
 from typing import Any, Dict, Optional
@@ -135,6 +137,11 @@ def setup_logging(
     output: str = "stdout",
     log_file: Optional[str] = None,
     suppress_noisy: bool = True,
+    log_rotation: str = "size",       # "size" | "time" | "none"
+    log_max_bytes: int = 100 * 1024 * 1024,  # 100 MB per file
+    log_backup_count: int = 7,
+    log_when: str = "midnight",       # for TimedRotatingFileHandler
+    log_interval: int = 1,
 ) -> None:
     """Configure the root logger from config values.
 
@@ -145,6 +152,13 @@ def setup_logging(
         log_file:   Optional file path for log output.  ``None`` = stderr.
         suppress_noisy: If ``True``, quietens verbose third-party loggers
             (aiohttp.access, asyncio, PIL, etc.).
+        log_rotation: Rotation strategy — ``"size"`` (size-based, default),
+            ``"time"`` (time-based), or ``"none"`` (no rotation).
+        log_max_bytes: Max file size in bytes before rotation (size-based).
+        log_backup_count: Number of rotated backup files to keep.
+        log_when: Time-based rotation interval (``"midnight"``, ``"H"``,
+            ``"D"``, ``"W0"``, etc.).
+        log_interval: Number of ``when`` units between rotations.
 
     The function is idempotent — calling it more than once is safe.
     """
@@ -165,10 +179,24 @@ def setup_logging(
     root.handlers.clear()
 
     if log_file:
-        handler: logging.Handler = logging.FileHandler(
-            str(Path(log_file).expanduser()),
-            encoding="utf-8",
-        )
+        log_path = str(Path(log_file).expanduser())
+        if log_rotation == "size":
+            handler: logging.Handler = RotatingFileHandler(
+                log_path,
+                maxBytes=log_max_bytes,
+                backupCount=log_backup_count,
+                encoding="utf-8",
+            )
+        elif log_rotation == "time":
+            handler = TimedRotatingFileHandler(
+                log_path,
+                when=log_when,
+                interval=log_interval,
+                backupCount=log_backup_count,
+                encoding="utf-8",
+            )
+        else:
+            handler = logging.FileHandler(log_path, encoding="utf-8")
     elif output == "stdout":
         handler = logging.StreamHandler(sys.stdout)
     else:

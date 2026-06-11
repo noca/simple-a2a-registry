@@ -1,0 +1,88 @@
+# =============================================================================
+# docker-compose.yml — Simple A2A Registry (production stack)
+#
+# Services:
+#   registry    — A2A Registry HTTP server (API + Admin UI)
+#   mysql       — MySQL 8 database for production persistence
+#
+# Usage: docker compose up -d
+# Optional: docker compose up -d --scale registry=3  (horizontal scale)
+# =============================================================================
+
+version: "3.8"
+
+services:
+  # ---------------------------------------------------------------------------
+  # MySQL — production database
+  # ---------------------------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: a2a-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${SIMPLE_A2A_REGISTRY_MYSQL_ROOT_PASSWORD:-a2a_root_secret}
+      MYSQL_DATABASE: ${SIMPLE_A2A_REGISTRY_MYSQL_DATABASE:-a2a_registry}
+      MYSQL_USER: ${SIMPLE_A2A_REGISTRY_MYSQL_USER:-a2a}
+      MYSQL_PASSWORD: ${SIMPLE_A2A_REGISTRY_MYSQL_PASSWORD:-a2a_password}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "127.0.0.1:3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - a2a-net
+
+  # ---------------------------------------------------------------------------
+  # Registry — A2A Registry server (API + Admin UI)
+  # ---------------------------------------------------------------------------
+  registry:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: simple-a2a-registry:latest
+    container_name: a2a-registry
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      # Logging
+      SIMPLE_A2A_REGISTRY_LOG_LEVEL: ${SIMPLE_A2A_REGISTRY_LOG_LEVEL:-INFO}
+      SIMPLE_A2A_REGISTRY_LOG_FORMAT: ${SIMPLE_A2A_REGISTRY_LOG_FORMAT:-json}
+      # Auth
+      SIMPLE_A2A_REGISTRY_AUTH_ENABLED: ${SIMPLE_A2A_REGISTRY_AUTH_ENABLED:-true}
+      SIMPLE_A2A_REGISTRY_BOOTSTRAP_SECRET: ${SIMPLE_A2A_REGISTRY_BOOTSTRAP_SECRET:-admin123}
+      # Database — MySQL connection via Docker DNS
+      SIMPLE_A2A_REGISTRY_DATABASE_URL: ${SIMPLE_A2A_REGISTRY_DATABASE_URL:-mysql+pymysql://a2a:a2a_password@mysql:3306/a2a_registry}
+      # Operation mode
+      SIMPLE_A2A_REGISTRY_MODE: ${SIMPLE_A2A_REGISTRY_MODE:-enforce}
+    ports:
+      - "8321:8321"
+    volumes:
+      - registry_data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; r=urllib.request.urlopen('http://localhost:8321/health', timeout=5); exit(0 if r.status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - a2a-net
+    # Graceful shutdown: send SIGTERM, wait up to 30s
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
+
+volumes:
+  mysql_data:
+    driver: local
+  registry_data:
+    driver: local
+
+networks:
+  a2a-net:
+    driver: bridge
