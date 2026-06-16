@@ -1,13 +1,24 @@
-"""Shared fixtures for benchmarks: real TaskStore, WorkspaceManager, Dispatcher."""
+"""Shared fixtures for benchmarks: real TaskStore, WorkspaceManager, Dispatcher.
 
+Also ensures pytest-benchmark plugin is available (installed in user site).
+"""
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Generator
 
 import pytest
+
+# pytest-benchmark is installed in the user site-packages, not the venv
+_user_site = "/home/xiaoyunpeng/.hermes/profiles/coder/home/.local/lib/python3.11/site-packages"
+if _user_site not in sys.path:
+    sys.path.insert(0, _user_site)
+
+# Register pytest-benchmark plugin explicitly
+pytest_plugins = ["pytest_benchmark.plugin"]
 
 from simple_a2a_registry.orchestration.store import TaskStore, DEFAULT_CLAIM_TTL
 from simple_a2a_registry.orchestration.workspace import WorkspaceManager
@@ -73,4 +84,3 @@ def claiming_dispatcher(
         worker_command="echo",
     )
     return Dispatcher(store, ws_mgr, config)
-

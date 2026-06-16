@@ -103,6 +103,15 @@ class AuditConfig:
 
 
 @dataclass
+class SecurityHarnessConfig:
+    enabled: bool = False
+    mode: str = "warn"
+    default_delegation_policy: str = "open"
+    delegation_token_ttl_seconds: int = 300
+    max_delegation_depth: int = 10
+
+
+@dataclass
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
@@ -112,6 +121,7 @@ class Config:
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
+    security_harness: SecurityHarnessConfig = field(default_factory=SecurityHarnessConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +218,7 @@ def _dict_to_config(d: Dict[str, Any], cfg: Config) -> Config:
         "monitoring": cfg.monitoring,
         "rate_limit": cfg.rate_limit,
         "audit": cfg.audit,
+        "security_harness": cfg.security_harness,
     }
 
     for section_name, section_data in d.items():

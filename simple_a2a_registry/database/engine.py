@@ -175,7 +175,10 @@ class SQLiteEngine(DatabaseEngine):
     """
 
     def __init__(self, db_path: str) -> None:
-        self._db_path = str(Path(db_path).expanduser().resolve())
+        if db_path == ":memory:":
+            self._db_path = ":memory:"
+        else:
+            self._db_path = str(Path(db_path).expanduser().resolve())
         self._conn: Optional[Connection] = None
         self._engine: Optional[_SAEngine] = None
 

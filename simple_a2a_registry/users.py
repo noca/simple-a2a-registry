@@ -461,6 +461,9 @@ def user_session_middleware_factory(
     def _is_public(path: str) -> bool:
         if path in PUBLIC_PATHS:
             return True
+        # /health, /health/ready, /health/startup — all Kubernetes probes are public
+        if path.startswith("/health"):
+            return True
         if path.startswith("/.well-known/"):
             return True
         if path.startswith("/auth/"):

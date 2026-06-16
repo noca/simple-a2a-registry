@@ -14,13 +14,14 @@
  */
 import React, { useEffect, useState } from 'react';
 import {
-  Drawer, Descriptions, Tag, Progress, Spin, Typography, Space,
+  Drawer, Descriptions, Tag, Progress, Spin, Typography, Space, Tabs,
 } from 'antd';
 import {
   ClockCircleOutlined, DatabaseOutlined, NumberOutlined, UserOutlined,
 } from '@ant-design/icons';
 import StatusTag from './StatusTag';
 import TaskTimeline from './TaskTimeline';
+import ProvenanceTab from './ProvenanceTab';
 import { taskAPI } from '../api/client';
 import type { Task, TaskProgressInfo } from '../hooks/useWebSocket';
 
@@ -287,8 +288,8 @@ const TaskDetailPanel: React.FC<TaskDetailPanelProps> = ({
             <div className="stat-card" style={{ padding: '12px 16px' }}>
               <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>优先级</div>
               <div style={{ fontSize: 18, fontWeight: 600 }}>
-                <Tag color={displayTask.priority === undefined ? 'default' :
-                  displayTask.priority > 5 ? 'red' : displayTask.priority > 0 ? 'orange' : 'default'
+                <Tag color={displayTask.priority == null ? 'default' :
+                  Number(displayTask.priority ?? 0) > 5 ? 'red' : Number(displayTask.priority ?? 0) > 0 ? 'orange' : 'default'
                 }>
                   {displayTask.priority ?? 0}
                 </Tag>
@@ -331,43 +332,63 @@ const TaskDetailPanel: React.FC<TaskDetailPanelProps> = ({
             </div>
           )}
 
-          {/* ── 时间线：任务状态变迁 ── */}
+          {/* ── Tabs: Timeline / Provenance / Comments ── */}
           <div style={{ marginTop: 20 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-              📋 任务时间线
-              <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontWeight: 400 }}>
-                ({detailEvents.length} 个事件)
-              </span>
-            </div>
-            {detailEvents.length === 0 ? (
-              <div style={{ color: 'var(--text-tertiary)', fontSize: 12, padding: '12px 0' }}>
-                暂无事件记录
-              </div>
-            ) : (
-              <TaskTimeline events={detailEvents} />
-            )}
+            <Tabs
+              defaultActiveKey="timeline"
+              items={[
+                {
+                  key: 'timeline',
+                  label: (
+                    <span>
+                      📋 任务时间线
+                      <span style={{ fontSize: 11, color: 'var(--text-secondary)', marginLeft: 6, fontWeight: 400 }}>
+                        ({detailEvents.length} 个事件)
+                      </span>
+                    </span>
+                  ),
+                  children: detailEvents.length === 0 ? (
+                    <div style={{ color: 'var(--text-tertiary)', fontSize: 12, padding: '12px 0' }}>
+                      暂无事件记录
+                    </div>
+                  ) : (
+                    <TaskTimeline events={detailEvents} />
+                  ),
+                },
+                {
+                  key: 'provenance',
+                  label: (
+                    <span>
+                      🔗 溯源链
+                    </span>
+                  ),
+                  children: <ProvenanceTab taskId={displayTask.id} />,
+                },
+                ...(detailComments.length > 0
+                  ? [{
+                      key: 'comments',
+                      label: (
+                        <span>
+                          💬 评论 ({detailComments.length})
+                        </span>
+                      ),
+                      children: detailComments.map((c: any) => (
+                        <div key={c.id} style={{
+                          padding: '8px 12px', marginBottom: 8,
+                          background: 'var(--bg-secondary)', borderRadius: 6,
+                        }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 4 }}>
+                            <Text strong style={{ fontSize: 11 }}>{c.author || 'anonymous'}</Text>
+                            <span>{formatTime(c.created_at)}</span>
+                          </div>
+                          <div style={{ fontSize: 13, whiteSpace: 'pre-wrap' }}>{c.body}</div>
+                        </div>
+                      )),
+                    }]
+                  : []),
+              ]}
+            />
           </div>
-
-          {/* ── 评论 ── */}
-          {detailComments.length > 0 && (
-            <div style={{ marginTop: 20 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>
-                💬 评论 ({detailComments.length})
-              </div>
-              {detailComments.map((c: any) => (
-                <div key={c.id} style={{
-                  padding: '8px 12px', marginBottom: 8,
-                  background: 'var(--bg-secondary)', borderRadius: 6,
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 4 }}>
-                    <Text strong style={{ fontSize: 11 }}>{c.author || 'anonymous'}</Text>
-                    <span>{formatTime(c.created_at)}</span>
-                  </div>
-                  <div style={{ fontSize: 13, whiteSpace: 'pre-wrap' }}>{c.body}</div>
-                </div>
-              ))}
-            </div>
-          )}
         </>
       )}
     </Drawer>

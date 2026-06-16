@@ -12,6 +12,8 @@ const navItems = [
   { key: 'clients', icon: '🔑', label: 'Clients' },
   { key: 'audit', icon: '📝', label: 'Audit Log' },
   { key: 'settings', icon: '⚙️', label: 'Settings' },
+  { key: 'security-events', icon: '🔒', label: 'Security Events' },
+  { key: 'authorizations', icon: '🔐', label: '授权管理' },
   { key: 'users', icon: '👥', label: 'Users' },
 ];
 

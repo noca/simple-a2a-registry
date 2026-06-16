@@ -1,0 +1,56 @@
+# =============================================================================
+# .dockerignore — files excluded from Docker build context
+# =============================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Node / frontend
+a2a-admin/node_modules/
+a2a-admin/dist/
+
+# Git
+.git/
+.gitignore
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Data (mounted at runtime)
+data/
+
+# Tests (not needed in production image)
+tests/
+.pytest_cache/
+*.db
+*.db-wal
+*.db-shm
+
+# Docs
+docs/
+
+# Hermes
+.hermes/
+
+# Secrets / config
+**/.env
+*.yaml
+!docker-compose.yml
+!pyproject.toml
+config.yaml
+
+# OS
+Thumbs.db
+Desktop.ini

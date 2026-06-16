@@ -31,9 +31,15 @@ from simple_a2a_registry.orchestration.models import (
     TaskRunStatus,
 )
 from simple_a2a_registry.orchestration.store import TaskStore
+from simple_a2a_registry.orchestration.memory import AgentMemoryStore
 from simple_a2a_registry.orchestration.workspace import (
     WorkspaceManager,
     WorkspaceAllocationError,
+)
+from simple_a2a_registry.orchestration.envelope import (
+    build_envelope,
+    check_ingress_security_fence,
+    InteractionMode,
 )
 
 logger = logging.getLogger("a2a_registry.orchestration.dispatcher")
@@ -119,8 +125,10 @@ class Dispatcher:
         registry_store: Optional[Any] = None,
         http_session: Optional[aiohttp.ClientSession] = None,
         flow_control: Optional[FlowController] = None,
+        memory_store: Optional[AgentMemoryStore] = None,
     ) -> None:
         self.store = store
+        self.memory_store = memory_store
         self.ws_mgr = workspace_manager
         self.config = config or DispatcherConfig()
         self.ws_connections = ws_connections
@@ -224,6 +232,18 @@ class Dispatcher:
             stats["tasks_claimed"] = claimed
         except Exception:
             logger.exception("Claim+spawn step failed")
+
+        # 4. Memory TTL Purge — clean expired memory entries
+        if self.memory_store is not None:
+            try:
+                purged = self.memory_store.purge_expired()
+                if purged:
+                    logger.info("Memory purge: %d expired entr(y/ies) removed", purged)
+                stats["memory_purged"] = purged
+            except Exception:
+                logger.exception("Memory TTL purge step failed")
+        else:
+            stats["memory_purged"] = 0
 
         stats["flow_blocked"] = self._flow_blocked_count
 
@@ -412,22 +432,33 @@ class Dispatcher:
             )
             return 0
 
-        task_msg = {
-            "type": "task",
-            "id": task.id,
-            "title": task.title,
-            "body": task.body or "",
-            "assignee": assignee,
-            "priority": task.priority,
-            "workspace_path": ws_path,
-            "kanban": True,
-        }
+        # Build TaskEnvelope for WS dispatch
+        envelope = build_envelope(
+            task=task,
+            interaction_mode=InteractionMode.TASK,
+        )
+        # Override workspace_uri with the allocated ws_path
+        envelope.workspace_uri = ws_path if ws_path else envelope.workspace_uri
+
         try:
-            await ws.send_json(task_msg)
+            # T6: Ingress security fence (placeholder)
+            fence_ok = await check_ingress_security_fence(envelope)
+            if not fence_ok:
+                logger.warning(
+                    "Security fence rejected dispatch of task '%s' to agent '%s'",
+                    task.id, assignee,
+                )
+                self.store.update_task_status(
+                    task.id, TaskStatus.FAILED.value,
+                    result="Security fence rejected dispatch",
+                )
+                return 0
+
+            await ws.send_json(envelope.to_dict())
             self._dispatched_ws_tasks[task.id] = assignee
             logger.info(
-                "Dispatched task '%s' via WS to agent '%s' (ws=%s)",
-                task.id, assignee, ws_path,
+                "Dispatched envelope task '%s' via WS to agent '%s' (ws=%s, mode=%s)",
+                task.id, assignee, ws_path, envelope.interaction_mode.value,
             )
             return 1
         except Exception as e:

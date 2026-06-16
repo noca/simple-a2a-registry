@@ -118,6 +118,12 @@ class Task:
     metadata: Optional[str] = None
     tags: Optional[str] = None
     circuit_state: Optional[str] = None
+    origin_agent: Optional[str] = None
+    origin_task_id: Optional[str] = None
+    delegation_depth: Optional[int] = None
+    delegation_token_hash: Optional[str] = None
+    effective_scope: Optional[str] = None
+    provenance_chain_id: Optional[str] = None
 
     # Transient — loaded from related tables
     parents: List[dict] = field(default_factory=list)

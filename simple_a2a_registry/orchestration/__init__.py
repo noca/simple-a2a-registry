@@ -1,5 +1,11 @@
 """Orchestration Engine — task lifecycle management with SQLite-backed Kanban."""
 
+from simple_a2a_registry.orchestration.contract import (
+    InteractionMode,
+    OutputContract,
+    SecurityContext,
+    TaskEnvelope,
+)
 from simple_a2a_registry.orchestration.models import (
     Task,
     TaskComment,
@@ -34,6 +40,11 @@ from simple_a2a_registry.orchestration.dispatcher import (
     Dispatcher,
     DispatcherConfig,
 )
+from simple_a2a_registry.orchestration.envelope import (
+    build_envelope,
+    build_envelope_from_dtm,
+    check_ingress_security_fence,
+)
 from simple_a2a_registry.orchestration.swarm import (
     SwarmWorkerSpec,
     SwarmCreated,
@@ -55,8 +66,59 @@ from simple_a2a_registry.orchestration.sla import (
     SlaSnapshot,
     WindowStat,
 )
+from simple_a2a_registry.orchestration.memory import (
+    AgentMemoryStore,
+    _maybe_create_memory_schema,
+)
+from simple_a2a_registry.orchestration.memory_routes import (
+    MemoryHandler,
+    register_memory_routes,
+)
+from simple_a2a_registry.orchestration.blackboard_store import (
+    BlackboardStore,
+    OptimisticLockError,
+    KeyNotFoundError,
+)
+from simple_a2a_registry.orchestration.cron import (
+    CronTask,
+    CronExecution,
+    CronTaskStore,
+    CronScheduler,
+    _maybe_create_schema as _maybe_create_cron_schema,
+)
+from simple_a2a_registry.orchestration.cron_routes import (
+    CronHandler,
+    register_cron_routes,
+)
+from simple_a2a_registry.orchestration.workflow_routes import (
+    WorkflowHandler,
+    register_workflow_routes,
+)
+from simple_a2a_registry.orchestration.shared_workspace import (
+    SharedWorkspaceManager,
+)
+from simple_a2a_registry.orchestration.shared_workspace_routes import (
+    SharedWorkspaceHandler,
+    register_shared_workspace_routes,
+)
+from simple_a2a_registry.orchestration.sync_routes import (
+    SyncCallHandler,
+    register_sync_routes,
+    handle_ws_sync_response,
+    register_exit_barrier,
+    DEFAULT_SYNC_TIMEOUT_SECONDS,
+)
+from simple_a2a_registry.orchestration.validation import (
+    validate_output,
+)
 
 __all__ = [
+    # Agent Runtime Contract
+    "InteractionMode",
+    "OutputContract",
+    "SecurityContext",
+    "TaskEnvelope",
+    # Core models
     "Task",
     "TaskRun",
     "TaskComment",
@@ -79,6 +141,9 @@ __all__ = [
     "WorkspaceError",
     "Dispatcher",
     "DispatcherConfig",
+    "build_envelope",
+    "build_envelope_from_dtm",
+    "check_ingress_security_fence",
     "AnomalyScanner",
     "SlaCalculator",
     "SlaUpdater",
@@ -92,4 +157,36 @@ __all__ = [
     "get_swarm_status",
     "SwarmHandler",
     "register_swarm_routes",
+    # P0-A: Agent Memory
+    "AgentMemoryStore",
+    "_maybe_create_memory_schema",
+    "MemoryHandler",
+    "register_memory_routes",
+    # P2-F: Blackboard Store
+    "BlackboardStore",
+    "OptimisticLockError",
+    "KeyNotFoundError",
+    # P2-F: Cron Scheduler
+    "CronTask",
+    "CronExecution",
+    "CronTaskStore",
+    "CronScheduler",
+    "_maybe_create_cron_schema",
+    "CronHandler",
+    "register_cron_routes",
+    # P2-F: Workflow
+    "WorkflowHandler",
+    "register_workflow_routes",
+    # P2-F: Shared Workspace
+    "SharedWorkspaceManager",
+    "SharedWorkspaceHandler",
+    "register_shared_workspace_routes",
+    # T3: SYNC_CALL 同步路由
+    "SyncCallHandler",
+    "register_sync_routes",
+    "handle_ws_sync_response",
+    "register_exit_barrier",
+    "DEFAULT_SYNC_TIMEOUT_SECONDS",
+    # T4: OutputContract 校验器
+    "validate_output",
 ]

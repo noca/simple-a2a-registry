@@ -26,6 +26,11 @@ from aiohttp import web
 
 from simple_a2a_registry.auth import require_scope
 from simple_a2a_registry.orchestration.store import DEFAULT_CLAIM_TTL, TaskStore
+from simple_a2a_registry.security.ape import (
+    AuthorizationPolicyEngine, CallerIdentity, CheckpointResult,
+)
+from simple_a2a_registry.security.pt import ProvenanceTracker
+from simple_a2a_registry.security.events import SecurityEventStore, SecurityEventType
 from simple_a2a_registry.orchestration.models import (
     TaskStatus,
     TaskRunStatus,
@@ -34,6 +39,12 @@ from simple_a2a_registry.orchestration.models import (
 )
 from simple_a2a_registry.orchestration.state_machine import (
     InvalidTransitionError,
+)
+from simple_a2a_registry.orchestration.validation import (
+    validate_output,
+)
+from simple_a2a_registry.orchestration.contract import (
+    OutputContract,
 )
 
 logger = logging.getLogger("a2a_registry.orchestration.routes")
@@ -48,6 +59,35 @@ def _json_error(status: int, error_code: str, detail: str) -> web.Response:
     return web.json_response(
         {"error": error_code, "detail": detail},
         status=status,
+    )
+
+
+def _build_caller_from_request(request: web.Request) -> CallerIdentity:
+    """Extract caller identity from auth middleware metadata on the request."""
+    return CallerIdentity(
+        agent_id=request.get("agent_id", "anonymous"),
+        tenant=request.get("tenant", ""),
+        scope=request.get("token_scopes", ""),
+        token_payload=request.get("token_payload", {}),
+    )
+
+
+def _ape_response_or_403(
+    checkpoint: CheckpointResult,
+    caller: CallerIdentity,
+) -> Optional[web.Response]:
+    """Map an APE CheckpointResult to an HTTP response.
+
+    In enforce mode (allowed=False), return a 403 response.
+    In warn/audit mode (allowed=True), return None so the request continues.
+    Any response_headers (e.g. X-Security-Warning) are attached to the
+    actual response by the caller.
+    """
+    if checkpoint.allowed:
+        return None  # Proceed normally
+    return _json_error(
+        403, "security_denied",
+        checkpoint.reason,
     )
 
 
@@ -101,6 +141,74 @@ def _run_to_dict(run) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Provenance helpers
+# ---------------------------------------------------------------------------
+
+
+def _record_provenance_create(
+    handler: OrchestrationHandler,
+    task,
+    request: web.Request,
+) -> None:
+    """Record a provenance chain + delegation hop after task creation."""
+    if handler.pt is None:
+        return
+    # Use task.created_by when available (explicitly provided in the API call);
+    # fall back to request.agent_id set by auth middleware or "anonymous".
+    caller = task.created_by or request.get("agent_id", "anonymous")
+    origin_tenant = task.tenant or ""
+    # Determine root task ID from parent chain
+    root_task_id = task.id
+    parent_task_id: Optional[str] = None
+    if task.parents:
+        first_parent = task.parents[0]
+        root_task_id = first_parent.get("id", task.id)
+        parent_task_id = first_parent.get("id")
+    handler.pt.ensure_chain(
+        chain_id=task.id,
+        origin_agent=caller,
+        origin_tenant=origin_tenant,
+        root_task_id=root_task_id,
+        parent_task_id=parent_task_id,
+        task_id=task.id,
+    )
+    if task.assignee:
+        token_payload = request.get("token_payload", {})
+        handler.pt.record_hop(
+            chain_id=task.id,
+            from_agent=caller,
+            to_agent=task.assignee,
+            action="delegate",
+            scope_at=request.get("token_scopes", ""),
+            token_jti=token_payload.get("jti", ""),
+        )
+
+
+def _record_provenance_claim(
+    handler: OrchestrationHandler,
+    task_id: str,
+    request: web.Request,
+    worker_id: str,
+) -> None:
+    """Record a provenance hop after a task claim."""
+    if handler.pt is None:
+        return
+    task = handler.store.get_task(task_id)
+    if task is None:
+        return
+    from_agent = task.assignee or "unknown"
+    token_payload = request.get("token_payload", {})
+    handler.pt.record_hop(
+        chain_id=task_id,
+        from_agent=from_agent,
+        to_agent=worker_id,
+        action="claim",
+        scope_at=request.get("token_scopes", ""),
+        token_jti=token_payload.get("jti", ""),
+    )
+
+
+# ---------------------------------------------------------------------------
 # OrchestrationHandler
 # ---------------------------------------------------------------------------
 
@@ -115,6 +223,11 @@ class OrchestrationHandler:
         # Callback for broadcasting events to Admin UI WebSocket clients.
         # Wired up by create_app in server.py.
         self._broadcast_fn = None  # async callable(event_type: str, data: dict)
+        # Security Harness — wired up by create_app in server.py.
+        self.pt: Optional[ProvenanceTracker] = None
+        self.ape: Optional[Any] = None
+        self.dtm: Optional[Any] = None
+        self.event_store: Optional[Any] = None
 
     # ----------------------------------------------------------
     # POST /v2/tasks — Create
@@ -144,6 +257,21 @@ class OrchestrationHandler:
             except (ValueError, TypeError):
                 priority = 0
 
+        # ── APE checkpoint: task_create ─────────────────────────────────
+        ape_response_headers: dict = {}
+        if self.ape is not None:
+            caller = _build_caller_from_request(request)
+            checkpoint = await self.ape.check_task_create(
+                caller=caller,
+                task_data=body,
+            )
+            deny_resp = _ape_response_or_403(checkpoint, caller)
+            if deny_resp is not None:
+                return deny_resp
+            # Collect response headers (e.g. X-Security-Warning in warn mode)
+            if checkpoint.response_headers:
+                ape_response_headers.update(checkpoint.response_headers)
+
         parents: Optional[List] = body.get("parents")
 
         try:
@@ -169,14 +297,49 @@ class OrchestrationHandler:
                 return _json_error(400, "parent_not_found", msg)
             return _json_error(400, "validation_error", msg)
 
+        # Record provenance for task creation
+        if self.pt is not None:
+            _record_provenance_create(self, task, request)
+
+        # Record security events after task creation
+        if self.event_store is not None:
+            caller = request.get("agent_id", task.created_by or request.remote or "unknown")
+            assignee = body.get("assignee", "")
+            if self.registry_store is not None:
+                caller_agent = self.registry_store.get_agent(caller)
+                if caller_agent is None:
+                    self.event_store.record(
+                        event_type=SecurityEventType.AGENT_NOT_FOUND.value,
+                        actor=caller,
+                        target=assignee or "unknown",
+                        decision="deny",
+                        tenant=task.tenant or "",
+                        reason=f"Caller agent '{caller}' is not registered",
+                        task_id=task.id,
+                    )
+            # Always record an AUTHORIZATION_ALLOWED for successful task creation
+            self.event_store.record(
+                event_type=SecurityEventType.AUTHORIZATION_ALLOWED.value,
+                actor=caller,
+                target=assignee or "unknown",
+                decision="allow",
+                tenant=task.tenant or "",
+                reason="Task created successfully",
+                task_id=task.id,
+            )
+
         # Broadcast to Admin UI WebSocket clients
         if self._broadcast_fn:
             await self._broadcast_fn("created", _task_to_detail(task))
 
-        return web.json_response(
+        resp = web.json_response(
             {"task": _task_to_detail(task)},
             status=201,
         )
+        # Inject APE response headers (X-Security-Warning in warn mode)
+        for key, val in ape_response_headers.items():
+            resp.headers[key] = val
+        return resp
 
     # ----------------------------------------------------------
     # PATCH /v2/tasks/{id} — Update metadata
@@ -312,13 +475,53 @@ class OrchestrationHandler:
         comments = self.store.get_comments(task_id)
         events = self.store.get_events(task_id)
 
-        return web.json_response({
+        response = {
             "task": _task_to_detail(task),
             "parents": parents,
             "children": children,
             "runs": [_run_to_dict(r) for r in runs],
             "comments": [c.to_dict() for c in comments],
             "events": [e.to_dict() for e in events],
+        }
+
+        # Attach provenance chain if available
+        if self.pt is not None:
+            chain = self.pt.get_chain_by_task(task_id)
+            if chain is not None:
+                response["provenance"] = chain.to_dict()
+
+        return web.json_response(response)
+
+    # ----------------------------------------------------------
+    # GET /v2/tasks/{id}/provenance — Provenance chain
+    # ----------------------------------------------------------
+
+    async def handle_get_provenance(self, request: web.Request) -> web.Response:
+        """GET /v2/tasks/{id}/provenance — return provenance chain for a task.
+
+        Returns::
+
+            {
+                "task_id": "t_xxx",
+                "provenance": { ... } | null
+            }
+        """
+        task_id = request.match_info["id"]
+        # Verify the task exists
+        task = self.store.get_task(task_id)
+        if task is None:
+            return web.json_response({
+                "task_id": task_id,
+                "provenance": None,
+            })
+        provenance = None
+        if self.pt is not None:
+            chain = self.pt.get_chain_by_task(task_id)
+            if chain is not None:
+                provenance = chain.to_dict()
+        return web.json_response({
+            "task_id": task_id,
+            "provenance": provenance,
         })
 
     # ----------------------------------------------------------
@@ -338,6 +541,22 @@ class OrchestrationHandler:
         pid = body.get("pid", 0)
         ttl = body.get("ttl")  # optional claim TTL override
 
+        # ── APE checkpoint: task_claim ──────────────────────────────────
+        ape_claim_headers: dict = {}
+        if self.ape is not None:
+            caller = _build_caller_from_request(request)
+            delegation_token = body.get("delegation_token")
+            checkpoint = await self.ape.check_task_claim(
+                caller=caller,
+                task_id=task_id,
+                delegation_token_str=delegation_token,
+            )
+            deny_resp = _ape_response_or_403(checkpoint, caller)
+            if deny_resp is not None:
+                return deny_resp
+            if checkpoint.response_headers:
+                ape_claim_headers.update(checkpoint.response_headers)
+
         result = self.store.claim_task(
             task_id, worker_id, pid,
             ttl=ttl if ttl is not None else DEFAULT_CLAIM_TTL,
@@ -354,13 +573,20 @@ class OrchestrationHandler:
                 f"Task '{task_id}' is not ready or already claimed",
             )
 
+        # Record provenance for claim
+        if self.pt is not None:
+            _record_provenance_claim(self, task_id, request, worker_id)
+
         # Broadcast to Admin UI WebSocket clients
         if self._broadcast_fn:
             task_data = self.store.get_task(task_id)
             if task_data:
                 await self._broadcast_fn("status_changed", _task_to_detail(task_data))
 
-        return web.json_response(result)
+        resp = web.json_response(result)
+        for key, val in ape_claim_headers.items():
+            resp.headers[key] = val
+        return resp
 
     # ----------------------------------------------------------
     # POST /v2/tasks/{id}/complete
@@ -380,6 +606,21 @@ class OrchestrationHandler:
         result = body.get("result")
         metadata = body.get("metadata")
 
+        # ── APE checkpoint: task_complete ──────────────────────────────
+        ape_complete_headers: dict = {}
+        if self.ape is not None:
+            caller = _build_caller_from_request(request)
+            checkpoint = await self.ape.check_task_complete(
+                caller=caller,
+                task_id=task_id,
+                claim_lock=claim_lock,
+            )
+            deny_resp = _ape_response_or_403(checkpoint, caller)
+            if deny_resp is not None:
+                return deny_resp
+            if checkpoint.response_headers:
+                ape_complete_headers.update(checkpoint.response_headers)
+
         # Serialize result if it's a dict/object
         result_str: Optional[str] = None
         if result is not None:
@@ -387,6 +628,56 @@ class OrchestrationHandler:
                 result_str = json.dumps(result)
             else:
                 result_str = str(result)
+
+        # ── OutputContract validation (T4) ──────────────────────────────
+        validation_error: Optional[str] = None
+        output_contract_raw = body.get("output_contract")
+        if output_contract_raw is not None:
+            # Build OutputContract from request body
+            if isinstance(output_contract_raw, dict):
+                oc = OutputContract.from_dict(output_contract_raw)
+            else:
+                oc = OutputContract(required_fields=[])
+
+            # Determine what to validate: prefer parsed result, fall back to raw
+            output_to_check = result if isinstance(result, dict) else (json.loads(result_str) if result_str else None)
+            if output_to_check is not None and isinstance(output_to_check, dict):
+                valid, err = validate_output(output_to_check, oc)
+                if not valid:
+                    validation_error = err
+                    logger.warning(
+                        "OutputContract validation FAILED for task '%s': %s",
+                        task_id, err,
+                    )
+
+        # ── Handle validation failure → fail task ─────────────────────
+        if validation_error is not None:
+            try:
+                # Use validation error as the task result (maps to last_failure_error)
+                task = self.store.update_task_status(
+                    task_id,
+                    TaskStatus.FAILED.value,
+                    claim_lock=claim_lock,
+                    result=validation_error,
+                    summary=summary or validation_error,
+                    metadata=metadata,
+                )
+            except (InvalidTransitionError, PermissionError, ValueError) as e:
+                return _json_error(400, "status_error", str(e))
+
+            # Broadcast
+            if self._broadcast_fn:
+                task_data = self.store.get_task(task_id)
+                await self._broadcast_fn("status_changed", _task_to_detail(task_data))
+
+            resp = web.json_response({
+                "task_id": task_id,
+                "status": TaskStatus.FAILED.value,
+                "failure_reason": validation_error,
+            })
+            for key, val in ape_complete_headers.items():
+                resp.headers[key] = val
+            return resp
 
         try:
             task = self.store.update_task_status(
@@ -412,10 +703,13 @@ class OrchestrationHandler:
             if task_data:
                 await self._broadcast_fn("status_changed", _task_to_detail(task_data))
 
-        return web.json_response({
+        resp = web.json_response({
             "task_id": task_id,
             "status": TaskStatus.COMPLETED.value,
         })
+        for key, val in ape_complete_headers.items():
+            resp.headers[key] = val
+        return resp
 
     # ----------------------------------------------------------
     # POST /v2/tasks/{id}/block
@@ -902,6 +1196,8 @@ def register_v2_routes(app: web.Application, handler: OrchestrationHandler) -> N
     app.router.add_post("/v2/tasks/{id}/comment", require_scope("task:write")(handler.handle_add_comment))
     # DELETE /v2/tasks/{id} — archive (task:write)
     app.router.add_delete("/v2/tasks/{id}", require_scope("task:write")(handler.handle_delete_task))
+    # GET /v2/tasks/{id}/provenance — provenance chain (task:read)
+    app.router.add_get("/v2/tasks/{id}/provenance", require_scope("task:read")(handler.handle_get_provenance))
     # POST /v2/tasks/{id}/depend — add dependency (task:write)
     app.router.add_post("/v2/tasks/{id}/depend", require_scope("task:write")(handler.handle_add_dependency))
     # DELETE /v2/tasks/{id}/depend/{parent_id} — remove dependency (task:write)

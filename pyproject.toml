@@ -19,6 +19,7 @@ dependencies = [
     "pymysql>=1.1,<2",
     "aiomysql>=0.2,<1",
     "alembic>=1.13,<2",
+    "croniter>=2.0,<7",
 ]
 [project.scripts]
 a2a-registry = "simple_a2a_registry.cli:main"

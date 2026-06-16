@@ -32,6 +32,13 @@ from simple_a2a_registry.metrics import (
     update_db_pool_size,
 )
 from simple_a2a_registry.rate_limiter import rate_limit_middleware_factory
+from simple_a2a_registry.health import (
+    HealthChecker,
+    make_db_probe,
+    make_liveness_handler,
+    make_readiness_handler,
+    make_startup_handler,
+)
 from simple_a2a_registry.models import make_agent_card, make_agent_skill
 from simple_a2a_registry.validation import (
     validate_agent_card,
@@ -67,6 +74,7 @@ from simple_a2a_registry.store import Store, HEARTBEAT_TIMEOUT, _maybe_create_sc
 from simple_a2a_registry.orchestration import (
     TaskStore,
     TaskStatus,
+    Task,
     OrchestrationHandler,
     register_v2_routes,
     Dispatcher,
@@ -78,8 +86,24 @@ from simple_a2a_registry.orchestration import (
     AnomalyScanner,
     SlaCalculator,
     SlaUpdater,
+    # Envelope builder
+    build_envelope,
+    check_ingress_security_fence,
+    InteractionMode,
+    TaskEnvelope,
+    # T3: SYNC_CALL
+    SyncCallHandler,
+    register_sync_routes,
 )
 from simple_a2a_registry.ws_admin import AdminWSHub
+from simple_a2a_registry.security import (
+    APEConfig,
+    AuthorizationPolicyEngine,
+    DelegatedTokenManager,
+    ProvenanceTracker,
+    SecurityEventStore,
+)
+from simple_a2a_registry.events import EventBus, SSEEventHandler, EventTypes
 from simple_a2a_registry.registry_handler import (
     WSContext,
     create_default_router,
@@ -1096,16 +1120,39 @@ class RegistryHandler:
                                    f"Failed to callback agent '{agent_id}': {e}")
 
         else:
-            # WebSocket dispatch (existing behavior)
+            # WebSocket dispatch — build TaskEnvelope
             try:
-                await ws.send_json({
-                    "type": "task",
-                    "id": task_id,
-                    "query": query,
-                    "sessionId": session_id,
-                })
+                # Construct a Task object from the V1 dispatch dict
+                v1_task = Task(
+                    id=task_id,
+                    body=query,
+                    assignee=agent_id,
+                    tenant=tenant or "",
+                )
+                envelope = build_envelope(
+                    task=v1_task,
+                    task_dict={"query": query, "sessionId": session_id},
+                    interaction_mode=InteractionMode.TASK,
+                )
+
+                # T6: Ingress security fence (placeholder)
+                fence_ok = await check_ingress_security_fence(envelope)
+                if not fence_ok:
+                    task["state"] = "failed"
+                    task["error"] = "Ingress security fence rejected dispatch"
+                    logger.warning(
+                        "Ingress security fence rejected dispatch of task %s to agent '%s'",
+                        task_id, agent_id,
+                    )
+                    return json_error(403, "security_fence_rejected",
+                                       "Ingress security fence rejected dispatch")
+
+                await ws.send_json(envelope.to_dict())
                 task["state"] = "forwarded"
-                logger.info("Dispatched task %s to agent '%s'", task_id, agent_id)
+                logger.info(
+                    "Dispatched envelope task %s to agent '%s' (mode=%s)",
+                    task_id, agent_id, envelope.interaction_mode.value,
+                )
             except Exception as e:
                 task["state"] = "failed"
                 task["error"] = f"Dispatch failed: {e}"
@@ -1328,9 +1375,11 @@ class AdminHandler:
     """
 
     def __init__(self, auth_store: Store,
-                 audit_store: Optional[AuditStore] = None) -> None:
+                 audit_store: Optional[AuditStore] = None,
+                 event_store: Optional[SecurityEventStore] = None) -> None:
         self.auth_store = auth_store
         self.audit_store = audit_store
+        self.event_store = event_store
 
     async def handle_create_client(self, request: web.Request) -> web.Response:
         """POST /admin/clients — create a new OAuth client.
@@ -1569,6 +1618,91 @@ class AdminHandler:
             response["tenant"] = tenant
         return web.json_response(response)
 
+    async def handle_list_security_events(self, request: web.Request) -> web.Response:
+        """GET /admin/security-events — list security events with optional filters.
+
+        Query params:
+            event_type: Filter by event type (AUTH_FAILURE, SCOPE_DENIED, etc.)
+            actor:      Filter by actor
+            tenant:     Filter by tenant
+            task_id:    Filter by task_id
+            since:      Unix timestamp — only events at or after this time
+            until:      Unix timestamp — only events before this time
+            limit:      Max results (default 50, max 1000)
+            offset:     Pagination offset (default 0)
+
+        Returns::
+
+            {
+                "total": 42,
+                "limit": 50,
+                "offset": 0,
+                "events": [...]
+            }
+        """
+        if self.event_store is None:
+            return web.json_response(
+                {"error": "events_disabled",
+                 "detail": "Security event storage is not configured (enable security_harness)"},
+                status=404,
+            )
+
+        try:
+            limit = min(int(request.query.get("limit", 50)), 1000)
+        except (ValueError, TypeError):
+            limit = 50
+        try:
+            offset = max(int(request.query.get("offset", 0)), 0)
+        except (ValueError, TypeError):
+            offset = 0
+
+        event_type = request.query.get("event_type") or None
+        actor = request.query.get("actor") or None
+        tenant = request.query.get("tenant") or None
+        task_id = request.query.get("task_id") or None
+
+        since = None
+        raw_since = request.query.get("since")
+        if raw_since:
+            try:
+                since = float(raw_since)
+            except (ValueError, TypeError):
+                pass
+
+        until = None
+        raw_until = request.query.get("until")
+        if raw_until:
+            try:
+                until = float(raw_until)
+            except (ValueError, TypeError):
+                pass
+
+        total = self.event_store.count_all(
+            event_type=event_type,
+            actor=actor,
+            tenant=tenant,
+            task_id=task_id,
+            since=since,
+            until=until,
+        )
+        events = self.event_store.list_all(
+            event_type=event_type,
+            actor=actor,
+            tenant=tenant,
+            task_id=task_id,
+            since=since,
+            until=until,
+            limit=limit,
+            offset=offset,
+        )
+
+        return web.json_response({
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "events": [e.to_dict() for e in events],
+        })
+
 
 # ---------------------------------------------------------------------------
 
@@ -1717,17 +1851,11 @@ async def _maybe_dispatch_pending(
                 task_store.update_task_status(
                     task.id, TaskStatus.RUNNING.value,
                 )
-                task_msg = {
-                    "type": "task",
-                    "id": task.id,
-                    "title": task.title,
-                    "body": task.body or "",
-                    "assignee": agent_id,
-                    "priority": task.priority,
-                    "workspace_path": task.workspace_path or "",
-                    "kanban": True,
-                }
-                await ws.send_json(task_msg)
+                task_msg = build_envelope(
+                    task=task,
+                    interaction_mode=InteractionMode.TASK,
+                )
+                await ws.send_json(task_msg.to_dict())
                 # Record in shared tracking dict so _maybe_update_kanban can
                 # reconcile results when the agent reports completion
                 if dispatched_ws_tasks is not None:
@@ -1872,6 +2000,24 @@ def create_app(
     store = Store(_shared_engine if _shared_engine is not None else data_dir, bootstrap_secret=bootstrap_secret)
     handler = RegistryHandler(store, base_url, audit_store=audit_store)
 
+    # ------------------------------------------------------------------
+    # Health checker — liveness / readiness / startup probes
+    # ------------------------------------------------------------------
+    health_checker = HealthChecker(
+        version=REGISTRY_VERSION,
+        started_at=time.time(),
+    )
+
+    # DB ping probe (shared for readiness + startup)
+    if _shared_engine is not None:
+        db_probe = make_db_probe(lambda: _shared_engine.ping() if hasattr(_shared_engine, 'ping') else True)
+    else:
+        db_probe = make_db_probe(lambda: _legacy_engine.ping() if hasattr(_legacy_engine, 'ping') else True)
+
+    health_checker.add_liveness_probe(db_probe)
+    health_checker.add_readiness_probe(db_probe)
+    health_checker.add_startup_probe(db_probe)
+
     # OAuth 2.1 Authentication — generate keys EARLY so UserHandler can create Bearer tokens on login
     # Generate RSA key pair at startup (RS256 primary, HS256 dev fallback)
     if auth_enabled:
@@ -1956,6 +2102,30 @@ def create_app(
     handler._broadcast_progress_fn = _broadcast_agent_progress
     logger.info("RegistryHandler agent progress callback wired to AdminWSHub")
 
+    # ── P3-B: EventBus + SSE Push ─────────────────────────────────────────
+    event_bus = EventBus()
+    sse_handler = SSEEventHandler(event_bus)
+
+    # Wire both AdminWSHub and EventBus into the broadcast bridge
+    async def _event_bus_bridge(event_type: str, data: dict) -> None:
+        """Publish events to AdminWSHub AND EventBus simultaneously."""
+        # AdminWSHub (WebSocket)
+        task_id = data.get("id", "")
+        await admin_ws_hub.broadcast_task_update(task_id, event_type, data)
+        # EventBus (SSE consumers)
+        await event_bus.publish(f"task.{event_type}", data)
+
+    # Replace the old broadcast callback with the dual bridge
+    orch_handler._broadcast_fn = _event_bus_bridge
+    logger.info("OrchestrationHandler broadcast → AdminWSHub + EventBus wired")
+
+    # Also wire SwarmHandler broadcast (will be created later)
+    # Stored on app for later wiring.
+
+    logger.info(
+        "EventBus initialised with SSE handler at GET /v2/events",
+    )
+
     # P2.4: Anomaly Scanner — background orphan/timeout detection every 60s
     anomaly_scanner = AnomalyScanner(
         task_store=task_store,
@@ -1983,6 +2153,46 @@ def create_app(
     handler.task_store = task_store
     if dispatcher:
         handler._dispatched_ws_tasks = dispatcher._dispatched_ws_tasks
+
+    # Security Events — P0 security audit event store + ProvenanceTracker — P1 task delegation chain tracking
+    event_store: Optional[SecurityEventStore] = None
+    pt_tracker: Optional[ProvenanceTracker] = None
+    dtm: Optional[DelegatedTokenManager] = None
+    ape: Optional[AuthorizationPolicyEngine] = None
+    _engine = _shared_engine if _shared_engine else task_store._engine
+    if config is not None and hasattr(config, 'security_harness') and config.security_harness.enabled:
+        event_store = SecurityEventStore(_engine, event_bus=event_bus)
+        event_store.ensure_schema()
+        orch_handler.event_store = event_store
+        pt_tracker = ProvenanceTracker(_engine)
+        pt_tracker.ensure_schema()
+        orch_handler.pt = pt_tracker
+
+        # DTM — delegated token manager (warn mode uses it via APE check_task_claim)
+        dtm = DelegatedTokenManager(
+            _engine, private_key, public_key,
+            default_ttl=config.security_harness.delegation_token_ttl_seconds,
+            max_depth=config.security_harness.max_delegation_depth,
+        )
+        dtm.ensure_schema()
+
+        # APE — Authorization Policy Engine (3-phase: audit → warn → enforce)
+        ape = AuthorizationPolicyEngine(
+            config=APEConfig(
+                mode=config.security_harness.mode,
+                default_delegation_policy=config.security_harness.default_delegation_policy,
+                max_delegation_depth=config.security_harness.max_delegation_depth,
+            ),
+            dtm=dtm,
+            event_store=event_store,
+            registry_store=store,
+            task_store=task_store,
+        )
+        orch_handler.ape = ape
+        logger.info(
+            "Security harness initialised: event_store + PT + DTM + APE (mode=%s) wired to OrchestrationHandler",
+            config.security_harness.mode,
+        )
 
     app = web.Application(middlewares=[
         cors_middleware_factory(
@@ -2027,6 +2237,12 @@ def create_app(
     app["anomaly_scanner"] = anomaly_scanner
     app["sla_calculator"] = sla_calculator
     app["sla_updater"] = sla_updater
+    app["event_bus"] = event_bus
+    app["sse_handler"] = sse_handler
+
+    # Wire security harness stores onto app (set only when security_harness enabled)
+    if event_store is not None:
+        app['event_store'] = event_store
 
     # HTTP client session for callback dispatch (created on startup, closed on cleanup)
     async def _init_client_session(app_: web.Application) -> None:
@@ -2067,7 +2283,20 @@ def create_app(
     app.on_cleanup.append(_close_client_session)
 
     # Health / well-known
-    app.router.add_get("/health", handler.handle_health)
+    # Kubernetes-style health probes via HealthChecker
+    app.router.add_get("/health", make_liveness_handler(
+        health_checker,
+        extra_data_fn=lambda: {
+            "stats": {
+                "total_agents": handler.store.stats().get("totalAgents", 0),
+                "alive_agents": handler.store.stats().get("aliveAgents", 0),
+                "stale_agents": handler.store.stats().get("staleAgents", 0),
+                "connected_via_ws": len(handler._ws_connections),
+            },
+        },
+    ))
+    app.router.add_get("/health/ready", make_readiness_handler(health_checker))
+    app.router.add_get("/health/startup", make_startup_handler(health_checker))
     app.router.add_get("/.well-known/agent-card.json", handler.handle_well_known)
 
     # Prometheus metrics endpoint (conditional on config)
@@ -2175,11 +2404,26 @@ def create_app(
     swarm_handler = SwarmHandler(task_store)
     register_swarm_routes(app, swarm_handler)
     app["swarm_handler"] = swarm_handler
-    # Wire SwarmHandler broadcast callback to AdminWSHub (shares the same bridge)
-    swarm_handler._broadcast_fn = _broadcast_task_event
+    # Wire SwarmHandler broadcast callback to AdminWSHub + EventBus (shares the same bridge)
+    swarm_handler._broadcast_fn = _event_bus_bridge
+
+    # T3: SYNC_CALL 同步路由
+    sync_handler = SyncCallHandler(
+        ws_connections=handler._ws_connections,
+        store=store,
+        ape=ape,
+        pt=pt_tracker,
+        event_store=event_store,
+    )
+    register_sync_routes(app, sync_handler)
+    app["sync_handler"] = sync_handler
 
     # Admin WebSocket — real-time task updates via AdminWSHub
     app.router.add_get("/v2/ws/admin", admin_ws_hub.register)
+
+    # SSE endpoint — real-time event stream via EventBus
+    app.router.add_get("/v2/events", sse_handler.handle_sse_stream)
+    logger.info("SSE endpoint registered: GET /v2/events")
 
     # OAuth 2.1 Token / Registration endpoints (always registered, public)
     app.router.add_post("/auth/token", auth_handler.handle_token)
@@ -2197,7 +2441,8 @@ def create_app(
             logger.warning("Failed to create JWKS endpoint (non-fatal): %s", e)
 
         # Admin REST API — create/list/delete OAuth clients
-        admin_handler = AdminHandler(store, audit_store=audit_store)
+        admin_handler = AdminHandler(store, audit_store=audit_store,
+                                     event_store=event_store)
         app.router.add_post(
             "/admin/clients",
             require_scope("registry:admin")(admin_handler.handle_create_client),
@@ -2209,6 +2454,10 @@ def create_app(
         app.router.add_get(
             "/admin/audit",
             require_scope("registry:admin")(admin_handler.handle_list_audit),
+        )
+        app.router.add_get(
+            "/admin/security-events",
+            require_scope("registry:admin")(admin_handler.handle_list_security_events),
         )
         app.router.add_delete(
             "/admin/clients/{client_id}",
