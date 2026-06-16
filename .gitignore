@@ -19,3 +19,4 @@ data/
 *.png
 *.jpg
 *.jpeg
+.wiscode/

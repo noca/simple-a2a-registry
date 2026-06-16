@@ -190,13 +190,13 @@ class TestWebSocketTaskDispatch:
             data = await resp.json()
             task_id = data["task_id"]
 
-            # Agent should receive the task via WS
+            # Agent should receive the TaskEnvelope via WS
             msg = await ws.receive()
             msg_data = json.loads(msg.data)
-            assert msg_data["type"] == "task"
-            assert msg_data["id"] == task_id
-            assert msg_data["query"] == "do something"
-            assert msg_data["sessionId"] == "sess-1"
+            assert msg_data["task_id"] == task_id
+            assert msg_data["interaction_mode"] == "task"
+            assert msg_data["input"]["query"] == "do something"
+            assert msg_data["input"]["session_id"] == "sess-1"
 
             await ws.send_json({"type": "close"})
             await ws.close()
@@ -265,10 +265,11 @@ class TestWebSocketTaskDispatch:
             data = await resp.json()
             task_id = data["task_id"]
 
-            # Receive task via WS
+            # Receive TaskEnvelope via WS
             msg = await ws.receive()
             msg_data = json.loads(msg.data)
-            assert msg_data["type"] == "task"
+            assert msg_data["interaction_mode"] == "task"
+            assert msg_data["task_id"] == task_id
 
             # Report result
             await ws.send_json({
@@ -337,8 +338,9 @@ class TestWebSocketTaskDispatch:
             for expected_id in task_ids:
                 msg = await ws.receive()
                 msg_data = json.loads(msg.data)
-                assert msg_data["type"] == "task"
-                assert msg_data["id"] == expected_id
+                # TaskEnvelope format — check task_id
+                assert msg_data["task_id"] == expected_id
+                assert msg_data["interaction_mode"] == "task"
 
             await ws.send_json({"type": "close"})
             await ws.close()
@@ -365,13 +367,13 @@ class TestWebSocketTaskDispatch:
             )
             task_b = (await resp.json())["task_id"]
 
-            # Agent A gets only its task
+            # Agent A gets only its task (TaskEnvelope format)
             msg = await ws_a.receive()
-            assert json.loads(msg.data)["id"] == task_a
+            assert json.loads(msg.data)["task_id"] == task_a
 
-            # Agent B gets only its task
+            # Agent B gets only its task (TaskEnvelope format)
             msg = await ws_b.receive()
-            assert json.loads(msg.data)["id"] == task_b
+            assert json.loads(msg.data)["task_id"] == task_b
 
             await ws_a.send_json({"type": "close"})
             await ws_a.close()
@@ -406,7 +408,7 @@ class TestWebSocketReconnect:
             task_id = (await resp.json())["task_id"]
 
             msg = await ws2.receive()
-            assert json.loads(msg.data)["id"] == task_id
+            assert json.loads(msg.data)["task_id"] == task_id
 
             await ws2.send_json({"type": "close"})
             await ws2.close()
@@ -677,11 +679,11 @@ class TestWebSocketDisconnectAutoFail:
             data = await resp.json()
             task_id = data["task_id"]
 
-            # Receive the task via WS
+            # Receive the TaskEnvelope via WS
             msg = await ws.receive()
             msg_data = json.loads(msg.data)
-            assert msg_data["type"] == "task"
-            assert msg_data["id"] == task_id
+            assert msg_data["task_id"] == task_id
+            assert msg_data["interaction_mode"] == "task"
 
             # Close the WS connection gracefully
             await ws.send_json({"type": "close"})

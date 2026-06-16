@@ -74,6 +74,7 @@ from simple_a2a_registry.store import Store, HEARTBEAT_TIMEOUT, _maybe_create_sc
 from simple_a2a_registry.orchestration import (
     TaskStore,
     TaskStatus,
+    Task,
     OrchestrationHandler,
     register_v2_routes,
     Dispatcher,
@@ -85,6 +86,14 @@ from simple_a2a_registry.orchestration import (
     AnomalyScanner,
     SlaCalculator,
     SlaUpdater,
+    # Envelope builder
+    build_envelope,
+    check_ingress_security_fence,
+    InteractionMode,
+    TaskEnvelope,
+    # T3: SYNC_CALL
+    SyncCallHandler,
+    register_sync_routes,
 )
 from simple_a2a_registry.ws_admin import AdminWSHub
 from simple_a2a_registry.security import (
@@ -1111,16 +1120,39 @@ class RegistryHandler:
                                    f"Failed to callback agent '{agent_id}': {e}")
 
         else:
-            # WebSocket dispatch (existing behavior)
+            # WebSocket dispatch — build TaskEnvelope
             try:
-                await ws.send_json({
-                    "type": "task",
-                    "id": task_id,
-                    "query": query,
-                    "sessionId": session_id,
-                })
+                # Construct a Task object from the V1 dispatch dict
+                v1_task = Task(
+                    id=task_id,
+                    body=query,
+                    assignee=agent_id,
+                    tenant=tenant or "",
+                )
+                envelope = build_envelope(
+                    task=v1_task,
+                    task_dict={"query": query, "sessionId": session_id},
+                    interaction_mode=InteractionMode.TASK,
+                )
+
+                # T6: Ingress security fence (placeholder)
+                fence_ok = await check_ingress_security_fence(envelope)
+                if not fence_ok:
+                    task["state"] = "failed"
+                    task["error"] = "Ingress security fence rejected dispatch"
+                    logger.warning(
+                        "Ingress security fence rejected dispatch of task %s to agent '%s'",
+                        task_id, agent_id,
+                    )
+                    return json_error(403, "security_fence_rejected",
+                                       "Ingress security fence rejected dispatch")
+
+                await ws.send_json(envelope.to_dict())
                 task["state"] = "forwarded"
-                logger.info("Dispatched task %s to agent '%s'", task_id, agent_id)
+                logger.info(
+                    "Dispatched envelope task %s to agent '%s' (mode=%s)",
+                    task_id, agent_id, envelope.interaction_mode.value,
+                )
             except Exception as e:
                 task["state"] = "failed"
                 task["error"] = f"Dispatch failed: {e}"
@@ -1819,17 +1851,11 @@ async def _maybe_dispatch_pending(
                 task_store.update_task_status(
                     task.id, TaskStatus.RUNNING.value,
                 )
-                task_msg = {
-                    "type": "task",
-                    "id": task.id,
-                    "title": task.title,
-                    "body": task.body or "",
-                    "assignee": agent_id,
-                    "priority": task.priority,
-                    "workspace_path": task.workspace_path or "",
-                    "kanban": True,
-                }
-                await ws.send_json(task_msg)
+                task_msg = build_envelope(
+                    task=task,
+                    interaction_mode=InteractionMode.TASK,
+                )
+                await ws.send_json(task_msg.to_dict())
                 # Record in shared tracking dict so _maybe_update_kanban can
                 # reconcile results when the agent reports completion
                 if dispatched_ws_tasks is not None:
@@ -2132,6 +2158,7 @@ def create_app(
     event_store: Optional[SecurityEventStore] = None
     pt_tracker: Optional[ProvenanceTracker] = None
     dtm: Optional[DelegatedTokenManager] = None
+    ape: Optional[AuthorizationPolicyEngine] = None
     _engine = _shared_engine if _shared_engine else task_store._engine
     if config is not None and hasattr(config, 'security_harness') and config.security_harness.enabled:
         event_store = SecurityEventStore(_engine, event_bus=event_bus)
@@ -2379,6 +2406,17 @@ def create_app(
     app["swarm_handler"] = swarm_handler
     # Wire SwarmHandler broadcast callback to AdminWSHub + EventBus (shares the same bridge)
     swarm_handler._broadcast_fn = _event_bus_bridge
+
+    # T3: SYNC_CALL 同步路由
+    sync_handler = SyncCallHandler(
+        ws_connections=handler._ws_connections,
+        store=store,
+        ape=ape,
+        pt=pt_tracker,
+        event_store=event_store,
+    )
+    register_sync_routes(app, sync_handler)
+    app["sync_handler"] = sync_handler
 
     # Admin WebSocket — real-time task updates via AdminWSHub
     app.router.add_get("/v2/ws/admin", admin_ws_hub.register)

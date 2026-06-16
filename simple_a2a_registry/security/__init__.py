@@ -40,6 +40,14 @@ from simple_a2a_registry.security.events import (
     SecurityEventType,
 )
 
+from simple_a2a_registry.security.guardrail import (
+    GuardrailEngine,
+    GuardrailResult,
+    SanitizeReport,
+    check_inbound,
+    sanitize_output,
+)
+
 from simple_a2a_registry.security.pt import (
     ProvenanceChain,
     ProvenanceHop,
@@ -58,5 +66,7 @@ __all__ = [
     "CheckpointResult",
     "DelegatedTaskToken", "DelegatedTokenManager", "attenuate_scope",
     "SecurityEvent", "SecurityEventStore", "SecurityEventType",
+    "GuardrailEngine", "GuardrailResult", "SanitizeReport",
+    "check_inbound", "sanitize_output",
     "ProvenanceChain", "ProvenanceHop", "ProvenanceTracker",
 ]

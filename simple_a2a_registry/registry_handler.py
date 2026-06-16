@@ -817,6 +817,39 @@ async def handle_close(
     # (the caller inspects the return value — see _wrap_with_close_handler)
 
 
+# ── job_subtask_result (INV-3 stub) ──────────────────────────────────
+
+
+async def handle_job_subtask_result(
+    ws: web.WebSocketResponse,
+    data: Dict[str, Any],
+    ctx: WSContext,
+) -> None:
+    """Agent reports a sub-task result for a JOB mode interaction.
+
+    Expected payload::
+
+        {"type": "job_subtask_result", "job_task_id": "...",
+         "subtask_id": "...", "status": "completed"|"failed",
+         "result": {...} | None, "error": "..." | None}
+
+    This is a **placeholder** for T6 which will implement full JOB
+    sub-task lifecycle management (SCN-04).  Currently only logs the
+    sub-task result and does not persist it.
+    """
+    job_task_id = data.get("job_task_id", "")
+    subtask_id = data.get("subtask_id", "")
+    status = data.get("status", "completed")
+
+    logger.info(
+        "JOB sub-task %s reported by agent '%s': job=%s status=%s (stub — T6)",
+        subtask_id, ctx.agent_id, job_task_id, status,
+    )
+
+    # T6 TODO: persist sub-task result, reconcile job DAG state,
+    # promote children, trigger event bus notifications
+
+
 # ---------------------------------------------------------------------------
 # Default router factory
 # ---------------------------------------------------------------------------
@@ -844,6 +877,12 @@ def create_default_router(
     router.register("task_result", handle_task_result)
     router.register("state_sync", handle_state_sync)
     router.register("close", handle_close)
+
+    # SYNC_CALL response handler (INV-3: direct result, no state machine)
+    router.register("sync_call_response", handle_ws_sync_response)
+
+    # JOB sub-task result handler (INV-3 stub — will be extended in T6)
+    router.register("job_subtask_result", handle_job_subtask_result)
 
     if extra_handlers:
         for msg_type, handler in extra_handlers.items():
