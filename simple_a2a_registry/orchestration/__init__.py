@@ -40,6 +40,11 @@ from simple_a2a_registry.orchestration.dispatcher import (
     Dispatcher,
     DispatcherConfig,
 )
+from simple_a2a_registry.orchestration.envelope import (
+    build_envelope,
+    build_envelope_from_dtm,
+    check_ingress_security_fence,
+)
 from simple_a2a_registry.orchestration.swarm import (
     SwarmWorkerSpec,
     SwarmCreated,
@@ -96,6 +101,16 @@ from simple_a2a_registry.orchestration.shared_workspace_routes import (
     SharedWorkspaceHandler,
     register_shared_workspace_routes,
 )
+from simple_a2a_registry.orchestration.sync_routes import (
+    SyncCallHandler,
+    register_sync_routes,
+    handle_ws_sync_response,
+    register_exit_barrier,
+    DEFAULT_SYNC_TIMEOUT_SECONDS,
+)
+from simple_a2a_registry.orchestration.validation import (
+    validate_output,
+)
 
 __all__ = [
     # Agent Runtime Contract
@@ -126,6 +141,9 @@ __all__ = [
     "WorkspaceError",
     "Dispatcher",
     "DispatcherConfig",
+    "build_envelope",
+    "build_envelope_from_dtm",
+    "check_ingress_security_fence",
     "AnomalyScanner",
     "SlaCalculator",
     "SlaUpdater",
@@ -163,4 +181,12 @@ __all__ = [
     "SharedWorkspaceManager",
     "SharedWorkspaceHandler",
     "register_shared_workspace_routes",
+    # T3: SYNC_CALL 同步路由
+    "SyncCallHandler",
+    "register_sync_routes",
+    "handle_ws_sync_response",
+    "register_exit_barrier",
+    "DEFAULT_SYNC_TIMEOUT_SECONDS",
+    # T4: OutputContract 校验器
+    "validate_output",
 ]

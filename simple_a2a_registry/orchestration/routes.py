@@ -40,6 +40,12 @@ from simple_a2a_registry.orchestration.models import (
 from simple_a2a_registry.orchestration.state_machine import (
     InvalidTransitionError,
 )
+from simple_a2a_registry.orchestration.validation import (
+    validate_output,
+)
+from simple_a2a_registry.orchestration.contract import (
+    OutputContract,
+)
 
 logger = logging.getLogger("a2a_registry.orchestration.routes")
 
@@ -622,6 +628,56 @@ class OrchestrationHandler:
                 result_str = json.dumps(result)
             else:
                 result_str = str(result)
+
+        # ── OutputContract validation (T4) ──────────────────────────────
+        validation_error: Optional[str] = None
+        output_contract_raw = body.get("output_contract")
+        if output_contract_raw is not None:
+            # Build OutputContract from request body
+            if isinstance(output_contract_raw, dict):
+                oc = OutputContract.from_dict(output_contract_raw)
+            else:
+                oc = OutputContract(required_fields=[])
+
+            # Determine what to validate: prefer parsed result, fall back to raw
+            output_to_check = result if isinstance(result, dict) else (json.loads(result_str) if result_str else None)
+            if output_to_check is not None and isinstance(output_to_check, dict):
+                valid, err = validate_output(output_to_check, oc)
+                if not valid:
+                    validation_error = err
+                    logger.warning(
+                        "OutputContract validation FAILED for task '%s': %s",
+                        task_id, err,
+                    )
+
+        # ── Handle validation failure → fail task ─────────────────────
+        if validation_error is not None:
+            try:
+                # Use validation error as the task result (maps to last_failure_error)
+                task = self.store.update_task_status(
+                    task_id,
+                    TaskStatus.FAILED.value,
+                    claim_lock=claim_lock,
+                    result=validation_error,
+                    summary=summary or validation_error,
+                    metadata=metadata,
+                )
+            except (InvalidTransitionError, PermissionError, ValueError) as e:
+                return _json_error(400, "status_error", str(e))
+
+            # Broadcast
+            if self._broadcast_fn:
+                task_data = self.store.get_task(task_id)
+                await self._broadcast_fn("status_changed", _task_to_detail(task_data))
+
+            resp = web.json_response({
+                "task_id": task_id,
+                "status": TaskStatus.FAILED.value,
+                "failure_reason": validation_error,
+            })
+            for key, val in ape_complete_headers.items():
+                resp.headers[key] = val
+            return resp
 
         try:
             task = self.store.update_task_status(
