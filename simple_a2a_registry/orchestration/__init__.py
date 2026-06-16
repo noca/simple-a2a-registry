@@ -44,6 +44,8 @@ from simple_a2a_registry.orchestration.envelope import (
     build_envelope,
     build_envelope_from_dtm,
     check_ingress_security_fence,
+    set_guardrail_engine,
+    get_guardrail_engine,
 )
 from simple_a2a_registry.orchestration.swarm import (
     SwarmWorkerSpec,
@@ -144,6 +146,8 @@ __all__ = [
     "build_envelope",
     "build_envelope_from_dtm",
     "check_ingress_security_fence",
+    "set_guardrail_engine",
+    "get_guardrail_engine",
     "AnomalyScanner",
     "SlaCalculator",
     "SlaUpdater",

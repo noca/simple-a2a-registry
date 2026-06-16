@@ -100,8 +100,15 @@ from simple_a2a_registry.security import (
     APEConfig,
     AuthorizationPolicyEngine,
     DelegatedTokenManager,
+    GuardrailEngine,
     ProvenanceTracker,
     SecurityEventStore,
+)
+from simple_a2a_registry.orchestration.envelope import (
+    set_guardrail_engine,
+)
+from simple_a2a_registry.orchestration.sync_routes import (
+    register_exit_barrier,
 )
 from simple_a2a_registry.events import EventBus, SSEEventHandler, EventTypes
 from simple_a2a_registry.registry_handler import (
@@ -2193,6 +2200,39 @@ def create_app(
             "Security harness initialised: event_store + PT + DTM + APE (mode=%s) wired to OrchestrationHandler",
             config.security_harness.mode,
         )
+
+        # ── T6/T7: GuardrailEngine — inbound injection detection + outbound sanitisation ──
+        guardrail_engine = GuardrailEngine(
+            event_store=event_store,
+            mode=config.security_harness.mode,
+        )
+        # Wire into envelope module so check_ingress_security_fence uses real logic
+        set_guardrail_engine(guardrail_engine)
+        logger.info(
+            "GuardrailEngine wired to envelope module (mode=%s)",
+            config.security_harness.mode,
+        )
+
+        # Register output sanitisation as a SYNC_CALL exit barrier
+        async def _guardrail_sanitise_exit_barrier(
+            _request: web.Request,
+            _agent_id: str,
+            _envelope: Any,
+            response_data: dict,
+        ) -> Optional[web.Response]:
+            """Sanitise sync_call response data before returning to caller."""
+            if response_data.get("result") and isinstance(response_data["result"], dict):
+                sanitised = guardrail_engine.sanitize_output(
+                    output=response_data["result"],
+                    actor=_request.get("agent_id", "anonymous"),
+                    tenant=_envelope.tenant_id if hasattr(_envelope, "tenant_id") else "",
+                    task_id=_envelope.task_id if hasattr(_envelope, "task_id") else None,
+                )
+                response_data["result"] = sanitised
+            return None  # Never blocks — sanitisation is non-blocking
+
+        register_exit_barrier(_guardrail_sanitise_exit_barrier)
+        logger.info("GuardrailEngine exit barrier (sanitise) registered on SYNC_CALL")
 
     app = web.Application(middlewares=[
         cors_middleware_factory(

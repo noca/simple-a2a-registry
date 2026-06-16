@@ -44,6 +44,7 @@ from simple_a2a_registry.orchestration.validation import (
     validate_output,
 )
 from simple_a2a_registry.orchestration.contract import (
+    InteractionMode,
     OutputContract,
 )
 
@@ -245,6 +246,12 @@ class OrchestrationHandler:
             return _json_error(
                 400, "validation_error", "Missing required 'title' field"
             )
+
+        # ── Backward compatibility: default interaction_mode to TASK ──
+        # Old A2A V2 clients may not send interaction_mode.
+        # D2 decision: absent → TASK.  Fill default BEFORE APE validation (§13).
+        if body.get("interaction_mode") is None:
+            body["interaction_mode"] = InteractionMode.TASK.value
 
         # Normalize priority: allow int (5) or string ("normal"→0, "low"→1, "high"→10)
         raw_priority = body.get("priority", 0)

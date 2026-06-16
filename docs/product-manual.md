@@ -1318,6 +1318,41 @@ curl -s -X POST http://localhost:8321/v2/tasks/t_xxx/comment \
   -d '{"author": "coder-1", "body": "进度: 50% - 完成数据库设计"}'
 ```
 
+### 9.8 交互模式 (interaction_mode)
+
+创建任务时可通过 `interaction_mode` 字段指定交互模式，标识任务在 Agent Runtime Contract 中的治理方式。
+
+**支持的模式：**
+
+| 模式 | 值 | 说明 | 状态机 |
+|------|-----|------|--------|
+| **TASK** | `"task"` | 异步任务，基于 Claim 的编排任务（默认） | ✅ 经过 Kanban 状态机 |
+| **SYNC_CALL** | `"sync_call"` | 同步调用，直接通过 WS 投递，不创建状态机任务 | ❌ 绕过后端状态机 |
+| **JOB** | `"job"` | 项目级任务，可分解为子任务 DAG（预留） | ✅ 经过 Kanban 状态机 |
+
+#### 向后兼容
+
+旧 A2A V2 客户端创建请求若未声明 `interaction_mode`，系统**默认按 TASK 处理**（D2 决议）。默认值在 APE 安全检查之前填充，确保旧客户端行为一致。
+
+```bash
+# 以下两个等价（v2/tasks 默认 interaction_mode=task）
+curl -s -X POST http://localhost:8321/v2/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"title": "默认交互模式的任务"}'
+
+curl -s -X POST http://localhost:8321/v2/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"title": "显式指定模式的任务", "interaction_mode": "task"}'
+```
+
+#### 适用场景
+
+| 场景 | 推荐模式 | 原因 |
+|------|---------|------|
+| 常规 Kanban 编排任务 | TASK | 需要状态机、依赖链、重试、HITL |
+| 实时 Agent 技能调用 | SYNC_CALL | 低延迟、无状态、不关心任务编排 |
+| 多子任务分解 | JOB | 项目级任务，可拆分为子 DAG |
+
 ---
 
 ## 10. 安全管理

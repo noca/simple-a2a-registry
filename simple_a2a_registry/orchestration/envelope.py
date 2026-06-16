@@ -186,28 +186,71 @@ def build_envelope_from_dtm(
 # Ingress security fence hook (placeholder — implemented in T6)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Module-level guardrail engine reference (wired by create_app in server.py)
+# ---------------------------------------------------------------------------
+
+_guardrail_engine: Optional[Any] = None
+
+
+def set_guardrail_engine(engine: Any) -> None:
+    """Set the module-level GuardrailEngine reference.
+
+    Called by ``server.py create_app`` when the security harness is enabled.
+    All subsequent ``check_ingress_security_fence`` calls use this engine
+    instead of the placeholder.
+    """
+    global _guardrail_engine  # noqa: PLW0603
+    _guardrail_engine = engine
+    logger.info("GuardrailEngine wired into envelope module (T7)")
+
+
+def get_guardrail_engine() -> Optional[Any]:
+    """Return the current module-level GuardrailEngine reference."""
+    return _guardrail_engine
+
+
+# ---------------------------------------------------------------------------
+# Ingress security fence — powered by GuardrailEngine when wired
+# ---------------------------------------------------------------------------
+
+
 async def check_ingress_security_fence(
     envelope: TaskEnvelope,
 ) -> bool:
     """Ingress security fence — invoked before sending the envelope via WS.
 
-    This is a **placeholder** that always returns ``True``.  The real
-    implementation is planned for T6 (SCN-04) and shall verify:
+    When a ``GuardrailEngine`` has been wired (via ``set_guardrail_engine``),
+    this runs ``check_inbound`` against the envelope input.  In enforce mode,
+    a detected injection pattern returns ``False`` (block dispatch).  In warn
+    mode, the dispatch proceeds but the warning header is not attached here
+    (the caller is responsible for attaching response headers).
 
-    - Source agent signature on the envelope
-    - Envelope integrity (hash chain)
-    - Scope boundary compliance
-
-    Args:
-        envelope: The ``TaskEnvelope`` about to be sent.
+    When **no** GuardrailEngine is wired (legacy / dev mode), always returns
+    ``True`` (backward-compatible placeholder behaviour).
 
     Returns:
-        ``True`` if the fence passes (allow), ``False`` if the fence
-        rejects (the caller should abort the dispatch).
+        ``True`` if the fence passes (allow dispatch), ``False`` to block.
     """
-    # T6 TODO: implement real security fence verification
-    _ = envelope  # unused in placeholder
-    logger.debug("Ingress security fence: ALLOW (placeholder — T6)")
+    engine = _guardrail_engine
+    if engine is None:
+        logger.debug("Ingress security fence: ALLOW (no guardrail engine wired)")
+        return True
+
+    result = engine.check_inbound(
+        input_data=envelope.input,
+        actor=envelope.security_context.effective_scope if envelope.security_context else "anonymous",
+        tenant=envelope.tenant_id,
+        task_id=envelope.task_id,
+    )
+    if not result.allowed:
+        logger.warning(
+            "Ingress security fence: DENY (task=%s, reason=%s)",
+            envelope.task_id, result.reason,
+        )
+        return False
+
+    logger.debug("Ingress security fence: ALLOW (task=%s)", envelope.task_id)
     return True
 
 

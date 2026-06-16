@@ -397,6 +397,104 @@ GET /v1/tasks/{task_id}
 
 ---
 
+## 同步调用端点 (SYNC_CALL)
+
+同步调用提供直接的 Agent 技能调用，**不经过状态机**。调用方通过 `POST /v2/sync-call` 发送请求，通过 Agent 的 WS 连接直达目标 Agent，同步等待结果（默认 3s 超时）。
+
+适用于**低延迟、无状态**的交互场景：
+- Agent 技能实时调用（如翻译、摘要、代码审查）
+- 不需要任务编排、依赖链、重试或 HITL
+- 调用方希望以同步方式获得即时结果
+
+### 端点
+
+| 方法 | 路径 | 说明 | 认证 | Scope |
+|------|------|------|------|-------|
+| POST | `/v2/sync-call` | 同步调用 Agent 技能 | ✅ | `task:write` |
+
+### 创建同步调用
+
+```http
+POST /v2/sync-call
+Content-Type: application/json
+```
+
+**请求体：**
+
+```json
+{
+  "agent_id": "target-agent-id",
+  "skill": "translate",
+  "input": {
+    "text": "Hello world",
+    "target_language": "zh"
+  },
+  "interaction_mode": "sync_call",
+  "output_contract": {
+    "required_fields": ["translated_text"]
+  },
+  "timeout_seconds": 5.0,
+  "tenant_id": "team-a"
+}
+```
+
+**字段说明：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `agent_id` | string | 是 | 目标 Agent ID（必须通过 WS 连接） |
+| `skill` | string | 是 | 要调用的 Agent 技能名称 |
+| `input` | object | 否 | 输入参数 |
+| `interaction_mode` | string | 否 | 固定为 `"sync_call"`（系统自动设置） |
+| `output_contract` | object | 否 | 预期输出结构 |
+| `output_contract.required_fields` | string[] | 否 | 输出中必须包含的字段列表 |
+| `timeout_seconds` | number | 否 | 超时时间（默认 3s，最大值 30s） |
+| `tenant_id` | string | 否 | 租户命名空间 |
+
+**前置条件：** Agent 必须已通过 WebSocket 连接（否则返回 503）。
+
+**认证：** ✅ `task:write`
+
+**成功响应：** `200 OK`
+
+```json
+{
+  "status": "success",
+  "result": {
+    "translated_text": "你好世界"
+  },
+  "request_id": "sync_a1b2c3d4e5f6g7h8",
+  "duration_ms": 845
+}
+```
+
+**超时响应：** `504 Gateway Timeout`
+
+```json
+{
+  "error": "sync_call_timeout",
+  "detail": "Agent 'target-agent-id' did not respond within 5.0s",
+  "request_id": "sync_a1b2c3d4e5f6g7h8"
+}
+```
+
+**Agent 未连接：** `503 Service Unavailable`
+
+```json
+{
+  "error": "agent_not_connected",
+  "detail": "Agent 'target-agent-id' is not connected via WebSocket"
+}
+```
+
+**安全防护：**
+
+- **入口安全围栏**：请求经过 APE 策略检查和 GuardrailEngine 注入检测
+- **出口安全围栏**：返回数据经过 GuardrailEngine 敏感信息脱敏（密钥、Token 等自动替换为 `***`）
+- **OutputContract 校验**：如指定了 `output_contract`，系统在返回前校验输出字段完整性
+
+---
+
 ## Swarm 多 Agent 拓扑 API
 
 Swarm 系统在 V2 编排引擎之上构建多 Agent 协作工作流。复用相同的状态机、依赖链和存储层。
