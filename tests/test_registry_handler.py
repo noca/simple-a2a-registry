@@ -62,10 +62,11 @@ def _reset_rate_limiter() -> None:
 
 
 class TestWSMessageRouter:
-    def test_router_has_8_default_handlers(self, router: WSMessageRouter):
+    def test_router_has_10_default_handlers(self, router: WSMessageRouter):
         expected = {
             "ping", "task_ack", "task_progress", "task_complete",
             "task_fail", "task_result", "state_sync", "close",
+            "sync_call_response", "job_subtask_result",
         }
         assert set(router._handlers.keys()) == expected
 

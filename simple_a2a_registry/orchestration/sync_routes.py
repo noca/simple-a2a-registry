@@ -23,7 +23,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple, TYPE_CHECKING
 
 from aiohttp import web
 
@@ -38,7 +38,6 @@ from simple_a2a_registry.orchestration.contract import (
     SecurityContext,
     TaskEnvelope,
 )
-from simple_a2a_registry.registry_handler import WSContext
 from simple_a2a_registry.security.ape import (
     AuthorizationPolicyEngine,
     CallerIdentity,
@@ -47,6 +46,9 @@ from simple_a2a_registry.security.ape import (
 from simple_a2a_registry.security.events import SecurityEventStore, SecurityEventType
 from simple_a2a_registry.security.pt import ProvenanceTracker
 from simple_a2a_registry.store import Store as RegistryStore
+
+if TYPE_CHECKING:
+    from simple_a2a_registry.registry_handler import WSContext
 
 logger = logging.getLogger("a2a_registry.orchestration.sync_routes")
 
