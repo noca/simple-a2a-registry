@@ -44,6 +44,7 @@ from simple_a2a_registry.client import (
     RegistryError,
     NotFoundError,
 )
+from simple_a2a_registry.orchestration.contract import InteractionMode
 
 logger = logging.getLogger("a2a.coder-agent")
 
@@ -462,42 +463,90 @@ async def _execute_hermes_cli(query: str) -> Dict[str, Any]:
 
 
 async def process_ws_task(client: A2AClient, data: Dict[str, Any]) -> None:
-    """Process a task received via WebSocket, using A2AClient SDK for reporting.
+    """Process a task received via WebSocket, parsing TaskEnvelope format.
 
-    Lifecycle:
-      1. Send task_progress (working)  → client.async_report_progress()
-      2. Run Hermes CLI
-      3. Send task_result             → client.async_report_result()
+    Supports both legacy flat format (``{type: "task", id: "...", body: "..."}``)
+    and the TaskEnvelope format (``{task_id: "...", interaction_mode: "...", input: {...}}``).
+
+    Lifecycle by interaction mode:
+
+    - **TASK** (default): Send progress → run Hermes CLI → send result.
+    - **SYNC_CALL**: Run Hermes CLI directly → send sync_call_response
+      (no state machine, no progress reporting, deadline-driven).
+    - **JOB**: Placeholder — acknowledged but delegated to T6 for full
+      sub-task DAG management (SCN-04).
     """
-    task_id = data.get("id", "")
-    query = (
-        data.get("body") or data.get("query") or data.get("title") or ""
-    ).strip()
-    session_id = data.get("sessionId", "")
+    # ── Parse envelope or legacy format ──
+    is_envelope = bool(data.get("task_id")) and "interaction_mode" in data
+    interaction_mode_raw = data.get("interaction_mode", "task")
+    try:
+        interaction_mode = InteractionMode(interaction_mode_raw)
+    except ValueError:
+        interaction_mode = InteractionMode.TASK
+
+    if is_envelope:
+        task_id = data.get("task_id", "")
+        inp = data.get("input", {})
+        query = (
+            inp.get("body") or inp.get("query") or inp.get("title", "")
+        ).strip()
+        session_id = (inp.get("session_id") or inp.get("sessionId") or "")
+    else:
+        task_id = data.get("id", "")
+        query = (
+            data.get("body") or data.get("query") or data.get("title") or ""
+        ).strip()
+        session_id = data.get("sessionId", "")
 
     if not task_id or not query:
         logger.warning("Invalid WS task message: missing id or query: %s", data)
         return
 
-    logger.info("WS task %s: starting (query=%s)", task_id, query[:80])
+    logger.info(
+        "WS task %s: starting (mode=%s, query=%s)",
+        task_id, interaction_mode.value, query[:80],
+    )
 
-    # ── 1. Report progress (working) ──
+    # ── SYNC_CALL: direct execution, no state machine ──
+    if interaction_mode is InteractionMode.SYNC_CALL:
+        result = await _execute_hermes_cli(query)
+        if result["success"]:
+            await client.async_report_result(
+                task_id,
+                {"text": result["output"], "skill": result.get("skill", "")},
+            )
+        else:
+            await client.async_report_result(
+                task_id, {"text": result["error"]}, error=result["error"],
+            )
+        logger.info(
+            "SYNC_CALL task %s %s (time=%ss)",
+            task_id, "completed" if result["success"] else "failed",
+            result["elapsed"],
+        )
+        return
+
+    # ── JOB: placeholder for T6 ──
+    if interaction_mode is InteractionMode.JOB:
+        logger.info(
+            "JOB task %s received (placeholder — T6 will handle sub-task DAG)",
+            task_id,
+        )
+        await client.async_report_result(
+            task_id,
+            {"text": f"(JOB mode stub — task {task_id} acknowledged, full DAG in T6)"},
+        )
+        return
+
+    # ── TASK (default): full lifecycle with progress reporting ──
     await client.async_report_progress(task_id, status="working")
 
-    # ── 2. Set up cancellation tracking ──
     cancel_event = asyncio.Event()
     _cancel_events[task_id] = cancel_event
     started_at = time.time()
 
-    # ── 3. Run Hermes CLI ──
     result = await _execute_hermes_cli(query)
 
-    # ── 4. Check if externally cancelled ──
-    # Note: WS task_cancel from the server is not dispatched by the SDK;
-    # external cancellation is handled via the HTTP /tasks/{id}/cancel endpoint
-    # which sets the cancel event (if registered in _cancel_events).
-    # The Hermes subprocess from _execute_hermes_cli is already cleaned up
-    # inside that function, so we just check the event and report accordingly.
     if cancel_event.is_set():
         await client.async_report_result(
             task_id,
@@ -525,7 +574,6 @@ async def process_ws_task(client: A2AClient, data: Dict[str, Any]) -> None:
         )
         logger.warning("WS task %s failed (%s)", task_id, result["error"])
 
-    # Clean up
     _cancel_events.pop(task_id, None)
 
 

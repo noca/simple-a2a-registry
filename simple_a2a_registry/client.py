@@ -1406,13 +1406,20 @@ class A2AClient:
                         logger.debug("Received pong")
                         continue
 
-                    if msg_type == "task":
+                    # Recognise both legacy flat format (type:"task") and
+                    # TaskEnvelope format (has task_id + interaction_mode).
+                    # The envelope format is sent by all three dispatch paths
+                    # (V1 HTTP, V2 Dispatcher, reconnection pending dispatch).
+                    is_envelope = bool(data.get("task_id")) and "interaction_mode" in data
+                    if msg_type == "task" or is_envelope:
                         task_payload: Dict[str, Any] = dict(data)
+                        task_label = data.get("task_id") or data.get("id", "?")
                         if self.dispatch_handler:
                             logger.info(
-                                "Received WS task '%s' for agent '%s'",
-                                data.get("id", "?"),
+                                "Received WS task '%s' for agent '%s'%s",
+                                task_label,
                                 agent_id,
+                                f" (mode={data.get('interaction_mode','')})" if is_envelope else "",
                             )
                             try:
                                 result = self.dispatch_handler(task_payload)
@@ -1422,13 +1429,13 @@ class A2AClient:
                             except Exception as e:
                                 logger.exception(
                                     "Dispatch handler failed for task '%s': %s",
-                                    data.get("id", "?"),
+                                    task_label,
                                     e,
                                 )
                         else:
                             logger.debug(
                                 "No dispatch_handler set; dropping task '%s'",
-                                data.get("id", "?"),
+                                task_label,
                             )
 
                     elif msg_type == "error":

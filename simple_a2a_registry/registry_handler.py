@@ -867,6 +867,12 @@ def create_default_router(
     Returns:
         A fully configured router.
     """
+    # Lazy import to break circular dependency:
+    # orchestration.sync_routes → registry_handler → orchestration.sync_routes
+    from simple_a2a_registry.orchestration.sync_routes import (  # noqa: PLC0415
+        handle_ws_sync_response,
+    )
+
     router = WSMessageRouter()
 
     router.register("ping", handle_ping)
