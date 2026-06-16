@@ -72,6 +72,9 @@ class AgentSkill:
     security_requirements: Optional[List[SecurityRequirement]] = None
     # Project extension: URI scheme routing (not in a2a.proto)
     uri_schemes: List[str] = field(default_factory=list)
+    # Agent Runtime Contract extensions: schema declarations
+    input_schema: Optional[Dict[str, Any]] = None
+    output_schema: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return _dataclass_to_dict(self)
@@ -406,6 +409,8 @@ def _dict_to_skill(d: Dict) -> AgentSkill:
         security_requirements=_dict_list_to_security_requirements(
             d.get("security_requirements")
         ),
+        input_schema=d.get("input_schema"),
+        output_schema=d.get("output_schema"),
     )
 
 

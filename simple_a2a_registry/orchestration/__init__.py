@@ -1,5 +1,11 @@
 """Orchestration Engine — task lifecycle management with SQLite-backed Kanban."""
 
+from simple_a2a_registry.orchestration.contract import (
+    InteractionMode,
+    OutputContract,
+    SecurityContext,
+    TaskEnvelope,
+)
 from simple_a2a_registry.orchestration.models import (
     Task,
     TaskComment,
@@ -92,6 +98,12 @@ from simple_a2a_registry.orchestration.shared_workspace_routes import (
 )
 
 __all__ = [
+    # Agent Runtime Contract
+    "InteractionMode",
+    "OutputContract",
+    "SecurityContext",
+    "TaskEnvelope",
+    # Core models
     "Task",
     "TaskRun",
     "TaskComment",
